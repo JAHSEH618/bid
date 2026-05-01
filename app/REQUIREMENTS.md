@@ -1,7 +1,11 @@
 # 投标技术方案生成器 · Web App 需求文档
 
-> **版本**:v0.9(待评审) **日期**:2026-05-02 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
+> **版本**:v0.10(待评审) **日期**:2026-05-02 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
 > **工作流内核**:见同目录上级的《技术方案自动生成工作流 — Dify 搭建指南(含人工审核).md》(以下简称 **v10 设计文档**),本需求文档**不重复**其中工作流逻辑细节。
+
+**v0.10 变更**(相对 v0.9,2 处中间态澄清):
+- **FR-4.7 章节状态扩展**:加 `reviewing` / `retrying` 两个秒级中间态,防双击/并发重复提交。前端看到这两个状态应禁用按钮。
+- §8 数据模型 Chapter 行同步状态枚举。
 
 **v0.9 变更**(相对 v0.8,1 处状态机说明):
 - **FR-1.2 状态机加 queued 旁路**:`/start` 命中并发上限 → 项目进入 queued,等 FIFO 唤醒;审核/重试**不**进 queued,503 重试。
@@ -162,7 +166,9 @@
 - FR-4.4 同一章节的历史版本(每次重写)可查看 diff(本期最简实现:tab 切换历次版本)。
 - FR-4.5 每次审核动作记录 `ReviewEvent`(reviewer_id / decision / feedback / ts),便于审计"谁审了哪章"。
 - FR-4.6 任何登录用户均可审核任何章节(团队共享池);章节侧栏显示"上次审核人"。
-- FR-4.7 **章节状态扩展为**:`pending` / `generating` / `awaiting_review` / `approved` / `skipped` / **`failed`**(D4)。
+- FR-4.7 **章节状态扩展为**:`pending` / `generating` / `awaiting_review` / `reviewing` / `approved` / `skipped` / **`failed`** / `retrying`(D4)。
+  - `reviewing`:用户在 P5 提交审核到 worker 接管之间的短暂中间态(秒级);防双击/并发重复提交。前端看到该状态应 disable 审核按钮显示"处理中"。
+  - `retrying`:用户对 failed 章节点 /retry 到 worker 接管之间的短暂中间态(秒级);同上,防双击。
   - `failed` 章节在 P5 红标显示并暴露"重试"按钮。
   - 重试动作:重置 `retry_count=0` + 清空当前章节的本轮 ChapterVersion → 重新触发 LangGraph 该章节生成。
   - 任何登录用户都可触发重试。
@@ -368,7 +374,7 @@
 | **Project** | `id` / `name` / `description` / `status` / `created_by` / `api_key_owner`(启动者 user_id,审计用) / `encrypted_api_key_snapshot`(启动时拷贝的 AES-GCM 密文,运行时解密 LLM 调用用) / `created_at` / `dir_path` | 团队共享池,任何登录用户可见;FR-7.5 双重快照 |
 | **Document** | `id` / `project_id` / `kind`(`tech_spec`/`scoring`/`template`)/ `original_filename` / `markdown_path` / `file_size`(字节) / `extract_error`(可空) / `created_at` | 上传的原始文件 + 抽取后 md;文件类型限于 docx/doc/md/txt;`file_size` 用于日上传配额聚合(NFR-4 单用户日 500MB) |
 | **Run** | `id` / `project_id` / `langgraph_thread_id` / `started_at` / `finished_at` / `status` | 一次完整工作流执行 |
-| **Chapter** | `id` / `run_id` / `index` / `title` / `summary` / `key_points` / `target_pages` / `final_text` / `status`(`pending`/`generating`/`awaiting_review`/`approved`/`skipped`/**`failed`**)| 提纲解析后落库;`failed` 见 FR-4.7 |
+| **Chapter** | `id` / `run_id` / `index` / `title` / `summary` / `key_points` / `target_pages` / `final_text` / `status`(`pending`/`generating`/`awaiting_review`/`reviewing`/`approved`/`skipped`/**`failed`**/`retrying`)| 提纲解析后落库;`failed` 见 FR-4.7;`reviewing`/`retrying` 见 FR-4.7 中间态说明 |
 | **ChapterVersion** | `id` / `chapter_id` / `version` / `body_markdown` / `feedback_in` / `decision` / `created_at` | 每次重写一条记录,保留历史 |
 | **ReviewEvent** | `id` / `chapter_id` / `reviewer_id` / `decision`(含 `retry_failed`)/ `feedback_text` / `created_at` | 审计:谁审了哪章 / 谁触发了 failed 重试 |
 | **TokenUsage** | `id` / `user_id` / `project_id` / `run_id` / `model` / `prompt_tokens` / `completion_tokens` / `created_at` | 计费/统计 |

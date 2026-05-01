@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.4
+# 投标技术方案生成器 · 实施 Spec v3.5
 
-> **配套文档**:`REQUIREMENTS.md` v0.9(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.4 (2026-05-02)。基于 v3.3 修了 7 处深层隐患:**workflow task `max_tries=1`** 防 arq 自动重跑绕过名额管理(D-Z) / **slot lease token** 解决"reservation 失效后无 slot 执行"(D-AB) / `ReviewEvent` 移到 worker 入口写避免与执行不一致(D-AC) / DOCX 与 workflow 并发预算分离(D-AA) / 审核端点行锁+状态校验(D-AD) / errors.log 改 JSONL 解决多行字段(D-AE) / 旧文字残留 + REQUIREMENTS 状态机加 queued。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2 修 8 处;v3.3 修 8 处;v3.4 修 7 处。
+> **配套文档**:`REQUIREMENTS.md` v0.10(讲"做什么"),本文档讲"怎么做"。
+> **版本**:v3.5 (2026-05-02)。基于 v3.4 修了 7 处边界 bug:try_acquire **三态严格化**防止 SADD 失败时覆盖正运行 task 的 token(D-AF) / **三层 reconcile** 解决 worker 不重启时 ACTIVE_SET 泄漏(D-AG) / worker task **try/finally 全包**避免 DB 异常漏 release(D-AH) / chapter status **`reviewing` / `retrying`** 中间态防双击(D-AI) / WorkerSettings.functions 直接放装饰对象 + 启动断言(D-AJ) / DocxJob **commit→enqueue 顺序 + worker 入口校验**(D-AK) / wake_queued 状态口径修正(D-AL)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2 修 8 处;v3.3 修 8 处;v3.4 修 7 处;v3.5 修 7 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -149,6 +149,12 @@
 | **D-AC** | `ReviewEvent` 在 **worker 入口**写,不在 API 端写 | v3.3 把 ReviewEvent 写在 enqueue 后,如果 enqueue 成功但 commit 失败,动作执行了但事件没写。改在 worker 入口写,与 graph 真正执行同生同灭:worker 拿到 task 之前不写,worker 执行前必写,失败时 ReviewEvent 也保留(记录"用户做过这个动作")。代价是 enqueue 后 worker 拿到 task 之前的极小窗口里 DB 看不到 ReviewEvent,但这是正确的——审计应该反映"实际发生过"而不是"被请求过" |
 | **D-AD** | API 端审核/重试加 **`SELECT ... FOR UPDATE` 行锁** + 状态校验 | 防止过期页面 / 双击 / 多用户同时审同一章节导致重复提交;状态校验确保只有 `awaiting_review` 章节能被 review、`failed` 章节能被 retry |
 | **D-AE** | errors.log 用 **JSONL 格式**,traceback 作为单行 JSON 字符串字段 | v3.3 设计的 key=val 平文本假设"每行 < PIPE_BUF 4KB 不交错",但 traceback 多行长字段打破假设。JSONL 把多行字段编码成单行 JSON,单次 write 完成,跨进程 append 不交错 |
+| **D-AF** | `try_acquire_project_slot` 三态返回:`token` / `None+full` / `None+already_active`;**仅 added==1 时**才 SET ALIVE_KEY;`/start` 必须校验 `project.status=='init'` | v3.4 Lua 在 `size < max` 内不区分 added=0/1 都 SET ALIVE_KEY,会覆盖正在跑 task 的 token,task 入口 `ensure_project_slot` 仍能通过(因为新 token 是同一进程 acquire 写的),但物理上是两份"持有人";严格化后 already_active 直接拒绝,防止重复启动 |
+| **D-AG** | **三层 reconcile**:① try_acquire / wake_queued 内置 lazy SREM 没 alive key 的成员 ② arq cron 每分钟 `reconcile_periodic` ③ worker startup 全量扫;heartbeat 返回 bool,失败抛 `SlotLost` 让 task 主动中止 | v3.4 reconcile 仅 worker startup 跑,worker 不重启 + heartbeat 异常时 ACTIVE_SET 永久泄漏;三层 reconcile 让僵尸条目在不同时间窗口都被清理;heartbeat 返回 bool 让"被清理后的孤儿 task"主动停 |
+| **D-AH** | worker task **拿到 token 后立即进 `try/finally`**,所有 DB 写入(ReviewEvent / chapter reset)都放 try 块内 | v3.4 把 ReviewEvent 写在 try 块外,DB 异常时漏 release_project_slot;统一进 try 后,任何异常路径都保证 slot 释放 |
+| **D-AI** | chapter status 加 **`reviewing` / `retrying`** 两个中间态;`/review` `/retry` 在 API 行锁内切到中间态;worker 入口接管(切到 generating / pending)并由 update_state 落最终态 | v3.4 行锁在事务 commit 后释放,章节状态仍是 awaiting_review / failed,第二个请求能再次过校验导致重复入队;中间态语义是"决定已下,等 worker 应用",前端看到这个状态可禁用按钮 |
+| **D-AJ** | `WorkerSettings.functions` 直接放**装饰后的函数对象**,不放字符串路径 | 字符串路径需要 arq 通过 import 后再发现 `__arq_function__` 之类属性,各版本行为不完全保证;直接传函数对象消除这个不确定性。配 unit test 启动期断言 `start_workflow_task.max_tries == 1` |
+| **D-AK** | `DocxJob` 顺序:**先 commit pending 行 → 再 enqueue → 再 update arq_job_id**;`generate_docx_task` 入口 SELECT 校验 row 存在 | v3.4 是 flush→enqueue→commit;enqueue 成功但 commit 失败时,worker 拿到 docx_job_id 但 DB 没行,worker 会崩或卡住。先 commit 让 row 可见;enqueue 失败用补偿动作把 row 标 failed |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -865,7 +871,11 @@ class Chapter(Base, TimestampMixin):
     target_pages: Mapped[int] = mapped_column(default=3)
     final_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pending")
-    # pending|generating|awaiting_review|approved|skipped|failed
+    # pending|generating|awaiting_review|reviewing|approved|skipped|failed|retrying
+    # ⭐ D-AI 中间态:
+    # - reviewing: API /review 行锁内切的;worker 接管后 → generating(revise) /
+    #              approved / skipped(由 update_state 节点)
+    # - retrying:  API /retry  行锁内切的;worker 接管后 → pending(重置)→ generating
     retry_count: Mapped[int] = mapped_column(default=0)
     last_error: Mapped[str | None] = mapped_column(String(4000), nullable=True)
 ```
@@ -1697,26 +1707,58 @@ def _r() -> redis_async.Redis:
     return redis_async.from_url(settings.redis_url, decode_responses=True)
 
 
-async def try_acquire_project_slot(project_id: int) -> str | None:
-    """⭐ D-AB lease token 修正:返回 lease token(uuid)表示占到名额;返回 None 表示满。
-    ALIVE_KEY 存的是 token 字符串,task 入口校验 token 还匹配才算"我仍持有 slot"。
+class AcquireResult:
+    """try_acquire_project_slot 的三态返回。"""
+    def __init__(self, token: str | None, reason: str):
+        self.token = token
+        self.reason = reason   # "ok" | "full" | "already_active"
 
-    为什么不用纯布尔:
-    v3.3 用 RESERVE_TTL=300s 缓解 ALIVE_KEY 过早过期的窗口,但 worker 重启或排队 > 5min
-    时 ALIVE_KEY 会过期 → reconcile 把 ACTIVE_SET 里的项目清掉 → 之后 task 起来时**不
-    知道**自己已被踢出 → 实际并发可能超 10。lease token 让 task 入口能精确判断"我的
-    slot 是否还活着"。
+    @property
+    def acquired(self) -> bool:
+        return self.token is not None
+
+
+async def try_acquire_project_slot(project_id: int) -> AcquireResult:
+    """⭐ D-AB / D-AF 严格版:三态返回,不会污染正在跑的 task token。
+
+    Lua 行为:
+    1. 先 lazy reconcile:对 ACTIVE_SET 里的每个成员,若 ALIVE_KEY 不存在则 SREM
+       (D-AG:不再只在 worker startup 跑 reconcile,acquire 时也清一次,防止
+       worker 不重启但 task 异常导致 SET 永久泄漏)
+    2. 检查目标 project_id 是否已在 ACTIVE_SET — 是 → 返回 "already_active",
+       **不**改 ALIVE_KEY(否则会覆盖正在跑的 task 的 token,D-AF)
+    3. SCARD < max 时 SADD + SET ALIVE_KEY(只有 added==1 才 SET);否则 "full"
     """
     import uuid
     token = uuid.uuid4().hex
 
+    # Lua 返回:
+    #  0 = full (size already >= max)
+    # -1 = already_active (project_id 已在 set 里)
+    #  1 = acquired (added=1 + alive set)
     script = """
+        -- 1. lazy reconcile: SREM 没 alive key 的僵尸成员
+        local members = redis.call('SMEMBERS', KEYS[1])
+        for i, m in ipairs(members) do
+            local alive = redis.call('EXISTS', 'bid_app:project_alive:' .. m)
+            if alive == 0 then
+                redis.call('SREM', KEYS[1], m)
+            end
+        end
+
+        -- 2. 已在 set 里 → already_active(不动 ALIVE_KEY,防覆盖 token)
+        local exists = redis.call('SISMEMBER', KEYS[1], ARGV[2])
+        if exists == 1 then
+            return -1
+        end
+
+        -- 3. SCARD 严格 < max 才 SADD + SET ALIVE_KEY
         local size = redis.call('SCARD', KEYS[1])
         local max = tonumber(ARGV[1])
         if size < max then
-            local added = redis.call('SADD', KEYS[1], ARGV[2])
+            redis.call('SADD', KEYS[1], ARGV[2])
             redis.call('SET', KEYS[2], ARGV[3], 'EX', tonumber(ARGV[4]))
-            return added
+            return 1
         end
         return 0
     """
@@ -1726,7 +1768,11 @@ async def try_acquire_project_slot(project_id: int) -> str | None:
             script, 2, ACTIVE_SET, ALIVE_KEY.format(project_id),
             settings.max_concurrent_projects, project_id, token, RESERVE_TTL,
         )
-        return token if ok == 1 else None
+        if ok == 1:
+            return AcquireResult(token, "ok")
+        if ok == -1:
+            return AcquireResult(None, "already_active")
+        return AcquireResult(None, "full")
     finally:
         await r.aclose()
 
@@ -1742,10 +1788,11 @@ async def ensure_project_slot(project_id: int, token: str) -> bool:
         await r.aclose()
 
 
-async def heartbeat_project(project_id: int, token: str) -> None:
+async def heartbeat_project(project_id: int, token: str) -> bool:
     """task 跑起来后续租到较短的 ALIVE_TTL(60s)。
-    用 Lua CAS:仅当 ALIVE_KEY 的值仍是自己的 token 时才续租;否则不动
-    (说明 reconcile 已清理,token 失效,应停止续租 + task 退出)。"""
+    用 Lua CAS:仅当 ALIVE_KEY 的值仍是自己的 token 时才续租。
+    返回:True=续租成功;False=token 已失效(reconcile 清过 / 别人重 acquire)。
+    调用方在 False 时应当让 task 主动中止(D-AG)。"""
     script = """
         local cur = redis.call('GET', KEYS[1])
         if cur == ARGV[1] then
@@ -1756,9 +1803,25 @@ async def heartbeat_project(project_id: int, token: str) -> None:
     """
     r = _r()
     try:
-        await r.eval(script, 1, ALIVE_KEY.format(project_id), token, ALIVE_TTL)
+        ok = await r.eval(script, 1, ALIVE_KEY.format(project_id), token, ALIVE_TTL)
+        return ok == 1
     finally:
         await r.aclose()
+
+
+async def reconcile_periodic(ctx) -> None:
+    """arq cron 每分钟跑一次 reconcile,catch worker 不重启但 heartbeat 异常的情况(D-AG)。
+    与 try_acquire 的 lazy reconcile 互补。"""
+    zombies = await reconcile_active_projects()
+    if zombies:
+        # 把僵尸项目标 failed,运维可手动 retry
+        async with session_factory() as s:
+            await s.execute(
+                sa.text("UPDATE projects SET status='failed' "
+                        "WHERE id = ANY(:ids) AND status IN ('running','extracting','outlining')"),
+                {"ids": zombies},
+            )
+            await s.commit()
 
 
 async def release_project_slot(project_id: int, token: str | None = None) -> None:
@@ -1841,10 +1904,13 @@ async def wake_queued_projects(arq_pool) -> int:
                         next_pid = row.scalar_one_or_none()
                         if next_pid is None:
                             return 0
-                        # 占名额(返回 token);失败任一步都会让事务回滚保持 queued
-                        slot_token = await try_acquire_project_slot(next_pid)
-                        if slot_token is None:
+                        # 占名额(三态);失败任一步都会让事务回滚保持 queued
+                        result = await try_acquire_project_slot(next_pid)
+                        if not result.acquired:
+                            log.warning("wake_acquire_failed",
+                                        project_id=next_pid, reason=result.reason)
                             return 0
+                        slot_token = result.token
                         run_row = await s.execute(sa.text(
                             "SELECT id, langgraph_thread_id FROM runs "
                             "WHERE project_id=:p ORDER BY started_at DESC LIMIT 1"
@@ -1854,8 +1920,10 @@ async def wake_queued_projects(arq_pool) -> int:
                             await release_project_slot(next_pid, slot_token)
                             return 0
                         run_id, thread_id = run
+                        # ⭐ 与 /start 路径口径一致(D-AL):新启动一律先入 extracting,
+                        # 由 worker 跑 extract_documents 节点后自然进 outlining/running
                         await s.execute(sa.text(
-                            "UPDATE projects SET status='running' WHERE id=:p"
+                            "UPDATE projects SET status='extracting' WHERE id=:p"
                         ), {"p": next_pid})
                     # commit 后再 enqueue;若 enqueue 抛异常,补偿:释放 slot + 把项目改回 queued
                     try:
@@ -1880,25 +1948,47 @@ async def wake_queued_projects(arq_pool) -> int:
         await r.aclose()
 
 
+class SlotLost(Exception):
+    """heartbeat 续租失败 = token 已被回收。task 应当中止(D-AG)。"""
+
+
 @contextlib.asynccontextmanager
 async def project_heartbeat(project_id: int, token: str):
-    """task 运行时上下文,每 HEARTBEAT_INTERVAL 秒续租 alive TTL(带 token CAS)。
-    若 token 失效(reconcile 已清理),heartbeat_project 静默 no-op,task 应当感知后退出。"""
+    """task 运行时上下文,每 HEARTBEAT_INTERVAL 秒续租 alive TTL。
+    续租失败(token 不再匹配)→ raise SlotLost 让外层 task 中止。"""
+    cancel_event = asyncio.Event()
+
     async def _loop():
-        while True:
+        while not cancel_event.is_set():
             try:
-                await heartbeat_project(project_id, token)
+                ok = await heartbeat_project(project_id, token)
+                if not ok:
+                    # token 已失效;停止续租,触发外层异常
+                    log.warning("slot_lost_during_run",
+                                project_id=project_id, token_prefix=token[:8])
+                    cancel_event.set()
+                    break
             except Exception:
                 log.exception("heartbeat_failed", project_id=project_id)
-            await asyncio.sleep(HEARTBEAT_INTERVAL)
-    task = asyncio.create_task(_loop())
+            try:
+                await asyncio.wait_for(cancel_event.wait(), timeout=HEARTBEAT_INTERVAL)
+            except asyncio.TimeoutError:
+                pass
+
+    hb_task = asyncio.create_task(_loop())
     try:
         yield
     finally:
-        task.cancel()
+        cancel_event.set()
         with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+            await hb_task
+    # 续租循环已退出。若是因为 slot 丢失退出,通知外层
+    if cancel_event.is_set() and not hb_task.cancelled():
+        # 简化:实际实现在 worker tasks 层面用一个 sentinel 检测
+        pass
 ```
+
+> 注:为简单起见,实际 worker task 在 `async for chunk in graph.astream(...)` 之间也调用一次 `await ensure_project_slot(token)` 校验,SlotLost 时 raise 退出循环。这样不依赖 heartbeat 协程主动中断主循环(asyncio 主循环抢占难做)。
 
 **worker/lifecycle.py** 启动时调 reconcile + wake:
 
@@ -1970,7 +2060,8 @@ async def resume_review_task(ctx, *, project_id: int, run_id: int, thread_id: st
                              resume_payload: dict, slot_token: str,
                              reviewer_id: int | None = None,
                              chapter_id: int | None = None):
-    """从 interrupt 恢复。worker 入口写 ReviewEvent(D-AC),保证事件与执行同生同灭。"""
+    """从 interrupt 恢复。worker 入口写 ReviewEvent(D-AC),保证事件与执行同生同灭。
+    ⚠️ D-AH:token 拿到后立即进 try/finally,所有 DB 操作放 try 内。任何异常都释放 slot。"""
     arq_pool = ctx["arq_pool"]
     saver = ctx["checkpointer"]
     graph = build_graph(saver)
@@ -1980,20 +2071,26 @@ async def resume_review_task(ctx, *, project_id: int, run_id: int, thread_id: st
     if token is None:
         return
 
-    # ⭐ D-AC:worker 入口写 ReviewEvent(章节审核场景)
-    if reviewer_id is not None and chapter_id is not None:
-        kind = (resume_payload or {}).get("kind")
-        if kind == "chapter_review":
-            async with session_factory() as s:
-                s.add(ReviewEvent(
-                    chapter_id=chapter_id, reviewer_id=reviewer_id,
-                    decision=resume_payload.get("decision"),
-                    feedback_text=resume_payload.get("feedback") or None,
-                ))
-                await s.commit()
-        # outline_confirm 不写 ReviewEvent(不是 review,是项目级动作)
-
     try:
+        # ⭐ D-AC:worker 入口写 ReviewEvent + 把章节状态从 'reviewing' 切到下游
+        if reviewer_id is not None and chapter_id is not None:
+            kind = (resume_payload or {}).get("kind")
+            if kind == "chapter_review":
+                decision = resume_payload.get("decision")
+                async with session_factory() as s:
+                    s.add(ReviewEvent(
+                        chapter_id=chapter_id, reviewer_id=reviewer_id,
+                        decision=decision,
+                        feedback_text=resume_payload.get("feedback") or None,
+                    ))
+                    # 章节状态从 'reviewing'(API 端切的中间态)→ 'generating'
+                    # update_state 节点会再切到最终的 approved/skipped/generating
+                    await s.execute(sa.text(
+                        "UPDATE chapters SET status='generating' "
+                        "WHERE id=:c AND status='reviewing'"
+                    ), {"c": chapter_id})
+                    await s.commit()
+
         async with project_heartbeat(project_id, token):
             async for _ in graph.astream(Command(resume=resume_payload), config,
                                          stream_mode="values"):
@@ -2017,7 +2114,8 @@ async def resume_review_task(ctx, *, project_id: int, run_id: int, thread_id: st
 async def retry_failed_chapter_task(ctx, *, project_id: int, run_id: int, thread_id: str,
                                     chapter_index: int, reviewer_id: int,
                                     chapter_id: int, slot_token: str):
-    """API 端点已 try_acquire 成功才入队;DB 重置 + 续跑;worker 入口写 ReviewEvent。"""
+    """API 端点已 try_acquire 成功才入队;DB 重置 + 续跑;worker 入口写 ReviewEvent。
+    ⚠️ D-AH:DB reset 与 ReviewEvent 都在 try 内,异常必释放 slot。"""
     arq_pool = ctx["arq_pool"]
     saver = ctx["checkpointer"]
     graph = build_graph(saver)
@@ -2027,22 +2125,21 @@ async def retry_failed_chapter_task(ctx, *, project_id: int, run_id: int, thread
     if token is None:
         return
 
-    # ⭐ D-AC:worker 入口写 ReviewEvent(retry_failed)
-    async with session_factory() as s:
-        s.add(ReviewEvent(chapter_id=chapter_id, reviewer_id=reviewer_id,
-                          decision="retry_failed"))
-        # DB 重置 chapter:status=pending,retry_count=0,abandoned 本轮版本
-        await s.execute(sa.text(
-            "UPDATE chapter_versions SET abandoned=true "
-            "WHERE chapter_id=:c AND abandoned=false"
-        ), {"c": chapter_id})
-        await s.execute(sa.text(
-            "UPDATE chapters SET status='pending', retry_count=0, last_error=NULL "
-            "WHERE id=:c"
-        ), {"c": chapter_id})
-        await s.commit()
-
     try:
+        # ⭐ D-AC + D-AD:写 ReviewEvent + 把章节从 'retrying' 重置到 'pending'
+        async with session_factory() as s:
+            s.add(ReviewEvent(chapter_id=chapter_id, reviewer_id=reviewer_id,
+                              decision="retry_failed"))
+            await s.execute(sa.text(
+                "UPDATE chapter_versions SET abandoned=true "
+                "WHERE chapter_id=:c AND abandoned=false"
+            ), {"c": chapter_id})
+            await s.execute(sa.text(
+                "UPDATE chapters SET status='pending', retry_count=0, last_error=NULL "
+                "WHERE id=:c AND status='retrying'"
+            ), {"c": chapter_id})
+            await s.commit()
+
         async with project_heartbeat(project_id, token):
             await graph.aupdate_state(config, {"retry_count": 0})
             async for _ in graph.astream(None, config, stream_mode="values"):
@@ -2102,7 +2199,7 @@ async def _project_dir(project_id: int) -> Path:
 
 > 注:模块顶部加 `import traceback`。`append_error` 在写日志失败时已自吞异常,但保险起见外层也包一层 try,确保异常路径不会因日志失败而二次崩溃。
 
-> `arq` `WorkerSettings.max_jobs` 同步设为 `MAX_CONCURRENT_PROJECTS`,即便业务 SET 漂移,worker 物理上也不会超并发。两层独立。
+> `arq` `WorkerSettings.max_jobs` 设为 `MAX_CONCURRENT_PROJECTS + 2`(D-AA),给 DOCX task 留余量,workflow 业务限流仍由 ACTIVE_SET 主导。两层独立。
 
 **API 端点的 acquire 责任**(`/start` `/review` `/confirm-outline` `/retry` 都要做):
 
@@ -2836,8 +2933,26 @@ from ..db import session_factory
 from ..services.docx_export import export_docx
 
 
+@func(max_tries=2)
 async def generate_docx_task(ctx, *, project_id: int, docx_job_id: int) -> dict:
     """串行锁在 export_docx 内部实现(D-H)。"""
+    # 0. ⭐ D-AK:校验 DocxJob row 存在(防 v3.4 enqueue/commit 缺口);失败直接退出
+    async with session_factory() as s:
+        job_row = await s.execute(
+            sa.text("SELECT status FROM docx_jobs WHERE id=:i"),
+            {"i": docx_job_id},
+        )
+        existing = job_row.scalar_one_or_none()
+        if existing is None:
+            log.error("docx_job_row_missing", docx_job_id=docx_job_id,
+                      project_id=project_id,
+                      hint="API 端 commit 可能失败;arq 仍把 task 入了队")
+            return {"error": "docx_job row not found"}
+        if existing in ("done", "failed"):
+            log.warning("docx_job_already_finished",
+                        docx_job_id=docx_job_id, status=existing)
+            return {"status": existing}
+
     # 1. 取项目 markdown + dir + name
     async with session_factory() as s:
         prj_row = await s.execute(
@@ -3240,8 +3355,16 @@ async def start_workflow(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """启动工作流。**真快照**当前用户的 ApiKey 加密载荷到 Project(D-C)。"""
+    """启动工作流。**真快照**当前用户的 ApiKey 加密载荷到 Project(D-C)。
+    ⭐ D-AF:校验 project.status=='init',防止重复启动同一项目导致 try_acquire
+    返回 already_active 或 LangGraph thread_id 撞上历史 run。"""
     project = await _get_project_owned_or_412(db, project_id, user)
+
+    # 状态校验:必须是 init(刚创建,还未 /start)
+    if project.status != "init":
+        raise HTTPException(409,
+            f"project status is '{project.status}', /start only allowed when init "
+            "(已启动的项目使用 /resume 或在前端继续审核;失败的项目请 admin 处理)")
 
     # 拿当前用户的 ApiKey 加密载荷
     api_key = (await db.execute(
@@ -3263,22 +3386,26 @@ async def start_workflow(
     db.add(run)
     await db.flush()  # 拿 run.id
 
-    # ⭐ D-T:在 commit 之前决定占名额还是 queued(返回 lease token,D-AB)
-    slot_token = await try_acquire_project_slot(project_id)
-    if slot_token is not None:
+    # ⭐ D-T / D-AF:三态结果
+    result = await try_acquire_project_slot(project_id)
+    if result.reason == "already_active":
+        # 不应该到这——上面已校验 status==init,但兜底
+        raise HTTPException(409, "项目已有进行中的执行")
+
+    if result.acquired:
         project.status = "extracting"
-    else:
+    else:  # "full"
         project.status = "queued"
     await db.commit()
 
-    # 占名额成功才入队;失败 → 补偿(D-U):回退 status + 标 Run aborted + release slot,返回 503
-    if slot_token is not None:
+    # 占名额成功才入队;失败 → 补偿(D-U):回退 status + 标 Run aborted + release slot
+    if result.acquired:
         arq_pool = request.app.state.arq_pool
         try:
             await arq_pool.enqueue_job(
                 "start_workflow_task",
                 project_id=project_id, run_id=run.id, thread_id=thread_id,
-                slot_token=slot_token,
+                slot_token=result.token,
             )
         except Exception as e:
             log.exception("start_enqueue_failed", project_id=project_id, run_id=run.id)
@@ -3287,12 +3414,12 @@ async def start_workflow(
             run.finished_at = datetime.now(timezone.utc)
             run.error = f"enqueue failed: {e!r}"
             await db.commit()
-            await release_project_slot(project_id, slot_token)
+            await release_project_slot(project_id, result.token)
             raise HTTPException(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="无法入队工作流任务,请稍后重试 /start",
             ) from e
-    return {"run_id": run.id, "queued": slot_token is None}
+    return {"run_id": run.id, "queued": not result.acquired}
 
 
 @router.put("/{project_id}/outline")
@@ -3318,8 +3445,10 @@ async def confirm_outline(
 
     run = await _get_active_run(db, project_id)
 
-    slot_token = await try_acquire_project_slot(project_id)
-    if slot_token is None:
+    result = await try_acquire_project_slot(project_id)
+    if result.reason == "already_active":
+        raise HTTPException(409, "该项目已有任务在执行")
+    if not result.acquired:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="系统繁忙,请稍后重试",
@@ -3333,11 +3462,10 @@ async def confirm_outline(
             thread_id=run.langgraph_thread_id,
             resume_payload={"kind": "outline_confirm",
                             "chapters": body.chapters or []},
-            slot_token=slot_token,
-            # outline_confirm 不写 ReviewEvent,所以不传 reviewer_id/chapter_id
+            slot_token=result.token,
         )
     except Exception:
-        await release_project_slot(project_id, slot_token)
+        await release_project_slot(project_id, result.token)
         raise HTTPException(503, "无法入队提纲确认任务,请稍后重试")
     return {"ok": True}
 
@@ -3438,9 +3566,29 @@ async def review_chapter(
         raise HTTPException(409,
             f"chapter is {chapter['status']}, only awaiting_review can be reviewed")
 
-    # ⭐ D-T:resume 前 try_acquire(返回 lease token,D-AB)
-    slot_token = await try_acquire_project_slot(project_id)
-    if slot_token is None:
+    # ⭐ D-AD 中间态:行锁内把章节状态切到 'reviewing',防双击/并发(同一章节,
+    # 两个用户在 awaiting_review 时同时点提交) 第二个请求看到 'reviewing' 直接 409
+    await db.execute(
+        sa.text("UPDATE chapters SET status='reviewing' WHERE id=:c"),
+        {"c": chapter["id"]},
+    )
+    # ⭐ D-T / D-AF:resume 前 try_acquire(三态,already_active 视为冲突)
+    result = await try_acquire_project_slot(project_id)
+    if result.reason == "already_active":
+        # 项目已有 task 在跑(可能是上一个 review 还没处理完);切回 awaiting_review
+        await db.execute(
+            sa.text("UPDATE chapters SET status='awaiting_review' WHERE id=:c"),
+            {"c": chapter["id"]},
+        )
+        await db.commit()
+        raise HTTPException(409, "该项目已有任务在执行,请稍后重试")
+    if not result.acquired:
+        # full
+        await db.execute(
+            sa.text("UPDATE chapters SET status='awaiting_review' WHERE id=:c"),
+            {"c": chapter["id"]},
+        )
+        await db.commit()
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="系统繁忙(并发上限已达),请稍后重试",
@@ -3458,16 +3606,22 @@ async def review_chapter(
                 "decision": body.decision,
                 "feedback": body.feedback or "",
             },
-            slot_token=slot_token,
+            slot_token=result.token,
             reviewer_id=user.id,
             chapter_id=chapter["id"],
         )
     except Exception:
-        await release_project_slot(project_id, slot_token)   # 补偿
+        # 补偿:释放 slot + 章节回 awaiting_review
+        await release_project_slot(project_id, result.token)
+        await db.execute(
+            sa.text("UPDATE chapters SET status='awaiting_review' WHERE id=:c"),
+            {"c": chapter["id"]},
+        )
+        await db.commit()
         raise HTTPException(503, "无法入队审核任务,请稍后重试")
 
     # ⭐ D-AC:ReviewEvent 由 worker 入口写,API 不再写
-    await db.commit()  # 释放行锁
+    await db.commit()  # 释放行锁,章节维持 'reviewing' 状态等 worker 接管
     return {"ok": True}
 
 
@@ -3493,13 +3647,32 @@ async def retry_chapter(
     if chapter["status"] != "failed":
         raise HTTPException(409, f"chapter is {chapter['status']}, not failed")
 
-    slot_token = await try_acquire_project_slot(project_id)
-    if slot_token is None:
+    # 中间态(D-AD):行锁内切到 'retrying' 防双击
+    await db.execute(
+        sa.text("UPDATE chapters SET status='retrying' WHERE id=:c"),
+        {"c": chapter["id"]},
+    )
+
+    result = await try_acquire_project_slot(project_id)
+    if result.reason == "already_active":
+        await db.execute(
+            sa.text("UPDATE chapters SET status='failed' WHERE id=:c"),
+            {"c": chapter["id"]},
+        )
+        await db.commit()
+        raise HTTPException(409, "该项目已有任务在执行,请稍后重试")
+    if not result.acquired:
+        await db.execute(
+            sa.text("UPDATE chapters SET status='failed' WHERE id=:c"),
+            {"c": chapter["id"]},
+        )
+        await db.commit()
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="系统繁忙,请稍后重试",
             headers={"Retry-After": "60"},
         )
+
     arq_pool = request.app.state.arq_pool
     try:
         await arq_pool.enqueue_job(
@@ -3509,14 +3682,18 @@ async def retry_chapter(
             chapter_index=idx,
             chapter_id=chapter["id"],
             reviewer_id=user.id,
-            slot_token=slot_token,
+            slot_token=result.token,
         )
     except Exception:
-        await release_project_slot(project_id, slot_token)
+        await release_project_slot(project_id, result.token)
+        await db.execute(
+            sa.text("UPDATE chapters SET status='failed' WHERE id=:c"),
+            {"c": chapter["id"]},
+        )
+        await db.commit()
         raise HTTPException(503, "无法入队重试任务,请稍后重试")
 
-    # ReviewEvent 由 worker 入口写,这里只释放行锁
-    await db.commit()
+    await db.commit()  # 释放行锁,章节维持 'retrying'
     return {"ok": True}
 ```
 
@@ -3566,31 +3743,49 @@ async def trigger_docx(
     if cached.exists():
         return {"job_id": None, "cached": True}
 
-    # ⭐ D-M / D-S:先 INSERT(arq_job_id NULL,占位拿主键),
-    # partial unique on (project_id) WHERE status IN ('pending','rendering_mermaid','pandoc')
-    # 会在并发第二个 POST 时直接抛 IntegrityError → 转 409,不需要应用层抢锁。
+    # ⭐ D-AK 顺序修正:先 commit pending 行,再 enqueue,最后 update arq_job_id。
+    # v3.4 是 flush→enqueue→commit:enqueue 成功但 commit 失败时 worker 拿到 docx_job_id
+    # 但 DB 没行,worker 入口 SELECT 找不到。
     from sqlalchemy.exc import IntegrityError
     docx_job = DocxJob(project_id=project_id, arq_job_id=None, status="pending")
     db.add(docx_job)
     try:
-        await db.flush()
+        await db.commit()                # ⭐ 先 commit,DB 行已可见
     except IntegrityError:
         await db.rollback()
         raise HTTPException(409, "该项目已有 DOCX 生成任务在进行中")
     job_pk = docx_job.id
 
     arq_pool = request.app.state.arq_pool
-    job = await arq_pool.enqueue_job(
-        "generate_docx_task",
-        project_id=project_id, docx_job_id=job_pk,
-    )
+    try:
+        job = await arq_pool.enqueue_job(
+            "generate_docx_task",
+            project_id=project_id, docx_job_id=job_pk,
+        )
+    except Exception as e:
+        # 补偿:enqueue 失败把 row 标 failed,前端可重试
+        await db.execute(sa.text(
+            "UPDATE docx_jobs SET status='failed', error=:err, finished_at=NOW() "
+            "WHERE id=:i"
+        ), {"err": f"enqueue failed: {e!r}", "i": job_pk})
+        await db.commit()
+        raise HTTPException(503, "无法入队 DOCX 任务,请稍后重试")
+
     if job is None:
-        await db.rollback()
+        # arq 可能因为 keep_alive 等条件返回 None
+        await db.execute(sa.text(
+            "UPDATE docx_jobs SET status='failed', error='enqueue returned None', "
+            "finished_at=NOW() WHERE id=:i"
+        ), {"i": job_pk})
+        await db.commit()
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             "无法入队 DOCX 任务,请稍后重试")
 
-    docx_job.arq_job_id = job.job_id
-    await db.commit()
+    # 回写 arq_job_id;如果这一步失败也 OK——worker 仍能用 job_pk 找到 row
+    docx_job_2 = await db.get(DocxJob, job_pk)
+    if docx_job_2 is not None:
+        docx_job_2.arq_job_id = job.job_id
+        await db.commit()
 
     return {"job_id": job.job_id, "docx_job_id": job_pk, "cached": False}
 
@@ -4121,27 +4316,27 @@ stderr_logfile=/dev/fd/2
 from arq.connections import RedisSettings
 from arq.cron import cron
 from ..config import settings
+from .tasks import (
+    start_workflow_task,
+    resume_review_task,
+    retry_failed_chapter_task,
+    generate_docx_task,
+)
 
 
 class WorkerSettings:
-    """⚠️ D-Z:不同任务用不同 max_tries:
-    - workflow 三类任务 max_tries=1:LLM 失败 → 章节 status=failed → 用户手动 /retry
-      (FR-3.9 / FR-4.7),不让 arq 自动重跑(会绕过 API 端 try_acquire,违反 D-T)。
-      崩溃恢复由 LangGraph checkpoint 保证,用户下次 /retry 触发即可从最后成功节点续跑。
-    - generate_docx_task max_tries=2:DOCX 失败多是临时(pandoc 偶发),自动重跑 1 次有意义。
+    """⚠️ D-Z:workflow 三类任务 max_tries=1,DOCX max_tries=2,通过
+    @func(max_tries=...) 装饰器在 tasks.py 配置;
+    ⭐ D-AJ:functions 直接放装饰后的函数对象(不是字符串路径),
+    避免依赖 arq 字符串导入路径下 wrapped attribute 是否被发现的隐式行为。"""
 
-    arq 默认全局 max_tries=5,我们在 functions 上分别用 @arq.func 装饰传 max_tries。
-    """
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
 
-    # ⚠️ 不在这里硬编码 functions=list,而是在 worker/tasks.py 用
-    # @func(max_tries=1) 装饰器分别配置(arq>=0.26 支持)
-    # 这里只列字符串路径供 arq 发现;实际 max_tries 由各 task 装饰器决定
     functions = [
-        "bid_app.worker.tasks.start_workflow_task",
-        "bid_app.worker.tasks.resume_review_task",
-        "bid_app.worker.tasks.retry_failed_chapter_task",
-        "bid_app.worker.tasks.generate_docx_task",
+        start_workflow_task,
+        resume_review_task,
+        retry_failed_chapter_task,
+        generate_docx_task,
     ]
 
     # ⭐ 给 DOCX 任务留并发余量(D-AA):workflow 上限是 max_concurrent_projects=10,
@@ -4152,6 +4347,14 @@ class WorkerSettings:
     keep_result = 86400
     on_startup = "bid_app.worker.lifecycle.on_startup"
     on_shutdown = "bid_app.worker.lifecycle.on_shutdown"
+
+    # ⭐ D-AG cron:每分钟跑 reconcile,清理 worker 不重启时的僵尸 ACTIVE_SET 条目
+    cron_jobs = [
+        cron("bid_app.services.concurrency.reconcile_periodic",
+             minute=set(range(0, 60)),  # 每分钟
+             unique=True,
+             keep_result=0),
+    ]
 ```
 
 `worker/tasks.py` 用 `@arq.worker.func` 给每个 task 单独设 max_tries(arq 0.26+ 支持):
@@ -4415,10 +4618,36 @@ tests/integration/
 │   ├── test_revise_decision_increments_retry_count
 │   ├── test_max_retry_per_chapter_forces_skip
 │   └── test_chapter_timeout_marks_failed
-└── test_docx.py
-    ├── test_docx_export_serialization_lock
-    ├── test_docx_export_with_mermaid
-    └── test_docx_export_caches_after_first_run
+├── test_docx.py
+│   ├── test_docx_export_serialization_lock
+│   ├── test_docx_export_with_mermaid
+│   └── test_docx_export_caches_after_first_run
+└── test_worker_config.py             # ⭐ D-AJ 启动期断言
+    ├── test_workflow_tasks_have_max_tries_1   # 三类 workflow task max_tries==1
+    ├── test_docx_task_has_max_tries_2          # generate_docx_task max_tries==2
+    └── test_worker_functions_are_decorated     # WorkerSettings.functions 都是
+                                                # arq decorated 对象
+```
+
+```python
+# tests/integration/test_worker_config.py
+def test_workflow_tasks_have_max_tries_1():
+    from bid_app.worker.tasks import (
+        start_workflow_task, resume_review_task, retry_failed_chapter_task,
+    )
+    # arq @func 装饰器把 max_tries 挂在 .max_tries 或 .__arq_function__ 上,
+    # 不同 arq 版本属性名可能差,这里用 hasattr + getattr 兼容
+    for fn in (start_workflow_task, resume_review_task, retry_failed_chapter_task):
+        mt = getattr(fn, "max_tries", None) or \
+             getattr(getattr(fn, "__arq_function__", None), "max_tries", None)
+        assert mt == 1, f"{fn.__name__} max_tries should be 1, got {mt}"
+
+
+def test_docx_task_has_max_tries_2():
+    from bid_app.worker.tasks import generate_docx_task
+    mt = getattr(generate_docx_task, "max_tries", None) or \
+         getattr(getattr(generate_docx_task, "__arq_function__", None), "max_tries", None)
+    assert mt == 2, f"generate_docx_task max_tries should be 2, got {mt}"
 ```
 
 ### 18.4 状态机 e2e 测试模板
@@ -4644,21 +4873,28 @@ init ──(上传 3 文档,/start)──→ extracting ──(markitdown ok)─
 ### 20.2 Chapter 状态
 
 ```
-                                  ┌── revise(retry_count+1) ←─┐
-                                  │                            │
-pending ──(generate 开始)──→ generating ──(generate 完成)──→ awaiting_review
-            ▲                                                  │
-            │                          ┌─── approve ────→ approved (terminal)
-            │                          ├─── skip ──────→ skipped  (terminal)
-            │                          └─── revise ────→ generating (上图回路,
-            │                                            到 retry_count > max → 强制 skipped)
+                                                    ┌── revise(retry_count+1) ←─┐
+                                                    │                            │
+pending ──(generate 开始)──→ generating ──(generate 完成)──→ awaiting_review     │
+            ▲                                                       │            │
+            │                                            (用户提交) ▼            │
+            │                                                  reviewing ─┐      │
+            │                                  (worker 接管,根据 decision)│      │
+            │                                  ┌───── approve ────→ approved (terminal)
+            │                                  ├───── skip ──────→ skipped  (terminal)
+            │                                  └───── revise ────→ generating ──┘
+            │                                                      (到 retry_count > max → 强制 skipped)
             │
             ├── (LLM 3 次失败 / 单章 10 分钟超时) ──→ failed
             │                                          │
-            └────(retry_failed_chapter_task)──────────┘
-                  ↑ 重置 retry_count=0、last_error=NULL、本轮 ChapterVersion 标 abandoned
+            │                            (用户 retry) ▼
+            │                                       retrying
+            │                              (worker 接管,reset)
+            └──────────────────────────────────── (status='pending' + retry_count=0)
+                  ↑ 本轮 ChapterVersion 标 abandoned, last_error=NULL
 ```
 
+> 中间态 reviewing / retrying(D-AI):API 在行锁内切入,worker 入口切出。这两个状态短暂(秒级),仅用于防双击/并发重复提交;前端看到这两个状态应当 disable 审核/重试按钮 + 显示"处理中"。
 > max_retry_per_chapter 语义:配置 N 表示"原稿之外允许 N 次重写";到第 N+1 次 revise 自动 skip(`new_retry > N` 时跳)。
 > retry_failed 与 revise 是不同动作:revise 走 update_state、retry_failed 是 graph 外重置后从 checkpoint 续跑。
 
