@@ -122,7 +122,7 @@
   - 模型名通过环境变量可覆盖,但本期默认就是这套。
 - FR-3.3 LLM 调用使用**项目启动时快照的 API Key**(见 FR-7),不使用全局 Key。
 - FR-3.4 提示词模板**硬编码**在后端代码,不在前端暴露。
-- FR-3.5 在 LLM-2 / LLM-3 节点上启用流式输出,通过 SSE 推送到前端。
+- FR-3.5 **仅 LLM-2 启用流式输出**(章节正文直接给用户看,流式让首字节延迟低 + 可视化"正在写")。LLM-1(提纲生成)与 LLM-3(可视化建议)是 JSON 模式,响应不大且需要解析后再用,不流式。SSE 推送只发 LLM-2 的 token,与 chapter_started / chapter_ready / awaiting_review / outline_ready / proposal_ready 等控制事件混合。
 - FR-3.6 LangGraph 使用 PostgreSQL checkpoint backend(`langgraph-checkpoint-postgres`),每个节点完成后自动持久化,容器重启后能恢复 in-flight 工作流。
 - FR-3.7 工作流任务跑在 **arq worker** 进程,与 FastAPI HTTP 进程**独立**(共享同一容器、`.env`、DB/Redis,但是两个 OS 进程,由 supervisord 编排),避免长任务阻塞 HTTP。
 - FR-3.8 每次 LLM 调用记录 token 消费到 `TokenUsage` 表(user_id / project_id / model / prompt_tokens / completion_tokens / ts)。
@@ -376,6 +376,7 @@ LangGraph 自身的 checkpoint 表(`checkpoints` / `writes`)由 `langgraph-check
 | `GET` | `/api/me/api-key` | 返回是否已配置(布尔)+ 上次校验时间;**不返回明文** |
 | `PUT` | `/api/me/api-key` | body: `{key}`;后端做测试调用,通过则加密保存 |
 | `DELETE` | `/api/me/api-key` | 删除 |
+| `GET` | `/api/me/api-key/test` | 用已保存的 Key 测一次 DashScope 连通(替代 `/health` 查 LLM,见 NFR-5);成功更新 `last_validated_at` |
 | `GET` | `/api/me/usage?month=YYYY-MM` | 当月 token 消费统计 |
 
 ### 项目
@@ -481,7 +482,7 @@ class WorkflowState(TypedDict):
 | **M1 · 后端核心 API** | FastAPI + LangGraph + PostgresSaver + arq;REST 项目相关端点 + SSE;Postgres + Redis 跑起来;FR-3.9 重试 + FR-4.7 失败重试端点 | API 测试脚本通过,工作流可在 docker 里执行并人审,模拟 LLM 失败能正确进入 `failed` 状态 | 3-4 天 |
 | **M2 · 认证 + 用户管理 + API Key** | FR-6 / FR-7 全实现;admin 端点;限流 | curl 跑通登录、创建用户、配 Key、重置 Key | 2-3 天 |
 | **M3 · DOCX 导出**(Pandoc 直转,简化方案) | mermaid 预渲染 + pandoc 直转;arq 串行化任务;最小 reference.docx 样式定义 | 真实 markdown 输出 docx 可打开、章节层级正确、表格/图片正常 | 2 天 |
-| **M4 · 前端 v1**(Vite + React) | 8 个视图(P0 登录 ~ P8 用户管理)全部能用;Tiptap 流式 + 三按钮审核 + Key 配置 + admin 页 + `failed` 章节重试按钮 | 浏览器跑通完整流程含 .docx 下载 | 5-7 天 |
+| **M4 · 前端 v1**(Vite + React) | 8 个视图(P0 登录 ~ P8 用户管理)全部能用;react-markdown 流式渲染 + 三按钮审核 + Key 配置 + admin 页 + `failed` 章节重试按钮 | 浏览器跑通完整流程含 .docx 下载 | 5-7 天 |
 | **M5 · 部署打包** | docker compose(3 容器) + 默认 admin 账号 + 备份 cron + 健康检查 + TZ=Asia/Shanghai | 在测试服务器一键起、内网 IP 可访问、6 小时无 OOM、cron 备份产出 | 2-3 天 |
 
 总计:大约 **15-21 个工作日**(简化 DOCX 方案后比 v0.3 少 1-2 天)。
