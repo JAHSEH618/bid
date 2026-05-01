@@ -1,0 +1,11 @@
+# Obsidian editor metadata
+.obsidian/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
