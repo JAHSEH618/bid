@@ -1,7 +1,11 @@
 # 投标技术方案生成器 · Web App 需求文档
 
-> **版本**:v0.5(待评审) **日期**:2026-05-01 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
+> **版本**:v0.6(待评审) **日期**:2026-05-01 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
 > **工作流内核**:见同目录上级的《技术方案自动生成工作流 — Dify 搭建指南(含人工审核).md》(以下简称 **v10 设计文档**),本需求文档**不重复**其中工作流逻辑细节。
+
+**v0.6 变更**(相对 v0.5,2 处口径澄清):
+- **进程模型澄清**:`app` 容器内 uvicorn 与 arq worker 是**两个独立 Python 进程**(由 supervisord 编排),共享同一容器、同一 `.env`、同一 PostgreSQL/Redis 连接。不是"同进程"。这样进程崩溃可独立重启,任务/HTTP 不互拖。架构图、FR-3.7、NFR-3 同步统一。
+- **`/health` 端点口径收窄**:只查内部依赖(db / redis),LLM 连通改由 `/api/me/api-key/test` 单独检查。理由:健康检查应快、不被外网拖慢;LLM 连通是"用户配置正确性"问题,不是"应用是否健康"问题(NFR-5 / 第 9 章 API 表)。
 
 **v0.5 变更**(相对 v0.4):
 - **单章 LLM 超时表述澄清**:10 分钟仅计 LLM 调用时长,人工审核 `awaiting_review` 期间不计时;每次 `revise` 重写重新开始计时(FR-3.10 / Q21)
@@ -120,7 +124,7 @@
 - FR-3.4 提示词模板**硬编码**在后端代码,不在前端暴露。
 - FR-3.5 在 LLM-2 / LLM-3 节点上启用流式输出,通过 SSE 推送到前端。
 - FR-3.6 LangGraph 使用 PostgreSQL checkpoint backend(`langgraph-checkpoint-postgres`),每个节点完成后自动持久化,容器重启后能恢复 in-flight 工作流。
-- FR-3.7 工作流任务跑在 **arq worker** 进程里,与 FastAPI HTTP 进程隔离,避免长任务阻塞 HTTP。
+- FR-3.7 工作流任务跑在 **arq worker** 进程,与 FastAPI HTTP 进程**独立**(共享同一容器、`.env`、DB/Redis,但是两个 OS 进程,由 supervisord 编排),避免长任务阻塞 HTTP。
 - FR-3.8 每次 LLM 调用记录 token 消费到 `TokenUsage` 表(user_id / project_id / model / prompt_tokens / completion_tokens / ts)。
 - FR-3.9 **LLM 失败重试**(D4):
   - 单次 LLM 调用失败(网络错误 / 5xx / 限流)→ **重试 2 次**,退避 **2s / 5s**(总 3 次尝试)。
@@ -216,7 +220,7 @@
 - **目标服务器**:Linux x86_64(Ubuntu 22.04 / CentOS 7+),内网 IP 直接访问,HTTP-only,**2c4g 起步**。
 - **时区**:容器和宿主机统一 **Asia/Shanghai**(D8),通过 `TZ=Asia/Shanghai` 环境变量 + `/etc/localtime` 挂载。
 - **部署方式**:`docker compose up -d` 一条命令,**3 个容器**:
-  - `app`(FastAPI + arq worker 同进程,uvicorn 单 worker;前端静态资源由 FastAPI 直接 serve)
+  - `app`(同容器内 supervisord 编排两个独立进程:uvicorn 单 worker FastAPI + arq worker;前端静态资源由 FastAPI 直接 serve)
   - `postgres`(PostgreSQL 16 官方镜像)
   - `redis`(Redis 7 官方镜像,arq 队列)
   - **不引入 nginx**:HTTP-only 内网 + 单 app 进程,uvicorn 直接服务足够;省一个容器和 200MB 内存。
@@ -231,7 +235,7 @@
 | postgres | 200M | 400M | shared_buffers 调小 |
 | redis | 30M | 80M | maxmemory 100M |
 | app(uvicorn 单 worker) | 300M | 500M | LangGraph + LiteLLM |
-| arq worker(同进程内) | 200M | 400M | LLM 流式 + DOCX 流水线 |
+| arq worker(独立进程,同容器) | 200M | 400M | LLM 流式 + DOCX 流水线 |
 | chromium(mermaid 渲染时) | 0 | 600M | 仅 docx 生成时拉起,完成即退 |
 | OS / 容器开销 | 200M | 300M | docker daemon + 缓存 |
 | **合计常驻** | **~1.0G** | — | 富余 3G |
@@ -263,7 +267,7 @@
 - 日志时间戳用 **Asia/Shanghai**(D8)。
 - docker logs 由宿主机 logrotate 接管。
 - 失败时记录完整堆栈到项目目录的 `errors.log`。
-- 健康检查端点 `GET /health`(无需鉴权),返回 db / redis / llm 连通状态。
+- 健康检查端点 `GET /health`(无需鉴权),只返回 **db / redis** 内部依赖连通状态(NFR-5 / 第 9 章)。LLM 连通由 `GET /api/me/api-key/test` 单独检查;原因:`/health` 应快、应只查内部依赖,不被外网拖慢。
 
 ---
 
@@ -292,7 +296,7 @@
 │  │                          │ 入队工作流任务                      │ │
 │  │                          ▼                                    │ │
 │  │  ┌────────────────────────────────────────────────────────┐ │ │
-│  │  │  arq worker(同进程内,FastAPI lifespan 管理)           │ │ │
+│  │  │  arq worker(独立进程,supervisord 与 uvicorn 并列编排)  │ │ │
 │  │  │  - LangGraph 状态机                                    │ │ │
 │  │  │  - LiteLLM → DashScope                                  │ │ │
 │  │  │    LLM-1: deepseek-v4-flash                             │ │ │
@@ -328,7 +332,7 @@
 ```
 
 **关键决策**:
-- **app 与 arq worker 同进程**(arq 提供 `enqueue` API,worker 用 lifespan hook 启动)。优点:省一个容器、共享 PostgreSQL 连接池。代价:HTTP 与后台任务争用 CPU,但 2c4g 上反正只能这么干。
+- **app 与 arq worker 同容器、独立进程**(supervisord 编排两个进程,共用同一 `.env` 与 PostgreSQL/Redis 连接)。优点:省一个容器、不需要 nginx 反代、容器层共享镜像;代价:HTTP 与后台任务争用 CPU,但 2c4g 上反正只能这么干。**与 v2 描述的"同 Python 进程"区别:进程崩溃可独立重启,任务不会拖垮 HTTP**(详见 IMPLEMENTATION_SPEC v3 决定 D-A)。
 - **不引入 nginx**:HTTP-only + 单进程 + 内网,uvicorn 直接服务静态资源足够。
 - 未来扩容路径(不动代码):①升 4c8g host;②拆 arq worker 独立容器;③加 nginx 走 HTTPS;④引入 PaddleOCR 支持 PDF。
 
