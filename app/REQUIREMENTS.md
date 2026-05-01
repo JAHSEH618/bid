@@ -1,7 +1,10 @@
 # 投标技术方案生成器 · Web App 需求文档
 
-> **版本**:v0.8(待评审) **日期**:2026-05-02 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
+> **版本**:v0.9(待评审) **日期**:2026-05-02 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
 > **工作流内核**:见同目录上级的《技术方案自动生成工作流 — Dify 搭建指南(含人工审核).md》(以下简称 **v10 设计文档**),本需求文档**不重复**其中工作流逻辑细节。
+
+**v0.9 变更**(相对 v0.8,1 处状态机说明):
+- **FR-1.2 状态机加 queued 旁路**:`/start` 命中并发上限 → 项目进入 queued,等 FIFO 唤醒;审核/重试**不**进 queued,503 重试。
 
 **v0.8 变更**(相对 v0.7,2 处口径澄清):
 - **FR-1.3 排队语义按动作类型区分**:新项目 `/start` → queued(异步排队);审核/重试动作 → 503 + Retry-After(同步告知)。
@@ -108,6 +111,8 @@
 
 - FR-1.1 创建/列出/删除项目;每个项目独立目录存上传文件、生成内容。
 - FR-1.2 项目状态机:`init` → `extracting` → `outlining` → `outline_ready` → `running` → `awaiting_review` → `running` → ... → `done` / `failed` / `aborted`。
+  - 旁路状态 **`queued`**:`/start` 时并发上限已达 → 项目进入 queued,等位至有项目结束被 FIFO 唤醒后转 `extracting`(见 FR-1.3 / D-T)。
+  - 审核 / 重试动作命中并发上限**不**进 queued,直接 503 让前端重试(同步动作不静默排队,见 FR-1.3 第 2 条)。
 - FR-1.3 同时只允许 **10 个项目并发**(默认值,可配置)。语义按动作类型区分:
   - **新项目 `/start`** 超过上限 → Project.status='queued',前端显示"排队中(前面 N 个)";有项目结束时自动唤醒 FIFO
   - **审核 / 提纲确认 / 重试**(`/review` / `/confirm-outline` / `/chapters/{idx}/retry`)超过上限 → 返回 **503 Service Unavailable + Retry-After: 60**,前端 toast"系统繁忙,1 分钟后重试";不静默排队,因为这些是**用户当前正在等响应**的同步动作,排队比立即告知更糟糕
