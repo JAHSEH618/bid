@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.2
+# 投标技术方案生成器 · 实施 Spec v3.3
 
-> **配套文档**:`REQUIREMENTS.md` v0.7(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.2 (2026-05-02)。基于 v3 (2026-05-01) 又修了 8 处落地细节:并发名额生命周期 / enqueue 失败补偿 / Redis 内存策略 / DSN 拼装 / 项目级 errors.log / Mapped 类型 / API Key 快照在需求文档同步 / 文档口径残留。新增决策 D-T..D-X。
-> **历史**:v3 (2026-05-01) 修了 18 处可执行性缺陷;v3-pass2 修了 9 处落地细节风险;v3.2 这一轮又补了 8 处。
+> **配套文档**:`REQUIREMENTS.md` v0.8(讲"做什么"),本文档讲"怎么做"。
+> **版本**:v3.3 (2026-05-02)。基于 v3.2 又修了 8 处隐患:slot 双 TTL 修时序竞态(D-Y) / ReviewEvent 写入顺序避免虚假审计 / `await _project_dir()` 缺失 bug / 旧并发口径文字清理 / `/start` 补偿同步 Run 标 aborted / 排队语义需求/spec 一致 / errors.log 完整 traceback / 需求 Document.file_size。
+> **历史**:v3 (2026-05-01) 修 18 处缺陷;v3-pass2 修 9 处;v3.2 修 8 处;v3.3 修 8 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -133,7 +133,7 @@
 | **D-M** | DOCX 任务**先在 DB 落 `DocxJob(status=pending, arq_job_id=NULL)` 再 enqueue**,enqueue 后立刻 UPDATE arq_job_id | v2 先 enqueue 再 INSERT 有竞态:worker 拿到 job 时 DB 行可能还没写入。先 INSERT flush 拿 id,再用 id 入队 |
 | **D-N** | Mermaid 扫描用 **`re.finditer` + 反向 span 替换**,正则容忍 CRLF / 行尾空格 / `~~~mermaid` 围栏 | v2 用 `str.replace` 在重复 mermaid 块时会覆盖第一处之外的全部;反向替换不影响后续 span |
 | **D-O** | DB Migration 与服务启动**用 entrypoint 串行化**:容器入口先 `alembic upgrade head` 通过才 `exec supervisord` | supervisord priority 不等于"等到上一个完成";migrate 与 uvicorn 同时启可能导致表不存在时 HTTP 已开始接 |
-| **D-P** | 并发项目上限**双层防护**:业务层 `Redis INCR/DECR` 计数器(精确)+ arq `WorkerSettings.max_jobs=N`(兜底) | 单靠 max_jobs 不够,因为业务侧需要"超限就 queued"的语义,等位运行需要 worker 主动 check 计数器并回 retry |
+| **D-P** ⚠️ 由 D-T 取代 | 并发项目上限**双层防护**:业务层 Redis 跟踪 + arq `WorkerSettings.max_jobs=N`(兜底) | 业务侧需要"超限就 queued"的语义。最终实现见 D-T(SET + alive TTL,**非计数器**) |
 | **D-Q** | 登录失败锁定**用 Redis 计数 + 锁 key**,不依赖 slowapi 的请求级限流 | FR-6.7 要求"5 次失败后锁该 IP 5 分钟",slowapi 是"匀速速率",语义不一致;改用 `INCR + EXPIRE` 双 key |
 | **D-R** | `.env` **单文件方案**:`gen-secrets.sh` 从 `.env.example` seed + sed 替换占位符,生成最终唯一 `.env`,compose 直接读 | docker compose `${VAR}` 插值只读 compose 项目根 `.env` / 宿主 env,**不**读 service 的 `env_file:` 列表;两文件方案中 postgres `${POSTGRES_PASSWORD}` 会插到占位符,起不来 |
 | **D-S** | DocxJob.arq_job_id `nullable=true` + **partial unique index** `WHERE arq_job_id IS NOT NULL`;同时 `(project_id) WHERE status IN ('pending','rendering_mermaid','pandoc')` 也 partial unique | 入队前先 INSERT 拿 id 必须支持空 arq_job_id;并发同项目两次 POST docx 应被 DB 阻断,而不是靠应用层抢锁 |
@@ -141,7 +141,8 @@
 | **D-U** | DB commit 后再 enqueue 走**补偿动作**:enqueue 失败 → 回退 DB status + release slot + 503。`wake_queued_projects` 同样:enqueue 失败 → release + 把项目改回 queued | outbox 表对内部 10 用户工具 over-engineering;补偿动作 + reconcile 兜底已足够;reconcile 在 worker 启动时也会清理"无 alive key 但状态 running"的僵尸项目 |
 | **D-V** | Redis 用 **`noeviction` 内存策略**,不用 `allkeys-lru` | 同一 Redis 同时承载 arq 队列、active set、login lock、event pub/sub、limiter 计数。LRU 策略下,内存压力大时 Redis 会**默默驱逐任意 key**,可能让 arq 任务、并发名额、登录锁全部消失,触发难定位的 silent 故障。`noeviction` 让写入在内存满时显式失败,我们在监控 / OOM 风险下能立刻发现 |
 | **D-W** | DSN(`DATABASE_URL` / `LANGGRAPH_DSN`)由 **`config.py` 从 `POSTGRES_USER/PASSWORD/HOST/PORT/DB` 字段拼装**,不在 `.env` 写带 `${VAR}` 的派生值 | docker compose 的 `env_file:` **不**对值做变量展开;容器内 `pydantic-settings` 读 OS env 也不展开。`.env` 里 `DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@...` 实际进容器是字面值。改在 `config.py` 用 property 拼,既避免展开问题,又支持密码里含 `@/&` 等需要 URL-quote 的字符 |
-| **D-X** | 项目级错误日志写到 **`{project_dir}/errors.log`**(NFR-5 要求),与 stdout structlog 并存 | 用户排查"为什么这个项目挂了"时,需要看项目目录里的错误而不是从 docker logs 海量 stdout 里搜索;errors.log 包含 LLM 重试、章节失败、DOCX 失败、工作流顶层异常 |
+| **D-X** | 项目级错误日志写到 **`{project_dir}/errors.log`**(NFR-5 要求),与 stdout structlog 并存;**异常路径写完整 `traceback.format_exc()` 而不是 `repr(e)`** | 用户排查"为什么这个项目挂了"时,需要看项目目录里的错误而不是从 docker logs 海量 stdout 里搜索;NFR-5 明确要"完整堆栈" |
+| **D-Y** | ALIVE_KEY **双 TTL**:API try_acquire 设 RESERVE_TTL=300s(预留 enqueue→worker 启动的延迟窗口);task 进入 heartbeat 后续租到 ALIVE_TTL=60s | v3.2 用单 60s TTL,arq 排队 / worker 重启延迟时 ALIVE_KEY 过期 → reconcile 误清 ACTIVE_SET → 并发统计失真。两段 TTL 让"reservation"与"alive"语义分开 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -158,7 +159,7 @@
 | 9 | mermaid 正则 `\nmermaid\n...\n` 太死;`str.replace` 同代码块重复时错位 | `re.finditer` + 反向替换 + 兼容 CRLF / 行尾空格 / `~~~` 围栏 | §13.1 |
 | 10 | Dockerfile 没装 postgresql-client;compose 用 named volume | Dockerfile 装 `postgresql-client-16`;compose 改宿主机 bind mount | §17.1 / §17.3 |
 | 11 | supervisord 用 priority 编排 migrate→服务,不可靠 | entrypoint 同步 alembic upgrade head 再 exec supervisord | §17.1 / §17.2 |
-| 12 | 并发上限只在 .env 写,代码没用 | Redis 计数器 + `WorkerSettings.max_jobs` + queued 状态 | §10.5 / §15.1 / §17.2 |
+| 12 | 并发上限只在 .env 写,代码没用 | Redis SET(`ACTIVE_SET`)+ 每项目 alive TTL + `WorkerSettings.max_jobs` 兜底 + queued 状态(D-T,非计数器) | §10.7 / §15.1 / §17.2 |
 | 13 | token_usage.project_id `ON DELETE SET NULL` 与需求"删除项目连带 TokenUsage"冲突 | 改 `CASCADE`;DELETE API 同步删磁盘目录 | §8 / §9 / §15.1 |
 | 14 | login 用 `@limiter.limit("5/minute")` 限的是请求频率,不是失败次数 | Redis: `login_fail:{ip}` INCR + `login_lock:{ip}` SET EX 300 | §14.3 / §14.5 |
 | 15 | 缺 security headers / 全局 limiter / 上传配额 | `SecurityHeadersMiddleware` + `default_limits=["100/minute"]` 真注册 + 上传时聚合 Documents.file_size 校验 | §14.6 / §15.1 |
@@ -1448,7 +1449,7 @@ v2 把 review/retry 都模糊地走"重新 enqueue + astream(None)",对 LangGrap
 **关键约定**:
 - `/start` 端点决定占名额还是 queued;**任务自身不再 try_acquire**(避免任务空跑+arq retry 浪费)
 - 每个任务都用 `async with project_heartbeat(...)` 包住 graph 执行,定期续租 alive TTL
-- 任务结束 finally 块根据**最终 Project.status** 决定是否 release(awaiting_review 期间名额持续占用,等用户审完才放)
+- 任务结束 finally 块**无条件 release**(D-T 修正:人工等待不占名额);下一次 resume/retry 由对应 API 端点重新 `try_acquire`
 
 **为什么这样拆比 v2 强**:
 - LangGraph 文档明确:从 interrupt 恢复用 `Command(resume=value)` 注入值,不是 `astream(None)`
@@ -1640,16 +1641,29 @@ async def sync_outline_to_db(run_id: int, chapters: list[dict],
 - "占不到名额"应**正常 return**,不抛异常让 arq retry,否则反复消耗资源
 
 ```python
-"""项目并发上限(D-P / D-T):
+"""项目并发上限(D-P / D-T / D-Y 双 TTL 修正):
 - ACTIVE_SET   : Redis SET 持当前活跃 project_id 集合,基数即占用名额
-- ALIVE_KEY    : 每项目一个 TTL key,worker 跑 task 时每 20s 续租;过期 = 进程死了
+- ALIVE_KEY    : 每项目一个 TTL key,有两种 TTL 阶段:
+                 ├─ API try_acquire 时设 RESERVE_TTL=300s(reservation,
+                 │   覆盖 arq 排队/worker 重启的延迟窗口)
+                 └─ task 进入 heartbeat 上下文后,首次刷成 ALIVE_TTL=60s,
+                     之后每 HEARTBEAT_INTERVAL=20s 续租到 60s
 - WAKE_LOCK    : 唤醒函数的幂等锁,SET NX EX 30,防止同时多次扫队列
 
+为什么需要两段 TTL(D-Y):
+v3.2 设计里 try_acquire 直接用 60s TTL,但 enqueue → worker 拿到 task → 进入 heartbeat
+之间可能 > 60s(尤其 worker 重启 / 高峰排队),ALIVE_KEY 过期 → reconcile 误判僵尸 →
+SREM ACTIVE_SET → 后启动的 task 不知道自己已被踢出,并发计数失真。
+分两段后:
+- 任务入队前 5 分钟内必然有 ALIVE_KEY,reconcile 不误杀
+- 任务进入 heartbeat 后用更短的 60s TTL,异常崩溃在 1 分钟内被 reconcile 清理
+
 API 调用方语义:
-- /start 时 try_acquire,占成功 → 入队 start_workflow_task,Project.status='running'
+- /start 时 try_acquire,占成功 → 入队 start_workflow_task,Project.status='extracting'
                        占失败 → Project.status='queued',不入队
-- worker:task 入口立刻起 heartbeat 后台协程;task 结束 release + wake_queued_projects
-- worker 启动:先 reconcile_active_projects 扫一遍,清理僵尸;再 wake 一次,处理可能漏唤醒的 queued
+- /review /confirm-outline /retry 时 try_acquire,占成功 → 入队;占失败 → 503 + Retry-After
+- worker:task 入口立刻起 heartbeat 上下文(自动首次 SET 60s);task 结束 release + wake
+- worker 启动:先 reconcile_active_projects 扫一遍清僵尸;再 wake 一次处理漏唤醒的 queued
 """
 
 import asyncio
@@ -1666,8 +1680,11 @@ log = structlog.get_logger()
 ACTIVE_SET = "bid_app:active_projects"
 ALIVE_KEY = "bid_app:project_alive:{}"
 WAKE_LOCK = "bid_app:wake_in_flight"
-ALIVE_TTL = 60          # alive key TTL 秒,heartbeat 周期 < 这个值
-HEARTBEAT_INTERVAL = 20
+
+# D-Y 双 TTL
+RESERVE_TTL = 300       # API try_acquire 设的 TTL,覆盖 enqueue→worker 启动延迟
+ALIVE_TTL = 60          # task heartbeat 续租用的较短 TTL,反映"现在真在跑"
+HEARTBEAT_INTERVAL = 20  # heartbeat 周期,< ALIVE_TTL 的一半留容错
 
 
 def _r() -> redis_async.Redis:
@@ -1675,13 +1692,14 @@ def _r() -> redis_async.Redis:
 
 
 async def try_acquire_project_slot(project_id: int) -> bool:
-    """原子操作:SCARD < max 时 SADD + 设 alive TTL。返回 True 表示占到名额。"""
+    """原子操作:SCARD < max 时 SADD + 设 RESERVE_TTL(300s,等待 worker 起来)。
+    返回 True 表示占到名额。"""
     script = """
         local size = redis.call('SCARD', KEYS[1])
         local max = tonumber(ARGV[1])
         if size < max then
             local added = redis.call('SADD', KEYS[1], ARGV[2])
-            redis.call('SET', KEYS[2], '1', 'EX', tonumber(ARGV[3]))
+            redis.call('SET', KEYS[2], 'reserved', 'EX', tonumber(ARGV[3]))
             return added
         end
         return 0
@@ -1690,7 +1708,7 @@ async def try_acquire_project_slot(project_id: int) -> bool:
     try:
         ok = await r.eval(
             script, 2, ACTIVE_SET, ALIVE_KEY.format(project_id),
-            settings.max_concurrent_projects, project_id, ALIVE_TTL,
+            settings.max_concurrent_projects, project_id, RESERVE_TTL,
         )
         return ok == 1
     finally:
@@ -1698,10 +1716,11 @@ async def try_acquire_project_slot(project_id: int) -> bool:
 
 
 async def heartbeat_project(project_id: int) -> None:
-    """续租 alive TTL。task 跑 LLM 期间每 HEARTBEAT_INTERVAL 秒调一次。"""
+    """task 跑起来后续租到较短的 ALIVE_TTL(60s)。
+    第一次调用时把 RESERVE_TTL 覆盖成 ALIVE_TTL(短 TTL = 真在跑)。"""
     r = _r()
     try:
-        await r.set(ALIVE_KEY.format(project_id), "1", ex=ALIVE_TTL)
+        await r.set(ALIVE_KEY.format(project_id), "alive", ex=ALIVE_TTL)
     finally:
         await r.aclose()
 
@@ -1858,9 +1877,15 @@ async def start_workflow_task(ctx, *, project_id: int, run_id: int, thread_id: s
             initial = await build_initial_state(project_id, run_id)
             async for _ in graph.astream(initial, config, stream_mode="values"):
                 pass
-    except Exception as e:
-        await append_error(_project_dir(project_id), f"start_workflow_task crashed: {e!r}",
-                           run_id=run_id, thread_id=thread_id)
+    except Exception:
+        # ⭐ D-X 完整堆栈 + 修复缺 await 的 _project_dir() 调用
+        tb = traceback.format_exc()
+        try:
+            pdir = await _project_dir(project_id)
+            await append_error(pdir, "start_workflow_task crashed",
+                               run_id=run_id, thread_id=thread_id, traceback=tb)
+        except Exception:
+            log.exception("error_log_write_failed", project_id=project_id)
         await _set_project_status(project_id, "failed")
         raise
     finally:
@@ -1882,10 +1907,14 @@ async def resume_review_task(ctx, *, project_id: int, run_id: int, thread_id: st
             async for _ in graph.astream(Command(resume=resume_payload), config,
                                          stream_mode="values"):
                 pass
-    except Exception as e:
-        await append_error(_project_dir(project_id),
-                           f"resume_review_task crashed: {e!r}",
-                           run_id=run_id, payload=resume_payload)
+    except Exception:
+        tb = traceback.format_exc()
+        try:
+            pdir = await _project_dir(project_id)
+            await append_error(pdir, "resume_review_task crashed",
+                               run_id=run_id, payload=resume_payload, traceback=tb)
+        except Exception:
+            log.exception("error_log_write_failed", project_id=project_id)
         await _set_project_status(project_id, "failed")
         raise
     finally:
@@ -1907,10 +1936,14 @@ async def retry_failed_chapter_task(ctx, *, project_id: int, run_id: int, thread
             await graph.aupdate_state(config, {"retry_count": 0})
             async for _ in graph.astream(None, config, stream_mode="values"):
                 pass
-    except Exception as e:
-        await append_error(_project_dir(project_id),
-                           f"retry_failed_chapter_task crashed: {e!r}",
-                           run_id=run_id, chapter_index=chapter_index)
+    except Exception:
+        tb = traceback.format_exc()
+        try:
+            pdir = await _project_dir(project_id)
+            await append_error(pdir, "retry_failed_chapter_task crashed",
+                               run_id=run_id, chapter_index=chapter_index, traceback=tb)
+        except Exception:
+            log.exception("error_log_write_failed", project_id=project_id)
         await _set_project_status(project_id, "failed")
         raise
     finally:
@@ -1919,13 +1952,15 @@ async def retry_failed_chapter_task(ctx, *, project_id: int, run_id: int, thread
 
 
 async def _project_dir(project_id: int) -> Path:
-    """从 DB 取项目目录,用于错误日志写入。"""
+    """从 DB 取项目目录,用于错误日志写入。所有调用方必须 await。"""
     async with session_factory() as s:
         row = await s.execute(
             sa.text("SELECT dir_path FROM projects WHERE id=:p"), {"p": project_id},
         )
         return Path(row.scalar_one())
 ```
+
+> 注:模块顶部加 `import traceback`。`append_error` 在写日志失败时已自吞异常,但保险起见外层也包一层 try,确保异常路径不会因日志失败而二次崩溃。
 
 > `arq` `WorkerSettings.max_jobs` 同步设为 `MAX_CONCURRENT_PROJECTS`,即便业务 SET 漂移,worker 物理上也不会超并发。两层独立。
 
@@ -3093,7 +3128,7 @@ async def start_workflow(
         project.status = "queued"
     await db.commit()
 
-    # 占名额成功才入队;失败 → 补偿(D-U):回退 status 与 slot,返回 503
+    # 占名额成功才入队;失败 → 补偿(D-U):回退 status + 标 Run aborted + release slot,返回 503
     if acquired:
         arq_pool = request.app.state.arq_pool
         try:
@@ -3102,8 +3137,12 @@ async def start_workflow(
                 project_id=project_id, run_id=run.id, thread_id=thread_id,
             )
         except Exception as e:
-            log.exception("start_enqueue_failed", project_id=project_id)
+            log.exception("start_enqueue_failed", project_id=project_id, run_id=run.id)
+            # ⭐ D-U 补偿:project 回退 + Run 标 aborted(用户可看到这次启动失败的痕迹) + release slot
             project.status = "init"
+            run.status = "aborted"
+            run.finished_at = datetime.now(timezone.utc)
+            run.error = f"enqueue failed: {e!r}"
             await db.commit()
             await release_project_slot(project_id)
             raise HTTPException(
@@ -3242,15 +3281,11 @@ async def review_chapter(
         raise HTTPException(400, "revise must include feedback")
 
     run = await _get_active_run(db, project_id)
-    db.add(ReviewEvent(
-        chapter_id=(await _get_chapter(db, run.id, idx)).id,
-        reviewer_id=user.id,
-        decision=body.decision,
-        feedback_text=body.feedback,
-    ))
-    await db.commit()
+    chapter = await _get_chapter(db, run.id, idx)
 
     # ⭐ D-T:resume 前 try_acquire,占不到 → 503 让前端 1 分钟后重试
+    # ⭐ 顺序修正:先 acquire+enqueue 成功才写 ReviewEvent,
+    # 否则 503 时会留下虚假的"已审核"审计记录
     if not await try_acquire_project_slot(project_id):
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -3273,6 +3308,15 @@ async def review_chapter(
     except Exception:
         await release_project_slot(project_id)   # 补偿
         raise HTTPException(503, "无法入队审核任务,请稍后重试")
+
+    # enqueue 成功后才写 ReviewEvent
+    db.add(ReviewEvent(
+        chapter_id=chapter.id,
+        reviewer_id=user.id,
+        decision=body.decision,
+        feedback_text=body.feedback,
+    ))
+    await db.commit()
     return {"ok": True}
 
 
@@ -3285,14 +3329,12 @@ async def retry_chapter(
     db: AsyncSession = Depends(get_db),
 ):
     """FR-4.7:仅 status='failed' 章节可触发;状态机重置由 worker/tasks.py 的
-    retry_failed_chapter_task 在事务内做,API 这里只校验 + 写 ReviewEvent + 入队。"""
+    retry_failed_chapter_task 在事务内做,API 这里只校验 + acquire + enqueue + 写 ReviewEvent。
+    顺序修正:ReviewEvent 必须在 acquire+enqueue 成功后才写,避免 503 留下虚假记录。"""
     run = await _get_active_run(db, project_id)
     chapter = await _get_chapter(db, run.id, idx)
     if chapter.status != "failed":
         raise HTTPException(409, f"chapter is {chapter.status}, not failed")
-
-    db.add(ReviewEvent(chapter_id=chapter.id, reviewer_id=user.id, decision="retry_failed"))
-    await db.commit()
 
     # ⭐ D-T:retry 前 try_acquire(同 review)
     if not await try_acquire_project_slot(project_id):
@@ -3313,6 +3355,10 @@ async def retry_chapter(
     except Exception:
         await release_project_slot(project_id)
         raise HTTPException(503, "无法入队重试任务,请稍后重试")
+
+    # enqueue 成功后才写 ReviewEvent
+    db.add(ReviewEvent(chapter_id=chapter.id, reviewer_id=user.id, decision="retry_failed"))
+    await db.commit()
     return {"ok": True}
 ```
 
@@ -3925,7 +3971,7 @@ class WorkerSettings:
         "bid_app.worker.tasks.retry_failed_chapter_task",
         "bid_app.worker.tasks.generate_docx_task",
     ]
-    max_jobs = settings.max_concurrent_projects   # 物理上限,业务计数器为主
+    max_jobs = settings.max_concurrent_projects   # 物理上限兜底;业务真正限流靠 ACTIVE_SET(D-T)
     job_timeout = 60 * 60 * 4                     # 单 job 上限 4 小时(全章节累计)
     keep_result = 86400
     max_tries = 3

@@ -1,7 +1,11 @@
 # 投标技术方案生成器 · Web App 需求文档
 
-> **版本**:v0.7(待评审) **日期**:2026-05-02 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
+> **版本**:v0.8(待评审) **日期**:2026-05-02 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
 > **工作流内核**:见同目录上级的《技术方案自动生成工作流 — Dify 搭建指南(含人工审核).md》(以下简称 **v10 设计文档**),本需求文档**不重复**其中工作流逻辑细节。
+
+**v0.8 变更**(相对 v0.7,2 处口径澄清):
+- **FR-1.3 排队语义按动作类型区分**:新项目 `/start` → queued(异步排队);审核/重试动作 → 503 + Retry-After(同步告知)。
+- **§8 Document 表加 `file_size` 字段**:与 spec / 上传配额(NFR-4)对齐。
 
 **v0.7 变更**(相对 v0.6,5 处与 Spec v3.2 同步):
 - **API Key 快照模型**:FR-7.5/FR-1.5/§8 数据模型从"引用 user_id"升级为"双重快照":`api_key_owner`(审计用)+ `encrypted_api_key_snapshot`(运行时密文,与 ApiKey 行解耦)。
@@ -104,7 +108,9 @@
 
 - FR-1.1 创建/列出/删除项目;每个项目独立目录存上传文件、生成内容。
 - FR-1.2 项目状态机:`init` → `extracting` → `outlining` → `outline_ready` → `running` → `awaiting_review` → `running` → ... → `done` / `failed` / `aborted`。
-- FR-1.3 同时只允许 **10 个项目并发**(默认值,可配置)。超过则排队。
+- FR-1.3 同时只允许 **10 个项目并发**(默认值,可配置)。语义按动作类型区分:
+  - **新项目 `/start`** 超过上限 → Project.status='queued',前端显示"排队中(前面 N 个)";有项目结束时自动唤醒 FIFO
+  - **审核 / 提纲确认 / 重试**(`/review` / `/confirm-outline` / `/chapters/{idx}/retry`)超过上限 → 返回 **503 Service Unavailable + Retry-After: 60**,前端 toast"系统繁忙,1 分钟后重试";不静默排队,因为这些是**用户当前正在等响应**的同步动作,排队比立即告知更糟糕
 - FR-1.4 团队共享池:任何登录用户可看到所有项目;**只有创建者和 admin** 可删除项目。
 - FR-1.5 项目实体记录 `created_by`(创建者 user_id)、`api_key_owner`(启动者 user_id,审计用)、`encrypted_api_key_snapshot`(启动瞬间从 ApiKey.encrypted_key 拷贝的密文,运行时反加密用,见 FR-7.5)。
 - FR-1.6 项目数据**永不自动清理**(D6),用户在项目列表手动删除,删除时连带磁盘文件、章节、TokenUsage 记录一起清掉。
@@ -355,7 +361,7 @@
 | **User** | `id` / `username` / `password_hash` / `role`(`user`/`admin`)/ `is_active` / `must_change_password` / `created_at` / `last_login_at` | 自建账号,bcrypt 哈希;新建账号(含默认 admin)`must_change_password=true` |
 | **ApiKey** | `id` / `user_id`(unique) / `provider`(=`dashscope`)/ `encrypted_key`(AES-GCM)/ `last_validated_at` / `created_at` / `updated_at` | 1 用户 1 把 Key,加密落库,前端不可读 |
 | **Project** | `id` / `name` / `description` / `status` / `created_by` / `api_key_owner`(启动者 user_id,审计用) / `encrypted_api_key_snapshot`(启动时拷贝的 AES-GCM 密文,运行时解密 LLM 调用用) / `created_at` / `dir_path` | 团队共享池,任何登录用户可见;FR-7.5 双重快照 |
-| **Document** | `id` / `project_id` / `kind`(`tech_spec`/`scoring`/`template`)/ `original_filename` / `markdown_path` | 上传的原始文件 + 抽取后 md;文件类型限于 docx/doc/md/txt |
+| **Document** | `id` / `project_id` / `kind`(`tech_spec`/`scoring`/`template`)/ `original_filename` / `markdown_path` / `file_size`(字节) / `extract_error`(可空) / `created_at` | 上传的原始文件 + 抽取后 md;文件类型限于 docx/doc/md/txt;`file_size` 用于日上传配额聚合(NFR-4 单用户日 500MB) |
 | **Run** | `id` / `project_id` / `langgraph_thread_id` / `started_at` / `finished_at` / `status` | 一次完整工作流执行 |
 | **Chapter** | `id` / `run_id` / `index` / `title` / `summary` / `key_points` / `target_pages` / `final_text` / `status`(`pending`/`generating`/`awaiting_review`/`approved`/`skipped`/**`failed`**)| 提纲解析后落库;`failed` 见 FR-4.7 |
 | **ChapterVersion** | `id` / `chapter_id` / `version` / `body_markdown` / `feedback_in` / `decision` / `created_at` | 每次重写一条记录,保留历史 |
