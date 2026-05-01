@@ -1,7 +1,14 @@
 # 投标技术方案生成器 · Web App 需求文档
 
-> **版本**:v0.6(待评审) **日期**:2026-05-01 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
+> **版本**:v0.7(待评审) **日期**:2026-05-02 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
 > **工作流内核**:见同目录上级的《技术方案自动生成工作流 — Dify 搭建指南(含人工审核).md》(以下简称 **v10 设计文档**),本需求文档**不重复**其中工作流逻辑细节。
+
+**v0.7 变更**(相对 v0.6,5 处与 Spec v3.2 同步):
+- **API Key 快照模型**:FR-7.5/FR-1.5/§8 数据模型从"引用 user_id"升级为"双重快照":`api_key_owner`(审计用)+ `encrypted_api_key_snapshot`(运行时密文,与 ApiKey 行解耦)。
+- **FR-3.5 LLM-3 不流式**:仅 LLM-2 流式,LLM-1/3 是 JSON 模式。
+- **API 表加 `/api/me/api-key/test`**:替代 `/health` 查 LLM 的角色。
+- **M4 表述纠正**:react-markdown(不是 Tiptap)。
+- **NFR-3.1 redis 内存预算**:50M-150M / `noeviction` 策略(原 30M-80M / LRU,LRU 会驱逐 arq 队列与并发锁)。
 
 **v0.6 变更**(相对 v0.5,2 处口径澄清):
 - **进程模型澄清**:`app` 容器内 uvicorn 与 arq worker 是**两个独立 Python 进程**(由 supervisord 编排),共享同一容器、同一 `.env`、同一 PostgreSQL/Redis 连接。不是"同进程"。这样进程崩溃可独立重启,任务/HTTP 不互拖。架构图、FR-3.7、NFR-3 同步统一。
@@ -99,7 +106,7 @@
 - FR-1.2 项目状态机:`init` → `extracting` → `outlining` → `outline_ready` → `running` → `awaiting_review` → `running` → ... → `done` / `failed` / `aborted`。
 - FR-1.3 同时只允许 **10 个项目并发**(默认值,可配置)。超过则排队。
 - FR-1.4 团队共享池:任何登录用户可看到所有项目;**只有创建者和 admin** 可删除项目。
-- FR-1.5 项目实体记录 `created_by`(创建者 user_id)、`api_key_owner`(实际使用的 API Key 归属用户,启动时快照)。
+- FR-1.5 项目实体记录 `created_by`(创建者 user_id)、`api_key_owner`(启动者 user_id,审计用)、`encrypted_api_key_snapshot`(启动瞬间从 ApiKey.encrypted_key 拷贝的密文,运行时反加密用,见 FR-7.5)。
 - FR-1.6 项目数据**永不自动清理**(D6),用户在项目列表手动删除,删除时连带磁盘文件、章节、TokenUsage 记录一起清掉。
 
 ### FR-2 文档处理
@@ -189,8 +196,11 @@
 - FR-7.2 API Key 用 **AES-GCM** 加密落库(master key 来自环境变量 `BID_APP_MASTER_KEY`,启动时校验存在);**前端永远拿不到明文**,只能看"已配置 ✓ / 未配置 ✗"+ 重设按钮。
 - FR-7.3 配置时后端做一次**测试调用**(向 DashScope 发一条最小请求,验证 Key 有效),失败则不保存并返回错误信息。
 - FR-7.4 用户启动项目时,如果未配 API Key → 跳转设置页 + Toast 提示。
-- FR-7.5 项目启动瞬间快照该用户的 API Key 引用(存 `api_key_owner` 字段)。整个项目生命周期(包括其他人审核触发的重写、章节失败重试)都用这个 Key。
-- FR-7.6 用户重置 API Key 后,**不影响已启动的项目**(因为已经快照),但**新项目**会用新 Key。
+- FR-7.5 项目启动瞬间**双重快照**该用户的 API Key:
+  - `Project.api_key_owner` = user_id(审计/UI 展示用,知道"这个项目用谁的额度")
+  - `Project.encrypted_api_key_snapshot` = 当时 ApiKey.encrypted_key 的字节拷贝(运行时解密 + 调用 LLM 用)
+  整个项目生命周期(包括其他人审核触发的重写、章节失败重试)都用快照的密文,不再反查 ApiKey 表。
+- FR-7.6 用户重置 / 删除 API Key 后,**已启动项目继续跑**(因为运行时读 Project 上的密文快照,与 ApiKey 行解耦);**新项目**会快照新 Key。
 - FR-7.7 P7 设置页显示当前用户本月 token 消费(从 `TokenUsage` 聚合);admin 在 P8 可查全员消费。
 
 ---
@@ -233,7 +243,7 @@
 | 组件 | 常驻 | 峰值 | 备注 |
 |---|---|---|---|
 | postgres | 200M | 400M | shared_buffers 调小 |
-| redis | 30M | 80M | maxmemory 100M |
+| redis | 50M | 150M | maxmemory 200M / **noeviction** |
 | app(uvicorn 单 worker) | 300M | 500M | LangGraph + LiteLLM |
 | arq worker(独立进程,同容器) | 200M | 400M | LLM 流式 + DOCX 流水线 |
 | chromium(mermaid 渲染时) | 0 | 600M | 仅 docx 生成时拉起,完成即退 |
@@ -344,7 +354,7 @@
 |---|---|---|
 | **User** | `id` / `username` / `password_hash` / `role`(`user`/`admin`)/ `is_active` / `must_change_password` / `created_at` / `last_login_at` | 自建账号,bcrypt 哈希;新建账号(含默认 admin)`must_change_password=true` |
 | **ApiKey** | `id` / `user_id`(unique) / `provider`(=`dashscope`)/ `encrypted_key`(AES-GCM)/ `last_validated_at` / `created_at` / `updated_at` | 1 用户 1 把 Key,加密落库,前端不可读 |
-| **Project** | `id` / `name` / `description` / `status` / `created_by` / `api_key_owner`(快照启动者 user_id)/ `created_at` / `dir_path` | 团队共享池,任何登录用户可见 |
+| **Project** | `id` / `name` / `description` / `status` / `created_by` / `api_key_owner`(启动者 user_id,审计用) / `encrypted_api_key_snapshot`(启动时拷贝的 AES-GCM 密文,运行时解密 LLM 调用用) / `created_at` / `dir_path` | 团队共享池,任何登录用户可见;FR-7.5 双重快照 |
 | **Document** | `id` / `project_id` / `kind`(`tech_spec`/`scoring`/`template`)/ `original_filename` / `markdown_path` | 上传的原始文件 + 抽取后 md;文件类型限于 docx/doc/md/txt |
 | **Run** | `id` / `project_id` / `langgraph_thread_id` / `started_at` / `finished_at` / `status` | 一次完整工作流执行 |
 | **Chapter** | `id` / `run_id` / `index` / `title` / `summary` / `key_points` / `target_pages` / `final_text` / `status`(`pending`/`generating`/`awaiting_review`/`approved`/`skipped`/**`failed`**)| 提纲解析后落库;`failed` 见 FR-4.7 |

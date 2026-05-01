@@ -1,7 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3
+# 投标技术方案生成器 · 实施 Spec v3.2
 
-> **配套文档**:`REQUIREMENTS.md` v0.6(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3 (2026-05-01)。基于 v2 修正了 18 处可执行性缺陷:API Key 真快照 / 提纲确认 interrupt / 三类 arq 任务边界 / failed 重试语义 / DOCX 缓存路径 / Redis 锁正确性 / 备份能跑起来 / 并发上限真生效 / 登录失败锁 / 安全头 / 上传配额 / 占位补全。
+> **配套文档**:`REQUIREMENTS.md` v0.7(讲"做什么"),本文档讲"怎么做"。
+> **版本**:v3.2 (2026-05-02)。基于 v3 (2026-05-01) 又修了 8 处落地细节:并发名额生命周期 / enqueue 失败补偿 / Redis 内存策略 / DSN 拼装 / 项目级 errors.log / Mapped 类型 / API Key 快照在需求文档同步 / 文档口径残留。新增决策 D-T..D-X。
+> **历史**:v3 (2026-05-01) 修了 18 处可执行性缺陷;v3-pass2 修了 9 处落地细节风险;v3.2 这一轮又补了 8 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -106,7 +107,7 @@
 
 **关键并行关系**:
 - **uvicorn 与 arq 是两个独立 Python 进程**(由 supervisord 管理),通过 Redis 队列 + Postgres 共享状态。这比 v1 的"同进程 asyncio.create_task"更稳:进程崩了独立重启不互拖。
-- **EventBus 用 asyncio.Queue 实现,但前提是同进程**。因为生产者(arq worker 节点)和消费者(uvicorn SSE 端点)分进程,需要走 **Redis pub/sub** 中转。详见 §12。
+- **EventBus 实现走 Redis pub/sub(本项目最终选型)**。早期单进程方案曾考虑 asyncio.Queue,但 D-A 把 uvicorn / arq 拆成两进程后跨进程通信不可能用进程内队列;统一改 Redis pub/sub,见 §12。
 - LangGraph checkpoint 在 PostgreSQL 持久化,任意进程重启工作流可从 checkpoint 续跑(NFR-2)。
 
 ---
@@ -136,7 +137,11 @@
 | **D-Q** | 登录失败锁定**用 Redis 计数 + 锁 key**,不依赖 slowapi 的请求级限流 | FR-6.7 要求"5 次失败后锁该 IP 5 分钟",slowapi 是"匀速速率",语义不一致;改用 `INCR + EXPIRE` 双 key |
 | **D-R** | `.env` **单文件方案**:`gen-secrets.sh` 从 `.env.example` seed + sed 替换占位符,生成最终唯一 `.env`,compose 直接读 | docker compose `${VAR}` 插值只读 compose 项目根 `.env` / 宿主 env,**不**读 service 的 `env_file:` 列表;两文件方案中 postgres `${POSTGRES_PASSWORD}` 会插到占位符,起不来 |
 | **D-S** | DocxJob.arq_job_id `nullable=true` + **partial unique index** `WHERE arq_job_id IS NOT NULL`;同时 `(project_id) WHERE status IN ('pending','rendering_mermaid','pandoc')` 也 partial unique | 入队前先 INSERT 拿 id 必须支持空 arq_job_id;并发同项目两次 POST docx 应被 DB 阻断,而不是靠应用层抢锁 |
-| **D-T** | 并发名额用 **Redis SET + 每项目 alive TTL key**,不用计数器;**worker 启动时 reconcile**;唤醒由幂等 `wake_queued_projects(arq_pool)` 函数,不让"占不到名额的任务"留在 arq 里重试 | 计数器在 worker 崩溃时会泄漏正数;SET 与 alive key TTL 配合可识别僵尸条目;让 arq retry "占不到名额的任务"会反复消耗资源 |
+| **D-T** | 并发名额用 **Redis SET + 每项目 alive TTL key**,不用计数器;**worker 启动时 reconcile**;唤醒由幂等 `wake_queued_projects(arq_pool)` 函数,不让"占不到名额的任务"留在 arq 里重试。**人工等待不占名额**——task 因 interrupt 退出时 release;`/review` `/confirm-outline` `/retry` 在 enqueue 前重新 `try_acquire`,占不到 → 503 + Retry-After:60 | 计数器在 worker 崩溃时会泄漏正数;SET 与 alive key TTL 配合可识别僵尸条目;worker 进程结束后 heartbeat 必停 → "interrupt 期间持续占名额"物理上不可行;改成"task 周期 = slot 周期"语义干净,且 awaiting_review 时其他项目可以跑 |
+| **D-U** | DB commit 后再 enqueue 走**补偿动作**:enqueue 失败 → 回退 DB status + release slot + 503。`wake_queued_projects` 同样:enqueue 失败 → release + 把项目改回 queued | outbox 表对内部 10 用户工具 over-engineering;补偿动作 + reconcile 兜底已足够;reconcile 在 worker 启动时也会清理"无 alive key 但状态 running"的僵尸项目 |
+| **D-V** | Redis 用 **`noeviction` 内存策略**,不用 `allkeys-lru` | 同一 Redis 同时承载 arq 队列、active set、login lock、event pub/sub、limiter 计数。LRU 策略下,内存压力大时 Redis 会**默默驱逐任意 key**,可能让 arq 任务、并发名额、登录锁全部消失,触发难定位的 silent 故障。`noeviction` 让写入在内存满时显式失败,我们在监控 / OOM 风险下能立刻发现 |
+| **D-W** | DSN(`DATABASE_URL` / `LANGGRAPH_DSN`)由 **`config.py` 从 `POSTGRES_USER/PASSWORD/HOST/PORT/DB` 字段拼装**,不在 `.env` 写带 `${VAR}` 的派生值 | docker compose 的 `env_file:` **不**对值做变量展开;容器内 `pydantic-settings` 读 OS env 也不展开。`.env` 里 `DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@...` 实际进容器是字面值。改在 `config.py` 用 property 拼,既避免展开问题,又支持密码里含 `@/&` 等需要 URL-quote 的字符 |
+| **D-X** | 项目级错误日志写到 **`{project_dir}/errors.log`**(NFR-5 要求),与 stdout structlog 并存 | 用户排查"为什么这个项目挂了"时,需要看项目目录里的错误而不是从 docker logs 海量 stdout 里搜索;errors.log 包含 LLM 重试、章节失败、DOCX 失败、工作流顶层异常 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -450,15 +455,14 @@ plugins = ["pydantic.mypy"]
 APP_PORT=12123
 TZ=Asia/Shanghai
 
-# ─── 数据库 ────────────────────────────────────
+# ─── 数据库(组件字段;DSN 由 config.py 拼装,见 D-W)──────
+# 注意:不再写 DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@...
+# 因为 docker compose env_file 不展开 ${VAR},容器内会拿到字面值。
 POSTGRES_USER=bid_app
 POSTGRES_PASSWORD=__GENERATE_ME__
 POSTGRES_DB=bid_app
 POSTGRES_HOST=postgres
 POSTGRES_PORT=5432
-DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
-# 给 LangGraph PostgresSaver 用的 DSN(纯 psycopg/asyncpg 格式,不带 SQLAlchemy 前缀)
-LANGGRAPH_DSN=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
 
 # ─── Redis ─────────────────────────────────────
 REDIS_URL=redis://redis:6379/0
@@ -577,6 +581,7 @@ docker compose up -d
 ```python
 # bid_app/config.py 关键片段
 import re, sys
+from urllib.parse import quote
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -587,7 +592,15 @@ class Settings(BaseSettings):
 
     bid_app_master_key: str
     jwt_secret: str
+
+    # 组件字段(D-W)
+    postgres_user: str
     postgres_password: str
+    postgres_host: str = "postgres"
+    postgres_port: int = 5432
+    postgres_db: str
+
+    redis_url: str = "redis://redis:6379/0"
     # ... 其余字段省略
 
     @field_validator("bid_app_master_key", "jwt_secret")
@@ -604,6 +617,20 @@ class Settings(BaseSettings):
             raise ValueError("POSTGRES_PASSWORD must be set (run scripts/gen-secrets.sh)")
         return v
 
+    @property
+    def database_url(self) -> str:
+        """SQLAlchemy 异步引擎用(asyncpg)。密码 URL-quote 防 @/&/# 等特殊字符。"""
+        pwd = quote(self.postgres_password, safe="")
+        return (f"postgresql+asyncpg://{self.postgres_user}:{pwd}"
+                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}")
+
+    @property
+    def langgraph_dsn(self) -> str:
+        """langgraph-checkpoint-postgres 用(psycopg3,纯 DSN 不带 SQLAlchemy 前缀)。"""
+        pwd = quote(self.postgres_password, safe="")
+        return (f"postgresql://{self.postgres_user}:{pwd}"
+                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}")
+
 
 try:
     settings = Settings()
@@ -611,6 +638,8 @@ except Exception as e:
     print(f"❌ Config validation failed: {e}", file=sys.stderr)
     sys.exit(1)
 ```
+
+> ⚠️ 不要再写 `DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@...` 进 `.env`。docker compose 把 `env_file:` 内容**逐字**塞进容器环境(不展开 `${VAR}`),pydantic-settings 读 OS env 也不展开,结果容器拿到字面值 `${POSTGRES_PASSWORD}` 解析失败。让 config.py 自己拼是最稳的方案。
 
 ---
 
@@ -699,6 +728,7 @@ class TimestampMixin:
 `models/user.py`:
 
 ```python
+from datetime import datetime
 from sqlalchemy import String, Boolean, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 from .base import Base, TimestampMixin
@@ -712,14 +742,15 @@ class User(Base, TimestampMixin):
     role: Mapped[str] = mapped_column(String(16), default="user")  # user|admin
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=True)
-    last_login_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 ```
 
 `models/api_key.py`:
 
 ```python
+from datetime import datetime
 from sqlalchemy import LargeBinary, ForeignKey, String, DateTime, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 from .base import Base, TimestampMixin
 
 class ApiKey(Base, TimestampMixin):
@@ -730,8 +761,8 @@ class ApiKey(Base, TimestampMixin):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     provider: Mapped[str] = mapped_column(String(32), default="dashscope")
     encrypted_key: Mapped[bytes] = mapped_column(LargeBinary)  # AES-GCM:nonce(12)+ciphertext
-    last_validated_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    updated_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 ```
 
 `models/project.py`:
@@ -789,6 +820,7 @@ class Document(Base, TimestampMixin):
 `models/run.py`:
 
 ```python
+from datetime import datetime
 from sqlalchemy import String, ForeignKey, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 from .base import Base, TimestampMixin
@@ -799,8 +831,8 @@ class Run(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
     langgraph_thread_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    started_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="running")
     # running | done | failed | aborted
     error: Mapped[str | None] = mapped_column(String(4000), nullable=True)
@@ -919,8 +951,10 @@ class DocxJob(Base, TimestampMixin):
     # pending|rendering_mermaid|pandoc|done|failed
     error: Mapped[str | None] = mapped_column(String(4000), nullable=True)
     output_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    finished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 ```
+
+> 注:`DocxJob` 模块顶部需 `from datetime import datetime`。其他模型(User/ApiKey/Run)同样。
 
 `models/__init__.py`:
 
@@ -950,21 +984,29 @@ __all__ = [
 `migrations/env.py` 关键片段:
 
 ```python
+import os
+from urllib.parse import quote
+
 from bid_app.models import Base
 target_metadata = Base.metadata
 
-# Alembic 用同步驱动(SQLAlchemy 同步引擎运行 migration);
-# DATABASE_URL 是 asyncpg(给 FastAPI),这里替换成 psycopg3 的 SQLAlchemy 形式。
-# 依赖:pyproject.toml 中已有 psycopg[binary]。
+
 def get_url() -> str:
-    url = os.environ["DATABASE_URL"]
-    return url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    """与 config.py 的 settings.database_url 等价,但 alembic 用同步驱动 psycopg3。
+    不读 DATABASE_URL 环境变量(已不再设),从组件字段拼。"""
+    user = os.environ["POSTGRES_USER"]
+    pwd = quote(os.environ["POSTGRES_PASSWORD"], safe="")
+    host = os.environ.get("POSTGRES_HOST", "postgres")
+    port = os.environ.get("POSTGRES_PORT", "5432")
+    db = os.environ["POSTGRES_DB"]
+    return f"postgresql+psycopg://{user}:{pwd}@{host}:{port}/{db}"
+
 
 config.set_main_option("sqlalchemy.url", get_url())
 ```
 
 > ⚠️ 不要替换为裸 `postgresql://`,SQLAlchemy 默认走 psycopg2,而我们没装 psycopg2;migration 会启动即失败。
-> `LANGGRAPH_DSN`(env 变量)是 `langgraph-checkpoint-postgres` 用的纯 DSN(不带 SQLAlchemy 前缀),格式 `postgresql://user:pwd@host:port/db` 即可,该库内部用 psycopg3。
+> `langgraph-checkpoint-postgres` 用的 DSN 由 `settings.langgraph_dsn` 拼装,内部用 psycopg3。
 
 `migrations/versions/0001_initial.py`(完整):
 
@@ -1555,7 +1597,13 @@ async def sync_project_status(project_id: int, status: str) -> None:
 
 async def sync_outline_to_db(run_id: int, chapters: list[dict],
                              *, replace: bool = False) -> None:
-    """把 chapters 数组落到 chapters 表。replace=True 时先清空再写(用户编辑后用)。"""
+    """把 chapters 数组落到 chapters 表。replace=True 时先清空再写(用户编辑后用)。
+
+    注:用 ORM insert 而不是裸 sa.text + JSON 字符串绑定,
+    SQLAlchemy 自己会把 list 序列化成 jsonb,避免 sa.text 时的类型推断歧义。"""
+    from ..models import Chapter
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     async with session_factory() as s:
         async with s.begin():
             if replace:
@@ -1564,18 +1612,23 @@ async def sync_outline_to_db(run_id: int, chapters: list[dict],
                     {"r": run_id},
                 )
             for i, c in enumerate(chapters):
-                await s.execute(sa.text(
-                    "INSERT INTO chapters (run_id, index, title, summary, "
-                    "key_points, target_pages) VALUES (:r,:i,:t,:s,:k,:p) "
-                    "ON CONFLICT (run_id, index) DO UPDATE SET "
-                    "title=EXCLUDED.title, summary=EXCLUDED.summary, "
-                    "key_points=EXCLUDED.key_points, target_pages=EXCLUDED.target_pages"
-                ), {
-                    "r": run_id, "i": i,
-                    "t": c["title"], "s": c.get("summary"),
-                    "k": json.dumps(c.get("key_points", []), ensure_ascii=False),
-                    "p": c.get("target_pages", 3),
-                })
+                stmt = pg_insert(Chapter).values(
+                    run_id=run_id,
+                    index=i,
+                    title=c["title"],
+                    summary=c.get("summary"),
+                    key_points=c.get("key_points", []),   # SQLAlchemy 把 list → JSON
+                    target_pages=c.get("target_pages", 3),
+                ).on_conflict_do_update(
+                    index_elements=["run_id", "index"],
+                    set_={
+                        "title": sa.text("EXCLUDED.title"),
+                        "summary": sa.text("EXCLUDED.summary"),
+                        "key_points": sa.text("EXCLUDED.key_points"),
+                        "target_pages": sa.text("EXCLUDED.target_pages"),
+                    },
+                )
+                await s.execute(stmt)
 ```
 
 ### 10.7 并发名额服务(`services/concurrency.py`,D-T 重写)
@@ -1725,11 +1778,21 @@ async def wake_queued_projects(arq_pool) -> int:
                         await s.execute(sa.text(
                             "UPDATE projects SET status='running' WHERE id=:p"
                         ), {"p": next_pid})
-                    # commit 后再 enqueue,避免 enqueue 后事务回滚导致重复
-                    await arq_pool.enqueue_job(
-                        "start_workflow_task",
-                        project_id=next_pid, run_id=run_id, thread_id=thread_id,
-                    )
+                    # commit 后再 enqueue;若 enqueue 抛异常,补偿:释放 slot + 把项目改回 queued
+                    try:
+                        await arq_pool.enqueue_job(
+                            "start_workflow_task",
+                            project_id=next_pid, run_id=run_id, thread_id=thread_id,
+                        )
+                    except Exception:
+                        log.exception("wake_enqueue_failed", project_id=next_pid)
+                        await release_project_slot(next_pid)
+                        async with session_factory() as s2:
+                            await s2.execute(sa.text(
+                                "UPDATE projects SET status='queued' WHERE id=:p"
+                            ), {"p": next_pid})
+                            await s2.commit()
+                        return 0   # 让外层重试(下次 release 触发)
                     # 循环看下一个,直到名额满或队列空
         finally:
             await r.delete(WAKE_LOCK)
@@ -1777,12 +1840,13 @@ async def on_startup(ctx):
     await wake_queued_projects(ctx["arq_pool"])
 ```
 
-**worker/tasks.py 的三类任务**改为正常 return + heartbeat 上下文:
+**worker/tasks.py 的三类任务**(D-T 修正版,人工等待不占名额):
+
+> ⚠️ **设计原则**:slot 代表"当前正在跑 LLM/工作流的项目"。worker 进程结束(因为 `interrupt` 退出 `astream` 循环)heartbeat 必停,alive TTL 过期会被 reconcile 判僵尸——所以 v3-pass1 的"awaiting_review 持续占名额"在物理上也不可能成立。**正确语义**:每个 task 进入时持有名额,任务返回(包括因 interrupt 自然结束)就释放。下一次 resume/retry 由 API 端点先 `try_acquire`,占到才入队;占不到返回 503。
 
 ```python
 async def start_workflow_task(ctx, *, project_id: int, run_id: int, thread_id: str):
-    # 注意:此任务被 enqueue 时 /start 端点已经 try_acquire 成功,所以这里不再 try_acquire,
-    # 直接 heartbeat 续租 + 跑 graph。release 在 finally。
+    """全新启动。被 enqueue 时 /start 已 try_acquire 成功,task 内只 heartbeat。"""
     arq_pool = ctx["arq_pool"]
     saver = ctx["checkpointer"]
     graph = build_graph(saver)
@@ -1794,63 +1858,96 @@ async def start_workflow_task(ctx, *, project_id: int, run_id: int, thread_id: s
             initial = await build_initial_state(project_id, run_id)
             async for _ in graph.astream(initial, config, stream_mode="values"):
                 pass
+    except Exception as e:
+        await append_error(_project_dir(project_id), f"start_workflow_task crashed: {e!r}",
+                           run_id=run_id, thread_id=thread_id)
+        await _set_project_status(project_id, "failed")
+        raise
     finally:
+        # 不论是 interrupt 自然停 / 异常 / 跑完,都释放 slot,让下一个项目跑
         await release_project_slot(project_id)
-        # 释放后立即唤醒下一个 queued(幂等,可同时被多个 finally 调)
         await wake_queued_projects(arq_pool)
 
 
 async def resume_review_task(ctx, *, project_id: int, run_id: int, thread_id: str,
                              resume_payload: dict):
-    """resume 不重新 acquire 名额——awaiting_review 期间名额一直占着"""
+    """API 端点已 try_acquire 成功才把这个 task 入队;同 start_workflow_task。"""
+    arq_pool = ctx["arq_pool"]
     saver = ctx["checkpointer"]
     graph = build_graph(saver)
     config = {"configurable": {"thread_id": thread_id}}
-    arq_pool = ctx["arq_pool"]
+
     try:
         async with project_heartbeat(project_id):
             async for _ in graph.astream(Command(resume=resume_payload), config,
                                          stream_mode="values"):
                 pass
+    except Exception as e:
+        await append_error(_project_dir(project_id),
+                           f"resume_review_task crashed: {e!r}",
+                           run_id=run_id, payload=resume_payload)
+        await _set_project_status(project_id, "failed")
+        raise
     finally:
-        # 工作流可能在新一轮 awaiting_review 又 interrupt 了——这种情况名额仍占着,
-        # 不能 release。靠 status 判断:如果 status 是 awaiting_review/running 不释放;
-        # done/failed/aborted 才释放。
-        await _maybe_release(project_id, arq_pool)
+        await release_project_slot(project_id)
+        await wake_queued_projects(arq_pool)
 
 
 async def retry_failed_chapter_task(ctx, *, project_id: int, run_id: int, thread_id: str,
                                     chapter_index: int, reviewer_id: int):
-    """retry 同 resume:名额不重新拿,继续占着"""
-    # ... DB 重置(如前)
+    """API 端点已 try_acquire 成功才入队;DB 重置 + 续跑。"""
+    # DB 重置 chapter(略,见前文)
+    arq_pool = ctx["arq_pool"]
     saver = ctx["checkpointer"]
     graph = build_graph(saver)
     config = {"configurable": {"thread_id": thread_id}}
-    arq_pool = ctx["arq_pool"]
+
     try:
         async with project_heartbeat(project_id):
             await graph.aupdate_state(config, {"retry_count": 0})
             async for _ in graph.astream(None, config, stream_mode="values"):
                 pass
+    except Exception as e:
+        await append_error(_project_dir(project_id),
+                           f"retry_failed_chapter_task crashed: {e!r}",
+                           run_id=run_id, chapter_index=chapter_index)
+        await _set_project_status(project_id, "failed")
+        raise
     finally:
-        await _maybe_release(project_id, arq_pool)
-
-
-async def _maybe_release(project_id: int, arq_pool) -> None:
-    """根据当前项目 DB 状态决定是否 release。
-    awaiting_review/running 不释放(graph 还活着);done/failed/aborted/queued 释放。"""
-    async with session_factory() as s:
-        row = await s.execute(
-            sa.text("SELECT status FROM projects WHERE id=:p"), {"p": project_id},
-        )
-        st = row.scalar_one()
-    if st in ("done", "failed", "aborted"):
         await release_project_slot(project_id)
         await wake_queued_projects(arq_pool)
+
+
+async def _project_dir(project_id: int) -> Path:
+    """从 DB 取项目目录,用于错误日志写入。"""
+    async with session_factory() as s:
+        row = await s.execute(
+            sa.text("SELECT dir_path FROM projects WHERE id=:p"), {"p": project_id},
+        )
+        return Path(row.scalar_one())
 ```
 
 > `arq` `WorkerSettings.max_jobs` 同步设为 `MAX_CONCURRENT_PROJECTS`,即便业务 SET 漂移,worker 物理上也不会超并发。两层独立。
-> `/start` API 端点决定"占名额还是 queued",见 §15.1 改写。
+
+**API 端点的 acquire 责任**(`/start` `/review` `/confirm-outline` `/retry` 都要做):
+
+```python
+# 伪代码,真实端点见 §15
+acquired = await try_acquire_project_slot(project_id)
+if not acquired:
+    raise HTTPException(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="并发上限已达,请 1 分钟后重试",
+        headers={"Retry-After": "60"},
+    )
+try:
+    await arq_pool.enqueue_job(...)
+except Exception:
+    await release_project_slot(project_id)   # 补偿
+    raise HTTPException(503, "无法入队任务,请稍后重试")
+```
+
+`/start` 仍可以选 queued 而非 503(因为是新项目,排队等待是合理 UX);resume/review/retry 用户在等审核交互响应,503 让前端立刻 toast 重试更合适。
 
 ### 10.6 state ↔ DB 同步(`workflow/sync.py`)
 
@@ -2996,13 +3093,23 @@ async def start_workflow(
         project.status = "queued"
     await db.commit()
 
-    # 占名额成功才入队;失败的等 release 时由 wake_queued_projects 唤醒
+    # 占名额成功才入队;失败 → 补偿(D-U):回退 status 与 slot,返回 503
     if acquired:
         arq_pool = request.app.state.arq_pool
-        await arq_pool.enqueue_job(
-            "start_workflow_task",
-            project_id=project_id, run_id=run.id, thread_id=thread_id,
-        )
+        try:
+            await arq_pool.enqueue_job(
+                "start_workflow_task",
+                project_id=project_id, run_id=run.id, thread_id=thread_id,
+            )
+        except Exception as e:
+            log.exception("start_enqueue_failed", project_id=project_id)
+            project.status = "init"
+            await db.commit()
+            await release_project_slot(project_id)
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="无法入队工作流任务,请稍后重试 /start",
+            ) from e
     return {"run_id": run.id, "queued": not acquired}
 
 
@@ -3028,14 +3135,26 @@ async def confirm_outline(
                 raise HTTPException(400, "every chapter needs title/key_points/target_pages")
 
     run = await _get_active_run(db, project_id)
+
+    # ⭐ D-T:confirm-outline 前 try_acquire
+    if not await try_acquire_project_slot(project_id):
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="系统繁忙,请稍后重试",
+            headers={"Retry-After": "60"},
+        )
     arq_pool = request.app.state.arq_pool
-    await arq_pool.enqueue_job(
-        "resume_review_task",
-        project_id=project_id, run_id=run.id,
-        thread_id=run.langgraph_thread_id,
-        resume_payload={"kind": "outline_confirm",
-                        "chapters": body.chapters or []},
-    )
+    try:
+        await arq_pool.enqueue_job(
+            "resume_review_task",
+            project_id=project_id, run_id=run.id,
+            thread_id=run.langgraph_thread_id,
+            resume_payload={"kind": "outline_confirm",
+                            "chapters": body.chapters or []},
+        )
+    except Exception:
+        await release_project_slot(project_id)
+        raise HTTPException(503, "无法入队提纲确认任务,请稍后重试")
     return {"ok": True}
 
 
@@ -3131,18 +3250,29 @@ async def review_chapter(
     ))
     await db.commit()
 
-    # 在 arq 里 resume(D-I 三类任务之 resume_review_task)
+    # ⭐ D-T:resume 前 try_acquire,占不到 → 503 让前端 1 分钟后重试
+    if not await try_acquire_project_slot(project_id):
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="系统繁忙(并发上限已达),请稍后重试",
+            headers={"Retry-After": "60"},
+        )
+
     arq_pool = request.app.state.arq_pool
-    await arq_pool.enqueue_job(
-        "resume_review_task",
-        project_id=project_id, run_id=run.id,
-        thread_id=run.langgraph_thread_id,
-        resume_payload={
-            "kind": "chapter_review",
-            "decision": body.decision,
-            "feedback": body.feedback or "",
-        },
-    )
+    try:
+        await arq_pool.enqueue_job(
+            "resume_review_task",
+            project_id=project_id, run_id=run.id,
+            thread_id=run.langgraph_thread_id,
+            resume_payload={
+                "kind": "chapter_review",
+                "decision": body.decision,
+                "feedback": body.feedback or "",
+            },
+        )
+    except Exception:
+        await release_project_slot(project_id)   # 补偿
+        raise HTTPException(503, "无法入队审核任务,请稍后重试")
     return {"ok": True}
 
 
@@ -3164,14 +3294,25 @@ async def retry_chapter(
     db.add(ReviewEvent(chapter_id=chapter.id, reviewer_id=user.id, decision="retry_failed"))
     await db.commit()
 
+    # ⭐ D-T:retry 前 try_acquire(同 review)
+    if not await try_acquire_project_slot(project_id):
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="系统繁忙,请稍后重试",
+            headers={"Retry-After": "60"},
+        )
     arq_pool = request.app.state.arq_pool
-    await arq_pool.enqueue_job(
-        "retry_failed_chapter_task",
-        project_id=project_id, run_id=run.id,
-        thread_id=run.langgraph_thread_id,
-        chapter_index=idx,
-        reviewer_id=user.id,
-    )
+    try:
+        await arq_pool.enqueue_job(
+            "retry_failed_chapter_task",
+            project_id=project_id, run_id=run.id,
+            thread_id=run.langgraph_thread_id,
+            chapter_index=idx,
+            reviewer_id=user.id,
+        )
+    except Exception:
+        await release_project_slot(project_id)
+        raise HTTPException(503, "无法入队重试任务,请稍后重试")
     return {"ok": True}
 ```
 
@@ -3866,7 +4007,11 @@ services:
     image: redis:7-alpine
     container_name: bid-redis
     restart: unless-stopped
-    command: redis-server --maxmemory 100mb --maxmemory-policy allkeys-lru --appendonly yes
+    # ⭐ D-V:noeviction 而不是 allkeys-lru。Redis 同时承载 arq 队列 / 并发名额 SET /
+    # 登录锁 / SSE pub/sub / limiter 计数;LRU 会无声驱逐这些关键 key,导致 silent 故障。
+    # noeviction 在内存满时让写入失败,触发监控告警,问题暴露明确。
+    # appendonly=yes 让重启后队列与 SET 不丢。
+    command: redis-server --maxmemory 200mb --maxmemory-policy noeviction --appendonly yes
     volumes:
       - /var/lib/bid-app/redis-data:/data
       - /etc/localtime:/etc/localtime:ro
@@ -4097,7 +4242,90 @@ def setup_logging(level: str | None = None) -> None:
     )
 ```
 
-### 19.2 Trace ID 注入
+### 19.2 项目级 errors.log(D-X / NFR-5)
+
+需求要 LLM 重试 / 章节失败 / DOCX 失败 / 工作流顶层异常都写到 `{project_dir}/errors.log`。这是**与** stdout structlog 并存的:运维平时看 docker logs 整体扫,排查具体项目问题时直接 `tail -f /var/lib/bid-app/projects/{id}/errors.log`。
+
+`core/error_log.py`:
+
+```python
+"""项目级错误日志写入。线程安全靠 asyncio.Lock(同进程);
+跨进程写并发由 OS append 模式 + 行级原子保证(每行 < PIPE_BUF 4KB)。"""
+
+import asyncio
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import structlog
+
+from ..config import settings
+
+log = structlog.get_logger()
+_lock = asyncio.Lock()
+
+
+async def append_error(project_dir: Path, message: str, **fields) -> None:
+    """追加一行 ISO 时间戳 + message + key=val 到 {project_dir}/errors.log。
+    永不抛异常(写日志失败不应影响业务流程),失败由 structlog 记录到 stdout。"""
+    try:
+        project_dir.mkdir(parents=True, exist_ok=True)
+        log_file = project_dir / "errors.log"
+        ts = datetime.now(ZoneInfo(settings.tz)).isoformat(timespec="seconds")
+        extras = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
+        line = f"[{ts}] {message}"
+        if extras:
+            line += f" | {extras}"
+        line += "\n"
+        async with _lock:
+            # 同步 IO,加锁串行;append 模式 + 短行保证多进程写不交错
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(line)
+    except Exception:
+        log.exception("append_error_failed", project_dir=str(project_dir))
+```
+
+调用点:
+
+| 调用方 | 何时调 | message 示例 |
+|---|---|---|
+| `services/llm.py` 重试 catch | 单次 LLM 调用抛 RateLimit/Timeout 进重试时 | `LLM retry`, model=..., attempt=1, error=... |
+| `services/llm.py` 终态 | 3 次重试都失败 / 总超时 10 分钟 | `LLM exhausted`, model=..., last_error=... |
+| `workflow/nodes/write_chapter.py` failed 分支 | 章节标 failed 之前 | `chapter failed`, chapter_index=..., reason=... |
+| `worker/tasks.py` 顶层 except | task 整体 crash | `task crashed`, task_name=..., trace=... |
+| `services/docx_export.py` | pandoc/mermaid 异常 | `docx export failed`, stage=..., stderr=... |
+
+LLM service 里的整合(对应 §11.1):
+
+```python
+# services/llm.py 内,在 catch 块加:
+from ..core.error_log import append_error
+from ..db import session_factory
+
+async def _project_dir(project_id: int) -> Path:
+    async with session_factory() as s:
+        row = await s.execute(
+            sa.text("SELECT dir_path FROM projects WHERE id=:p"), {"p": project_id},
+        )
+        return Path(row.scalar_one())
+
+# 在 call_llm_stream 的 except 中:
+except (RateLimitError, ServiceUnavailableError, APIConnectionError, Timeout) as e:
+    last_err = e
+    log.warning("llm_retry", model=model, attempt=attempt, error=str(e))
+    await append_error(await _project_dir(project_id),
+                       f"LLM retry attempt={attempt}",
+                       model=model, error_type=type(e).__name__, error=str(e))
+    if attempt < settings.llm_retry_max:
+        await asyncio.sleep(backoffs[attempt])
+        continue
+    await append_error(await _project_dir(project_id),
+                       "LLM exhausted",
+                       model=model, total_attempts=attempt + 1, last_error=str(e))
+    raise LLMRetryFailed(str(e)) from e
+```
+
+### 19.3 Trace ID 注入
 
 ```python
 # core/middleware.py
@@ -4117,7 +4345,7 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
 
 工作流节点也用 `bound_contextvars(run_id=..., chapter_index=..., trace_id=...)`,所有日志自动带这些字段,串起来一次请求的全链路。
 
-### 19.3 健康检查输出示例
+### 19.4 健康检查输出示例
 
 ```json
 {"app": "ok", "db": "ok", "redis": "ok"}
