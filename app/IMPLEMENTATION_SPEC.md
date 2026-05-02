@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.19
+# 投标技术方案生成器 · 实施 Spec v3.20
 
 > **配套文档**:`REQUIREMENTS.md` v0.12(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.19 (2026-05-02)。基于 v3.18 修了 3 处:**D-CU 直接回归测试**(① 旧 proposal.docx 存在 → 新 job rendering 后必须 unlink + mermaid 在 unlink 之后启动;② unlink OSError → job failed + mermaid/pandoc 都不跑,D-CX) / **conftest async fixture 改 `pytest_asyncio.fixture`**(避免 strict 模式下不识别;与 §18.1 一致,D-CY) / **R12 文字精修(三处 → 四处 repair,加 POST cached)+ D-CU 顺序措辞精确**(切到 rendering 后立即 unlink,而不是 rendering 前;避免实施者把 unlink 放到状态切换前削弱守护语义,D-CZ)。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.19 累计 110 处。
+> **版本**:v3.20 (2026-05-02)。基于 v3.19 修了 3 处测试规格 / 注释口径细节:**D-CU 正常路径测试硬化**(proposal.md 写真 mermaid block,完全 fake create_subprocess_exec 不依赖本机 mmdc/pandoc,直接断 `unlink_stale < mmdc < pandoc` 顺序去掉 if 守护,D-DA) / **OSError 测试 unlink 引用稳健化**(`real_unlink = Path.unlink` 在 monkeypatch 之前保存,不依赖 `__wrapped__`,D-DB) / **注释/标题口径同步"四处 repair"**(D-CU 代码注释三处→四处;§18.5 标题包含 D-CW/D-CX/D-CY/D-DA/D-DB,D-DC)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.20 累计 113 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -221,6 +221,9 @@
 | **D-CX** | 补两个 D-CU 直接回归用例:① `test_new_job_unlinks_stale_final_at_rendering` — 旧 `proposal.docx` 存在时,新 job 切到 rendering 后必须 unlink,且 mermaid 启动在 unlink 之后;② `test_unlink_oserror_marks_job_failed_and_skips_render` — unlink 抛 `OSError` → job 标 failed,mermaid/pandoc 都不被启动 | D-CU 是 v3.18 的核心新不变量,但 D-CH/D-CS 测试集只覆盖 assemble invalidation 与 _commit_done 分支,没用例直接断"rendering 阶段会清旧文件"。补两个用例后 D-CU 的正常 / 失败两条路径都有回归保护,后续重构能立刻发现回归 |
 | **D-CY** | conftest.py 所有 `@pytest.fixture async def` 改成 `@pytest_asyncio.fixture`(与 §18.1 一致);文档说明 strict 模式下 `@pytest.fixture` 不识别 async 函数,要么用专门装饰器要么 pyproject 配 `asyncio_mode = "auto"` | v3.18 D-CW 加 fixture 时用了通用 `@pytest.fixture`,但 pytest-asyncio strict 模式下整个 fixture 不会被识别为 async,fixture 实际不生效会让所有 D-CR/D-CS/D-CX 用例报参数缺失。统一显式装饰器最稳 |
 | **D-CZ** | R12 finalizing repair 文字从"三处"改成"四处"(加 POST cached,D-CJ POST);顶部摘要 + D-CU 决策行措辞从"rendering 前 unlink"改成"切到 rendering 后立即 unlink",顺序更明确 | v3.18 R12 写"finalizing 三处 repair(cleanup / GET /docx-job / GET 下载)",但代码里 POST `/proposal.docx` 也做 finalizing → done 修复,漏列让 R12 缓解链路与实际不一致;"rendering 前 unlink"字面会被实施者解读成"在状态切换之前",可能让 unlink 在 pending 状态下被多个 task 误触发,削弱 D-BX 状态前置守护 |
+| **D-DA** | `test_new_job_unlinks_stale_final_at_rendering`:① proposal.md 写最小 mermaid block 触发 mmdc;② `create_subprocess_exec` 完全 fake(不调真实 mmdc/pandoc),fake 内部 touch png/docx 模拟成功;③ 直接断 `unlink_stale < mmdc < pandoc` 顺序,去掉 if 守护 | v3.19 测试有三个削弱断言强度的细节:proposal.md 是 `# t` 没 mermaid → mmdc 永远不会被触发;spy_subproc 后续仍 await 真实 `create_subprocess_exec` → 依赖宿主 mmdc/pandoc;关键顺序断言被 `if "mmdc" in call_log` 守护,本机没装 mmdc 时整个断言被跳过,等于无验证。修正后 D-CU 顺序保证有真正回归 |
+| **D-DB** | OSError 测试用 `real_unlink = Path.unlink` 在 `monkeypatch.setattr` 之前保存原引用;`boom_unlink` 兜底分支调 `real_unlink` 而不是 `Path.unlink.__wrapped__` | `monkeypatch.setattr(Path, "unlink", boom_unlink)` 之后 `Path.unlink` 已是 `boom_unlink`,`__wrapped__` 不一定存在(monkeypatch 不会自动留 wrap 引用)。虽然测试逻辑里"不会跑到"那条分支,但写法本身脆,后续若加任何对其它路径的 unlink 都会触发 AttributeError;先保存原引用是最稳的兼容方式 |
+| **D-DC** | D-CU 代码注释里 finalizing repair "三处" → "四处"(对齐 R12 / D-CZ);§18.5 标题改"汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB)";测试文件头注释同步加 D-CX/D-DA/D-DB | 代码注释和决策表里"四处 repair"已对齐,但 D-CU 内联注释还停在"三处",实施者读代码段会按旧口径理解,可能漏 POST cached 路径;§18.5 标题落后于实际包含的决策项,标签同步只是文档一致性,但落地时是工程师对照决策表跑测试的入口 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -3781,8 +3784,10 @@ async def generate_docx_task(ctx, *, project_id: int, docx_job_id: int) -> dict:
     # ⭐ D-CU:进 rendering 阶段后,**立即强制 unlink 旧 final_path**(若存在)
     # 这是 finalizing repair 安全性的关键前提:让"finalizing 期间 final_path
     # 存在 ⇔ 当前 task 已 atomic rename"严格成立。否则旧 job(invalidated 后
-    # unlink 失败 / 用户手动复制)残留的 proposal.docx,会让 D-BY/D-CD/D-CO
-    # 三处 finalizing repair 把当前 task 错误标 done,实际下载的是旧 DOCX
+    # unlink 失败 / 用户手动复制)残留的 proposal.docx,会让
+    # **四处 finalizing repair**(cleanup / POST cached / GET /docx-job /
+    # GET 下载,见 D-BY / D-CJ POST / D-CD / D-CO)把当前 task 错误标 done,
+    # 实际下载的是旧 DOCX
     # unlink 失败:UPDATE failed + raise,本次 task 退出,前端可重试
     # missing_ok=True:文件不存在不算失败(常态)
     final_path_to_clear = project_dir / "proposal.docx"
@@ -5844,7 +5849,7 @@ async def test_chapter_failed_after_3_retries(client, db_engine, monkeypatch):
     assert chapter.status == "approved"
 ```
 
-### 18.5 DOCX 状态机回归测试(D-CH / D-CL / D-CR / D-CS)
+### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB)
 
 **conftest.py 必备 fixture**(D-CR:测试代码依赖,需在 conftest.py 落地):
 
@@ -5950,7 +5955,7 @@ async def auth_client(user_factory):
 **回归用例**(`tests/integration/test_docx.py`):
 
 ```python
-# tests/integration/test_docx.py — D-CH/D-CL/D-CR/D-CS 可执行用例
+# tests/integration/test_docx.py — D-CH/D-CL/D-CR/D-CS/D-CX/D-DA/D-DB 可执行用例
 import asyncio                            # ⭐ D-CR:create_subprocess_exec 用得到
 import uuid
 
@@ -6158,18 +6163,27 @@ async def test_commit_done_skips_when_invalidated_and_unlinks_final(
 
 @pytest.mark.asyncio
 async def test_new_job_unlinks_stale_final_at_rendering(
-    db, project_factory, docx_job_factory, monkeypatch,
+    db, project_factory, docx_job_factory, monkeypatch, tmp_path,
 ):
-    """⭐ D-CX:验证 D-CU 正常路径 — 旧 proposal.docx 残留时,新 job 切到
-    rendering_mermaid 后必须立即 unlink;之后 mermaid 才被允许启动。"""
+    """⭐ D-CX(D-DA 修正版):验证 D-CU 正常路径 —
+    旧 proposal.docx 残留时,新 job 切到 rendering_mermaid 后必须立即 unlink,
+    且 unlink 必须早于 mmdc / pandoc 子进程启动。
+
+    D-DA 修正:① proposal.md 写入真 mermaid block 触发 mmdc;② 完全 fake
+    create_subprocess_exec 不依赖本机 mmdc/pandoc;③ 直接断顺序,不再 if 守护。
+    """
     project = await project_factory()
     stale = Path(project.dir_path) / "proposal.docx"
     stale.write_bytes(b"old docx residue")
     job = await docx_job_factory(project_id=project.id, status="pending")
-    (Path(project.dir_path) / "proposal.md").write_text("# t", encoding="utf-8")
+    # ⭐ D-DA:写 mermaid block 让 _render_mermaid 一定调 mmdc
+    (Path(project.dir_path) / "proposal.md").write_text(
+        "# t\n\n```mermaid\ngraph TD; A-->B\n```\n", encoding="utf-8"
+    )
 
-    # spy:mermaid 在 unlink 之后才该被调用;我们记录 unlink 与 mermaid 的相对顺序
     call_log: list[str] = []
+
+    # spy unlink:先保存原引用再 setattr,避免 __wrapped__ 不可靠
     real_unlink = Path.unlink
     def spy_unlink(self, *a, **kw):
         if str(self) == str(stale):
@@ -6177,30 +6191,49 @@ async def test_new_job_unlinks_stale_final_at_rendering(
         return real_unlink(self, *a, **kw)
     monkeypatch.setattr(Path, "unlink", spy_unlink)
 
-    real_subproc = asyncio.create_subprocess_exec
-    async def spy_subproc(*args, **kw):
-        if args and "mmdc" in str(args[0]):
+    # ⭐ D-DA:完全 fake create_subprocess_exec,**不**调用真实二进制。
+    # 让 mmdc 假装"成功生成 PNG"(_render_mermaid 检查 png.exists() 后才信任成功);
+    # 让 pandoc 假装"成功生成 docx"(_export_docx_inner 之后会 rename tmp 路径)。
+    async def fake_subproc(*args, **kw):
+        cmd = str(args[0]) if args else ""
+        if "mmdc" in cmd:
             call_log.append("mmdc")
-        elif args and "pandoc" in str(args[0]):
+            # mmdc -i src -o png ... 第 4 个参数是 -o 后的 png 路径
+            # 简化处理:扫 args 找 -o 之后的路径并 touch 一个文件
+            arg_list = list(args)
+            try:
+                png_path = Path(arg_list[arg_list.index("-o") + 1])
+                png_path.write_bytes(b"\x89PNG fake")
+            except (ValueError, IndexError):
+                pass
+        elif "pandoc" in cmd:
             call_log.append("pandoc")
-        return await real_subproc(*args, **kw)
+            arg_list = list(args)
+            try:
+                docx_path = Path(arg_list[arg_list.index("-o") + 1])
+                docx_path.write_bytes(b"PK fake docx")
+            except (ValueError, IndexError):
+                pass
+        class _P:
+            returncode = 0
+            async def communicate(self): return (b"", b"")
+        return _P()
     monkeypatch.setattr(
-        "bid_app.services.docx_export.asyncio.create_subprocess_exec", spy_subproc,
+        "bid_app.services.docx_export.asyncio.create_subprocess_exec",
+        fake_subproc,
     )
-    # mermaid 没真子进程也行,直接打桩成 returncode=0(避免依赖外部 mmdc)
-    # 实际工程里跑 mmdc + pandoc;这里只断 unlink_stale 在 mmdc 之前
 
     from bid_app.worker.tasks import generate_docx_task
-    try:
-        await generate_docx_task(ctx={}, project_id=project.id, docx_job_id=job.id)
-    except Exception:
-        pass    # mmdc/pandoc 真依赖外部二进制,失败不影响断点逻辑
+    await generate_docx_task(ctx={}, project_id=project.id, docx_job_id=job.id)
 
+    # ⭐ D-DA:直接断顺序,不再 if 守护
     assert "unlink_stale" in call_log, "D-CU 必须在 rendering 阶段 unlink 旧 final"
-    if "mmdc" in call_log:
-        assert call_log.index("unlink_stale") < call_log.index("mmdc"), \
-            "unlink 必须在 mermaid 启动之前"
-    assert not stale.exists(), "旧 proposal.docx 应已被 D-CU 清理"
+    assert "mmdc" in call_log, "fake mmdc 应被 _render_mermaid 触发"
+    assert "pandoc" in call_log, "fake pandoc 应被 _export_docx_inner 触发"
+    assert call_log.index("unlink_stale") < call_log.index("mmdc"), \
+        "unlink 必须在 mermaid 启动之前(D-CU 顺序保证)"
+    assert call_log.index("unlink_stale") < call_log.index("pandoc"), \
+        "unlink 必须在 pandoc 启动之前"
 
 
 @pytest.mark.asyncio
@@ -6214,10 +6247,13 @@ async def test_unlink_oserror_marks_job_failed_and_skips_render(
     stale.write_bytes(b"residue")
     job = await docx_job_factory(project_id=project.id, status="pending")
 
+    # ⭐ D-DB:先保存原 unlink 引用,再 monkeypatch — 不依赖 __wrapped__(后者
+    # 在 monkeypatch.setattr 后并不一定存在;真实路径上对其它文件的 unlink 仍要正常)
+    real_unlink = Path.unlink
     def boom_unlink(self, *a, **kw):
         if str(self) == str(stale):
             raise OSError("read-only filesystem")
-        return Path.unlink.__wrapped__(self, *a, **kw)  # 不会跑到
+        return real_unlink(self, *a, **kw)
     monkeypatch.setattr(Path, "unlink", boom_unlink)
 
     rendering_calls: list[str] = []
