@@ -3,8 +3,9 @@
 > **版本**:v0.12(待评审) **日期**:2026-05-02 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
 > **工作流内核**:见同目录上级的《技术方案自动生成工作流 — Dify 搭建指南(含人工审核).md》(以下简称 **v10 设计文档**),本需求文档**不重复**其中工作流逻辑细节。
 
-**v0.12 变更**(相对 v0.11,1 处语义对齐):
+**v0.12 变更**(相对 v0.11,2 处语义对齐):
 - **FR-5.8 DOCX 排队语义**:从"其他 docx 请求排队"改成"短时间排队(120 秒)等不到锁就失败,用户可重试"。原文字暗示无界排队,但实现上等锁的 task 占着 arq worker job 槽,会饿死 workflow task(与 D-AA / D-BR 的 worker slot 守护冲突);明确成短等失败更符合实际行为,与 spec D-BR 实现一致。
+- **§9 API 表 `/docx-job/{...}` 路径参数命名**:从 `{job_id}` 改成 `{docx_job_id}`,与 POST 返回字段对齐(D-CC)。POST 同时返回 `docx_job_id`(DB PK,前端轮询用)和 `arq_job_id`(底层 arq task id,仅排查日志用),避免前端拿错 id。
 
 **v0.11 变更**(相对 v0.10,3 处实现层字段同步):
 - **数据模型**:Chapter 增加 `processing_started_at`(实现层内部字段,用于 cleanup 中间态超时回滚);ReviewEvent 增加 `aborted`(SlotLost 撤销 approve/skip 时标记,前端"最近审核人"过滤);DocxJob 增加 `updated_at` 与 `finalizing` 状态(原子完成保护)。这些字段都是**实现层内部**用,不暴露给上游 API/UI 契约。
@@ -432,9 +433,9 @@ LangGraph 自身的 checkpoint 表(`checkpoints` / `writes`)由 `langgraph-check
 | `POST` | `/api/projects/{id}/chapters/{idx}/retry` | **`failed` 章节手动重试**(FR-4.7);记入 ReviewEvent decision=`retry_failed` |
 | `GET` | `/api/projects/{id}/proposal` | 最终全文 markdown(JSON) |
 | `GET` | `/api/projects/{id}/proposal.md` | 直接下载 .md |
-| `POST` | `/api/projects/{id}/proposal.docx` | 触发 DOCX 生成 → 返回 `job_id`(入 arq 队列) |
+| `POST` | `/api/projects/{id}/proposal.docx` | 触发 DOCX 生成 → 返回 `{docx_job_id, arq_job_id, cached}`(`docx_job_id` 是 DB 主键,前端用它轮询;`arq_job_id` 是底层任务 id,仅供排查日志使用)|
 | `GET` | `/api/projects/{id}/proposal.docx` | 下载已生成的 .docx;未生成返回 409 |
-| `GET` | `/api/projects/{id}/docx-job/{job_id}` | 查 DOCX 生成进度 |
+| `GET` | `/api/projects/{id}/docx-job/{docx_job_id}` | 查 DOCX 生成进度;路径参数是 POST 返回的 `docx_job_id`,**不是** arq 的 `arq_job_id`(D-CC 命名统一)|
 
 ### 管理员
 
