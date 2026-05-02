@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useChangePassword, useCurrentUser } from '@/hooks/useAuth'
 import { useToast } from '@/hooks/useToast'
-import { ApiError } from '@/lib/apiFetch'
+import { readApiError } from '@/lib/apiFetch'
 
 // 密码策略:≥ 8 位,含字母 + 数字。后端会做最终校验。
 const schema = z
@@ -68,11 +68,11 @@ export function ChangePasswordPage() {
       toast({ title: '密码已更新', variant: 'success' })
       navigate('/', { replace: true })
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '修改失败')
-          : '修改失败'
-      toast({ title: '修改失败', description: msg, variant: 'destructive' })
+      toast({
+        title: '修改失败',
+        description: readApiError(err, '修改失败'),
+        variant: 'destructive',
+      })
     }
   }
 

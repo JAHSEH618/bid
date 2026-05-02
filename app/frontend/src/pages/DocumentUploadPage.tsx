@@ -16,7 +16,7 @@ import {
   useUploadDocument,
 } from '@/api/projects'
 import { useToast } from '@/hooks/useToast'
-import { ApiError } from '@/lib/apiFetch'
+import { readApiError } from '@/lib/apiFetch'
 import type { DocumentDTO, DocumentKind } from '@/lib/types'
 
 const KIND_META: Record<
@@ -94,7 +94,7 @@ export function DocumentUploadPage() {
       }
       navigate(`/projects/${projectId}/outline`)
     } catch (err) {
-      const msg = readError(err, '启动失败')
+      const msg = readApiError(err, '启动失败')
       toast({ title: '启动失败', description: msg, variant: 'destructive' })
     }
   }
@@ -203,7 +203,7 @@ function UploadSlot({
       }
       onUploaded(doc)
     } catch (err) {
-      const msg = readError(err, '上传失败')
+      const msg = readApiError(err, '上传失败')
       setError(msg)
       toast({ title: '上传失败', description: msg, variant: 'destructive' })
     }
@@ -280,9 +280,3 @@ function UploadSlot({
   )
 }
 
-function readError(err: unknown, fallback: string): string {
-  if (err instanceof ApiError && typeof err.body === 'object' && err.body) {
-    return (err.body as { detail?: string }).detail ?? fallback
-  }
-  return fallback
-}

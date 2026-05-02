@@ -22,7 +22,7 @@ import {
   type UsagePeriod,
 } from '@/api/me'
 import { useToast } from '@/hooks/useToast'
-import { ApiError } from '@/lib/apiFetch'
+import { readApiError } from '@/lib/apiFetch'
 
 export function SettingsPage() {
   const { toast } = useToast()
@@ -50,9 +50,13 @@ export function SettingsPage() {
     try {
       await setKey.mutateAsync(keyInput.trim())
       setKeyInput('')
-      toast({ title: 'API Key 已保存', variant: 'success' })
+      toast({
+        title: 'API Key 已保存并通过 DashScope 校验',
+        variant: 'success',
+      })
     } catch (err) {
-      const msg = readError(err, '保存失败')
+      // 后端 PUT /api/me/api-key 先调 DashScope 验证才存,失败 → 400 detail 含错误原文
+      const msg = readApiError(err, '保存失败')
       toast({ title: '保存失败', description: msg, variant: 'destructive' })
     }
   }
@@ -70,7 +74,7 @@ export function SettingsPage() {
         })
       }
     } catch (err) {
-      const msg = readError(err, '测试失败')
+      const msg = readApiError(err, '测试失败')
       toast({ title: '测试失败', description: msg, variant: 'destructive' })
     }
   }
@@ -141,7 +145,7 @@ export function SettingsPage() {
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              保存后请点击「测试连通」验证 Key 可用。
+              保存时后端会先调 DashScope 验证连通,通过后才落库。
             </p>
           </div>
         </CardContent>
@@ -259,9 +263,3 @@ function Stat({ label, value }: { label: string; value: number | string }) {
   )
 }
 
-function readError(err: unknown, fallback: string): string {
-  if (err instanceof ApiError && typeof err.body === 'object' && err.body) {
-    return (err.body as { detail?: string }).detail ?? fallback
-  }
-  return fallback
-}

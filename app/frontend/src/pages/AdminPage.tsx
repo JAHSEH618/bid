@@ -30,7 +30,7 @@ import {
 } from '@/api/admin'
 import type { UsagePeriod } from '@/api/me'
 import { useToast } from '@/hooks/useToast'
-import { ApiError } from '@/lib/apiFetch'
+import { readApiError } from '@/lib/apiFetch'
 import type { AdminTokenUsageRow } from '@/lib/types'
 
 export function AdminPage() {
@@ -64,7 +64,7 @@ export function AdminPage() {
     } catch (err) {
       toast({
         title: '创建失败',
-        description: readError(err, '创建失败'),
+        description: readApiError(err, '创建失败'),
         variant: 'destructive',
       })
     }
@@ -89,7 +89,7 @@ export function AdminPage() {
     } catch (err) {
       toast({
         title: '重置失败',
-        description: readError(err, '重置失败'),
+        description: readApiError(err, '重置失败'),
         variant: 'destructive',
       })
     }
@@ -118,7 +118,7 @@ export function AdminPage() {
     } catch (err) {
       toast({
         title: '操作失败',
-        description: readError(err, '操作失败'),
+        description: readApiError(err, '操作失败'),
         variant: 'destructive',
       })
     }
@@ -138,7 +138,7 @@ export function AdminPage() {
     } catch (err) {
       toast({
         title: '删除失败',
-        description: readError(err, '删除失败'),
+        description: readApiError(err, '删除失败'),
         variant: 'destructive',
       })
     }
@@ -425,9 +425,3 @@ function aggregateUsageByUser(rows: AdminTokenUsageRow[]): UserGroup[] {
   return [...map.values()]
 }
 
-function readError(err: unknown, fallback: string): string {
-  if (err instanceof ApiError && typeof err.body === 'object' && err.body) {
-    return (err.body as { detail?: string }).detail ?? fallback
-  }
-  return fallback
-}

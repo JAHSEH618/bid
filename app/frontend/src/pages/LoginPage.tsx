@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useLogin } from '@/hooks/useAuth'
 import { useToast } from '@/hooks/useToast'
-import { ApiError } from '@/lib/apiFetch'
+import { readApiError } from '@/lib/apiFetch'
 
 const schema = z.object({
   username: z.string().min(1, '请输入用户名'),
@@ -55,11 +55,11 @@ export function LoginPage() {
         navigate(from, { replace: true })
       }
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '登录失败')
-          : '登录失败'
-      toast({ title: '登录失败', description: msg, variant: 'destructive' })
+      toast({
+        title: '登录失败',
+        description: readApiError(err, '登录失败'),
+        variant: 'destructive',
+      })
     }
   }
 

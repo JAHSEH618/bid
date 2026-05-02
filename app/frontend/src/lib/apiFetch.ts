@@ -21,10 +21,18 @@ export class ApiError extends Error {
   }
 }
 
+// 这些端点的 401/428 不触发自动跳转:
+//   - /api/auth/login   401 = 用户名或密码错(否则会循环跳 /login)
+//   - /api/auth/refresh 401 = refresh token 过期(由调用方决定下一步)
+//   - /api/auth/logout  幂等,挂壳 lax;不应该触发拦截
+//   - /api/me/change-password
+//       · 走 lax:must_change_password=true 的用户能调,所以不会拿到 428
+//       · 401 = 旧密码错(用户在改密页输错,不能跳走)
 const PASSTHROUGH_PATHS = [
   '/api/auth/login',
   '/api/auth/refresh',
   '/api/auth/logout',
+  '/api/me/change-password',
 ]
 
 function isPassthrough(path: string): boolean {
@@ -102,4 +110,27 @@ export async function apiFetch<T = unknown>(
 
 export function apiUrl(path: string): string {
   return `${BASE}${path}`
+}
+
+// 统一从 ApiError 提取人类可读 detail。
+// 后端 detail 可能是:
+//   - 字符串(常见,FastAPI HTTPException(status, "detail"))
+//   - {detail: "..."}(FastAPI 默认 wrap)
+//   - {detail: {error: "must_change_password"}} (D-F 428,前端不会展示)
+//   - 纯文本响应(text/plain)
+export function readApiError(err: unknown, fallback: string): string {
+  if (!(err instanceof ApiError)) return fallback
+  const b = err.body
+  if (typeof b === 'string' && b.trim()) return b
+  if (b && typeof b === 'object') {
+    const d = (b as { detail?: unknown }).detail
+    if (typeof d === 'string' && d.trim()) return d
+    if (d && typeof d === 'object') {
+      const e = (d as { error?: unknown; message?: unknown }).error
+      if (typeof e === 'string') return e
+      const m = (d as { message?: unknown }).message
+      if (typeof m === 'string') return m
+    }
+  }
+  return fallback
 }

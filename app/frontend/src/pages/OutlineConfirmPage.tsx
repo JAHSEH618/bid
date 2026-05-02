@@ -17,7 +17,7 @@ import {
   useProjectOutline,
 } from '@/api/projects'
 import { useToast } from '@/hooks/useToast'
-import { ApiError } from '@/lib/apiFetch'
+import { readApiError } from '@/lib/apiFetch'
 import type { OutlineChapterIn } from '@/lib/types'
 
 interface EditableChapter {
@@ -120,11 +120,11 @@ export function OutlineConfirmPage() {
       })
       navigate(`/projects/${projectId}/review`)
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '确认失败')
-          : '确认失败'
-      toast({ title: '确认失败', description: msg, variant: 'destructive' })
+      toast({
+        title: '确认失败',
+        description: readApiError(err, '确认失败'),
+        variant: 'destructive',
+      })
     }
   }
 

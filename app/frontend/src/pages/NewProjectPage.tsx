@@ -17,7 +17,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { useCreateProject } from '@/api/projects'
 import { useApiKeyInfo } from '@/api/me'
 import { useToast } from '@/hooks/useToast'
-import { ApiError } from '@/lib/apiFetch'
+import { readApiError } from '@/lib/apiFetch'
 
 const schema = z.object({
   name: z.string().min(1, '请填写项目名').max(120, '不超过 120 字'),
@@ -52,11 +52,11 @@ export function NewProjectPage() {
       toast({ title: '项目已创建', variant: 'success' })
       navigate(`/projects/${proj.id}/upload`, { replace: true })
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '创建失败')
-          : '创建失败'
-      toast({ title: '创建失败', description: msg, variant: 'destructive' })
+      toast({
+        title: '创建失败',
+        description: readApiError(err, '创建失败'),
+        variant: 'destructive',
+      })
     }
   }
 

@@ -10,7 +10,7 @@ import { useProject, useProjectOutline } from '@/api/projects'
 import { useReviewChapter, useRetryChapter } from '@/api/chapters'
 import { useProjectStream, type ProjectEvent } from '@/hooks/useSSE'
 import { useToast } from '@/hooks/useToast'
-import { ApiError } from '@/lib/apiFetch'
+import { readApiError } from '@/lib/apiFetch'
 import type { ReviewDecision } from '@/lib/types'
 
 export function ChapterReviewPage() {
@@ -125,11 +125,11 @@ export function ChapterReviewPage() {
         variant: 'success',
       })
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '提交失败')
-          : '提交失败'
-      toast({ title: '提交失败', description: msg, variant: 'destructive' })
+      toast({
+        title: '提交失败',
+        description: readApiError(err, '提交失败'),
+        variant: 'destructive',
+      })
     }
   }
 
@@ -142,11 +142,11 @@ export function ChapterReviewPage() {
       })
       toast({ title: '已触发重试', variant: 'success' })
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '重试失败')
-          : '重试失败'
-      toast({ title: '重试失败', description: msg, variant: 'destructive' })
+      toast({
+        title: '重试失败',
+        description: readApiError(err, '重试失败'),
+        variant: 'destructive',
+      })
     }
   }
 
