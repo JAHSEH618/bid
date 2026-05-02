@@ -1,12 +1,20 @@
-"""state ↔ DB 同步钩子(§10.6 + §10.6d)。
+"""state ↔ DB 同步钩子(§10.6 + §10.6d + FR-4.7)。
 
-把 LangGraph WorkflowState 的变化同步到 DB Chapter / Project 表 + 发 SSE 事件。
-LangGraph state 是 in-memory + checkpoint 持久化,但前端展示用的是 DB,
-两层必须保持一致。
+把 LangGraph WorkflowState 的变化同步到 DB Chapter / Project / ChapterVersion
+表 + 发 SSE 事件。LangGraph state 是 in-memory + checkpoint 持久化,但前端
+展示用的是 DB,两层必须保持一致。
 
-⚠️ M0 时 chapters / projects / runs 表还不存在(M1 落库),节点调用这些
-helper 在 sqlite/无 DB 跑会报错;M0 CLI ``run_local`` 用本地状态而不入 DB,
-跳过这些 helper(直接构造完整 state)。
+API:
+- ``sync_chapter_to_db(run_id, index, **fields)`` — D-BP 白名单 UPDATE
+- ``sync_project_status(project_id, status)`` — UPDATE projects
+- ``sync_outline_to_db(run_id, chapters, *, replace=False)`` — upsert chapters
+- ``save_chapter_version(run_id, index, body, *, feedback_in)`` — append
+  ChapterVersion(自动取下一个 version 号)
+- ``mark_chapter_versions_abandoned(chapter_id)`` — FR-4.7 retry 时把当前
+  未审版本标 abandoned=true
+- ``record_review_event(chapter_id, reviewer_id, decision, feedback_text)`` —
+  写 ReviewEvent
+- ``publish_event(project_id, type_, **payload)`` — SSE 包装,失败不传播
 """
 from __future__ import annotations
 
@@ -113,6 +121,91 @@ async def sync_outline_to_db(
                 )
             )
             await s.execute(stmt)
+
+
+async def save_chapter_version(
+    run_id: int,
+    index: int,
+    body_markdown: str,
+    *,
+    feedback_in: str | None = None,
+    decision: str | None = None,
+) -> int | None:
+    """append ChapterVersion(自动取下一个 version 号)。
+
+    返回新 version 行的 id;chapter 找不到返回 None。
+    """
+    from ..models import Chapter, ChapterVersion
+
+    async with session_factory() as s, s.begin():
+        chapter_id_row = await s.execute(
+            sa.select(Chapter.id).where(
+                Chapter.run_id == run_id, Chapter.index == index
+            )
+        )
+        chapter_id = chapter_id_row.scalar_one_or_none()
+        if chapter_id is None:
+            log.warning(
+                "save_chapter_version_chapter_missing", run_id=run_id, index=index
+            )
+            return None
+
+        next_version_row = await s.execute(
+            sa.text(
+                "SELECT COALESCE(MAX(version), 0) + 1 "
+                "FROM chapter_versions WHERE chapter_id=:c"
+            ),
+            {"c": chapter_id},
+        )
+        next_version = int(next_version_row.scalar_one())
+        cv = ChapterVersion(
+            chapter_id=chapter_id,
+            version=next_version,
+            body_markdown=body_markdown,
+            feedback_in=feedback_in or None,
+            decision=decision,
+        )
+        s.add(cv)
+        await s.flush()
+        return cv.id
+
+
+async def mark_chapter_versions_abandoned(chapter_id: int) -> int:
+    """FR-4.7:章节 retry 时,把本轮所有未审版本(decision IS NULL)标
+    ``abandoned=true``。返回受影响行数。
+    """
+    async with session_factory() as s:
+        result = await s.execute(
+            sa.text(
+                "UPDATE chapter_versions SET abandoned=true "
+                "WHERE chapter_id=:c AND decision IS NULL AND abandoned=false"
+            ),
+            {"c": chapter_id},
+        )
+        await s.commit()
+        return result.rowcount or 0
+
+
+async def record_review_event(
+    chapter_id: int,
+    reviewer_id: int,
+    decision: str,
+    *,
+    feedback_text: str | None = None,
+) -> int:
+    """写 ReviewEvent(P5 三按钮 / API /review 调)。返回新行 id。"""
+    from ..models import ReviewEvent
+
+    async with session_factory() as s, s.begin():
+        ev = ReviewEvent(
+            chapter_id=chapter_id,
+            reviewer_id=reviewer_id,
+            decision=decision,
+            feedback_text=feedback_text,
+        )
+        s.add(ev)
+        await s.flush()
+        return ev.id
 
 
 async def publish_event(project_id: int, type_: str, **payload: Any) -> None:

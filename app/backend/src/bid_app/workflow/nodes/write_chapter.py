@@ -82,32 +82,37 @@ async def _resolve_user_id(project_id: int) -> int:
 
 async def _resolve_chapter_id(run_id: int, index: int) -> int | None:
     """D-AU:抛 ``ChapterGenerationFailed`` 时一并带上 chapter_id。"""
-    async with session_factory() as s:
-        row = await s.execute(
-            sa.text("SELECT id FROM chapters WHERE run_id=:r AND index=:i"),
-            {"r": run_id, "i": index},
-        )
-        return row.scalar_one_or_none()
-
-
-async def _save_chapter_version(
-    run_id: int, index: int, text: str, *, feedback_in: str
-) -> None:
-    """保存为新版本(向 ``chapter_versions`` 表 append);M1 增 model 后才能跑。"""
-    from ...models import ChapterVersion  # type: ignore[attr-defined]
-
-    async with session_factory() as s, s.begin():
-        row = await s.execute(
-            sa.text("SELECT id FROM chapters WHERE run_id=:r AND index=:i"),
-            {"r": run_id, "i": index},
-        )
-        chapter_id = row.scalar_one()
-        s.add(
-            ChapterVersion(
-                chapter_id=chapter_id,
-                text=text,
-                feedback_in=feedback_in or None,
+    if run_id is None or run_id <= 0:
+        return None
+    try:
+        async with session_factory() as s:
+            row = await s.execute(
+                sa.text("SELECT id FROM chapters WHERE run_id=:r AND index=:i"),
+                {"r": run_id, "i": index},
             )
+            return row.scalar_one_or_none()
+    except Exception:
+        return None
+
+
+def _real_run(run_id: int | None) -> bool:
+    """run_id > 0 才视为真 DB 路径(CLI 走 -1)。"""
+    return run_id is not None and run_id > 0
+
+
+async def _safe_sync_chapter(
+    run_id: int | None, index: int, **fields: Any
+) -> None:
+    """sync_chapter_to_db 包装:run_id <= 0 跳过,DB 异常吞掉(M0 CLI 友好)。"""
+    if not _real_run(run_id):
+        return
+    try:
+        await sync_chapter_to_db(run_id, index, **fields)  # type: ignore[arg-type]
+    except Exception:
+        import structlog
+
+        structlog.get_logger().exception(
+            "write_chapter_sync_failed", run_id=run_id, index=index, fields=fields
         )
 
 
@@ -122,7 +127,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     # ⭐ D-BF:切 generating 同时写 processing_started_at,让
     # cron `cleanup_stale_chapters` 在 worker 进程被 SIGKILL/OOM 直接死时
     # 也能扫到这个章节回滚状态
-    await sync_chapter_to_db(
+    await _safe_sync_chapter(
         run_id,
         current,
         status="generating",
@@ -152,7 +157,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     except (LLMRetryFailed, LLMTimeoutExceeded, asyncio.TimeoutError) as e:
         # D-BG:call_llm_stream 总超时已包成 LLMTimeoutExceeded,这里同时
         # catch asyncio.TimeoutError 是兜底。
-        await sync_chapter_to_db(
+        await _safe_sync_chapter(
             run_id,
             current,
             status="failed",
@@ -169,16 +174,25 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             chapter_id=await _resolve_chapter_id(run_id, current),
         ) from e
 
-    # 把生成的章节正文保存为新版本
-    try:
-        await _save_chapter_version(
-            run_id,
-            current,
-            result.text,
-            feedback_in=state.get("revision_feedback", ""),
-        )
-    except Exception:
-        # M0 跑 CLI 没有 DB 表,允许跳过版本保存,只把内容塞 state
-        pass
+    # 把生成的章节正文保存为新版本(走 sync.save_chapter_version,自动取
+    # 下一个 version 号);CLI / 表缺失时 sync 内部已 log 容错
+    if _real_run(run_id):
+        try:
+            from ..sync import save_chapter_version
+
+            await save_chapter_version(
+                run_id,
+                current,
+                result.text,
+                feedback_in=state.get("revision_feedback") or None,
+            )
+        except Exception:
+            import structlog
+
+            structlog.get_logger().exception(
+                "write_chapter_version_save_failed",
+                run_id=run_id,
+                index=current,
+            )
 
     return {"_pending_chapter_text": result.text}

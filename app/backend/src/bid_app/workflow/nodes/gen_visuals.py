@@ -1,12 +1,16 @@
-"""LLM-3 章节可视化建议节点(对应 v10 §4.5.3 / Spec §10.2 ``gen_visuals``)。
+"""LLM-3 章节可视化建议节点(v10 §4.5.3 / Spec §10.2 ``gen_visuals``)。
 
-⚠️ 命名说明:任务清单把本文件标作 "review_chapter"(章节审核),实际承担
-v10 §4.5.3 的 LLM-3 可视化建议职责——读 LLM-2 输出的章节正文,产出
-``{"items":[...]}`` JSON 建议清单,供下游 ``merge_chapter`` 模板转换合并。
-"审核"语义另由 P5 ``human_review`` interrupt 节点承担(参见 ``merge_chapter``)。
+读 LLM-2 输出的章节正文,产出 ``{"items":[...]}`` JSON 建议清单,供下游
+``merge_chapter`` 模板转换合并。
 
 输入:``state._pending_chapter_text``
 输出:``state._pending_visuals_json``(原始 JSON 字符串)
+
+⚠️ M0-4 期间任务清单上写 ``review_chapter.py``,M1-6 (#8) 评估 graph
+偏差时按 §10.2 spec 三节点拆分(D-EE 候选,见 ``graph.py`` docstring):
+本文件归位 ``gen_visuals.py``;人工审核 interrupt 单独 ``human_review.py``;
+``merge_chapter.py`` 仅做模板转换。提示词模块名仍是 ``review_chapter_prompt.py``
+(M0-3 任务命名固化)。
 """
 from __future__ import annotations
 
@@ -76,7 +80,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
 
     if not chapter_text.strip():
         log.warning(
-            "review_chapter_empty_text",
+            "gen_visuals_empty_text",
             project_id=project_id,
             chapter_index=idx,
         )
@@ -108,7 +112,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     except Exception:
         # ⭐ LLM-3 是非关键路径(只是补可视化),失败不能中断章节流程
         log.exception(
-            "review_chapter_visuals_failed",
+            "gen_visuals_failed",
             project_id=project_id,
             chapter_index=idx,
         )
