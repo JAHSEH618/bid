@@ -563,6 +563,10 @@ function route(ctx: ResolveContext): unknown {
       proj.status = 'extracting'
       return { run_id: pid * 10, queued: false }
     }
+    if (sub === '/documents' && method === 'GET') {
+      // 后端按 id ASC 返回所有上传记录(commit 73d51ec)
+      return [...(projectDocuments[pid] ?? [])].sort((a, b) => a.id - b.id)
+    }
     if (sub === '/documents' && method === 'POST') {
       const b = ctx.body as Record<string, unknown>
       const file = b['file'] as { _file: string; size: number } | undefined

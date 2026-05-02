@@ -7,16 +7,14 @@
 //   - GET    /api/projects/{id}                  Project
 //   - DELETE /api/projects/{id}                  {ok: true}
 //   - POST   /api/projects/{id}/start            {run_id, queued}
+//   - GET    /api/projects/{id}/documents        list[Document](M1+ commit 73d51ec)
 //   - POST   /api/projects/{id}/documents        Document(multipart kind=tech_spec/scoring/template + file)
 //   - GET    /api/projects/{id}/outline          OutlineResponse(含 chapters[] 完整状态)
 //   - PUT    /api/projects/{id}/outline          {ok: true}
 //   - GET    /api/projects/{id}/proposal         ProposalResponse
 //   - GET    /api/projects/{id}/proposal.md      file response
 //
-// 注意:
-//   - 后端无 GET /documents 列表;DocumentUploadPage 用 invalidate +
-//     当前内存中的上传响应组合显示。如未来后端加 GET 端点再切。
-//   - 后端无独立 GET /chapters 列表;chapter 列表来自 /outline.chapters。
+// 注意:后端无独立 GET /chapters 列表;chapter 列表来自 /outline.chapters。
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/apiFetch'
 import type {
@@ -117,6 +115,15 @@ export function useStartProject() {
   })
 }
 
+export function useProjectDocuments(projectId: number | null) {
+  return useQuery({
+    queryKey: ['projects', projectId, 'documents'],
+    queryFn: () =>
+      apiFetch<DocumentDTO[]>(`/api/projects/${projectId}/documents`),
+    enabled: projectId != null,
+  })
+}
+
 export function useUploadDocument() {
   const qc = useQueryClient()
   return useMutation({
@@ -138,6 +145,9 @@ export function useUploadDocument() {
       })
     },
     onSuccess: (_data, vars) => {
+      qc.invalidateQueries({
+        queryKey: ['projects', vars.projectId, 'documents'],
+      })
       qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })
     },
   })

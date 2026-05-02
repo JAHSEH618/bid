@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, FileText, Upload, Play } from 'lucide-react'
 import {
@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
   useProject,
+  useProjectDocuments,
   useStartProject,
   useUploadDocument,
 } from '@/api/projects'
@@ -51,13 +52,21 @@ export function DocumentUploadPage() {
   const navigate = useNavigate()
   const { toast } = useToast()
   const project = useProject(projectId)
+  const documents = useProjectDocuments(projectId)
   const start = useStartProject()
 
-  // 后端 M1 阶段没有 GET /documents 列表;本页用本地 state 跟踪本会话的上传记录。
-  // 刷新会丢失,可接受(导航后已经走到下一页)。后端补 GET 端点后切真查询。
-  const [uploadedByKind, setUploadedByKind] = useState<
-    Partial<Record<DocumentKind, DocumentDTO>>
-  >({})
+  // 后端 GET /documents(commit 73d51ec)按 id ASC 返回所有上传记录,
+  // 同一 kind 多次上传时取最后一个(用户「替换」语义)。
+  const uploadedByKind = useMemo<Partial<Record<DocumentKind, DocumentDTO>>>(
+    () => {
+      const acc: Partial<Record<DocumentKind, DocumentDTO>> = {}
+      for (const d of documents.data ?? []) {
+        acc[d.kind] = d
+      }
+      return acc
+    },
+    [documents.data],
+  )
 
   // 项目详情拉到后,如果状态已经过 init(说明之前已上传过且 /start 过)就跳走避免重复上传。
   useEffect(() => {
@@ -132,7 +141,6 @@ export function DocumentUploadPage() {
         </h1>
         <p className="text-sm text-muted-foreground">
           上传招标文档。仅支持 .docx / .doc / .md / .txt,单文件 ≤ 50MB。
-          请在上传完成后立即点击「启动工作流」——刷新页面会丢失上传记录(已落库,但本页不再展示)。
         </p>
       </header>
 
@@ -144,9 +152,6 @@ export function DocumentUploadPage() {
               kind={kind}
               projectId={projectId}
               existing={uploadedByKind[kind]}
-              onUploaded={(doc) =>
-                setUploadedByKind((prev) => ({ ...prev, [kind]: doc }))
-              }
             />
           ),
         )}
@@ -171,12 +176,10 @@ function UploadSlot({
   kind,
   projectId,
   existing,
-  onUploaded,
 }: {
   kind: DocumentKind
   projectId: number
   existing: DocumentDTO | undefined
-  onUploaded: (doc: DocumentDTO) => void
 }) {
   const meta = KIND_META[kind]
   const fileRef = useRef<HTMLInputElement>(null)
@@ -201,6 +204,7 @@ function UploadSlot({
     }
     setError(null)
     try {
+      // useUploadDocument onSuccess 已 invalidate documents query,父组件自动 refetch。
       const doc = await upload.mutateAsync({ projectId, kind, file })
       toast({ title: `${meta.label} 已上传`, variant: 'success' })
       if (doc.extract_error) {
@@ -210,7 +214,6 @@ function UploadSlot({
           variant: 'warning',
         })
       }
-      onUploaded(doc)
     } catch (err) {
       const msg = readApiError(err, '上传失败')
       setError(msg)
