@@ -366,17 +366,144 @@
 
 ## 审查记录(实际执行时填写)
 
-### REVIEW-1(待解锁)
+### REVIEW-1(M0 + M1 后端)— 2026-05-03
 
-> 等任务 #1 #5 #11 #13 完成。
+审查范围:M0 commits `2be3028` / `d372d8d` / `26ba2a3` / `dd4dbcf` / `9071dde` + M1 commits `a14df32` / `63e9781` / `d54a8bd` / `e747fff` / `7dca873` / `84b9967` / `1208168` / `2a189d1` / `44e974c`。
+
+#### 🔴 严重问题
+
+1. **`extract_for_project()` 从未读取真实文档,所有 M1+ 项目工作流以空 markdown 起跑 → LLM-1 hallucinate**(`services/document_extractor.py:80-93`)
+   - **现状**:`extract_for_project` 用 `getattr(doc, "stored_path", None) or getattr(doc, "path", None)` 取路径,但 `Document` 模型(`models/document.py`)**只有 `markdown_path` 字段**,没有 `stored_path` / `path`。
+   - **影响**:每次循环 `getattr` 返回 None → `if not path: continue`,函数返回 `{"tech_spec_md": "", "scoring_md": "", "template_md": ""}`。`worker/tasks.py:160 build_initial_state` 把空字符串塞进 WorkflowState,LLM-1 提纲根据空 prompt 生成,内容与用户上传的 3 份文档完全无关。**完全破坏 P3-P4-P5 业务正确性**。
+   - **覆盖范围**:所有走 `/start` → arq worker → graph 的真实路径都中招。CLI `run_local` 用 `extract_files`(不调本函数)所以 M0 smoke 还能跑通。
+   - **修复**:`Document.markdown_path` 已经存的就是 markitdown 抽取后的 .md 文件路径(见 `api/projects.py:295-298 + :310`),直接读它即可:
+     ```python
+     md_path = getattr(doc, "markdown_path", None)
+     if not md_path:
+         continue
+     try:
+         out[kind_to_field[kind]] = Path(md_path).read_text(encoding="utf-8", errors="replace")
+     except Exception:
+         log.exception("read_markdown_failed", path=md_path, kind=kind)
+     ```
+   - **责任**:backend-lead M0-5 / M1-5。需要立即修。
+
+#### 🟡 中级问题(不立即阻塞,但建议尽快修)
+
+1. **`mark_chapter_versions_abandoned` 与 worker `retry_failed_chapter_task` 语义不一致** — 当前 helper 是死代码,但若未来 caller 用它会 silent abandon 错的版本子集。
+   - **现状**:
+     - `workflow/sync.py:178-181` helper:`UPDATE chapter_versions SET abandoned=true WHERE chapter_id=:c AND decision IS NULL AND abandoned=false`
+     - `worker/tasks.py:494-500` raw SQL:`UPDATE chapter_versions SET abandoned=true WHERE chapter_id=:c AND abandoned=false`(无 `decision IS NULL` 过滤)
+   - **影响**:helper 仅 abandon 未审版本(decision IS NULL);worker 把所有非 abandoned 版本都打 abandoned(包含 decision='revise' 的多轮重写历史)。FR-4.7 / spec line 263 / line 1018-1019 表述"本轮所有未审版本",但章节进入 retry 状态时,先前 revise 轮次的 ChapterVersion 已经 decision='revise',严格"未审"过滤会让 helper abandon 0 行,不达 retry 把"过期版本全标 abandoned"的目的。worker raw SQL 的口径才对。
+   - **修复**:helper 应统一成 worker 口径(去掉 `decision IS NULL` 过滤),或让 worker 调 helper 而不是写裸 SQL。**推荐**改 helper:
+     ```python
+     "UPDATE chapter_versions SET abandoned=true "
+     "WHERE chapter_id=:c AND abandoned=false"
+     ```
+     然后 worker 改成调用 helper,保持一致。
+   - **责任**:backend-lead 后续小补丁即可。
+
+2. **SPA fallback 端点缺失**(spec §15.6 / `main.py` 末尾)
+   - **现状**:`main.py:117-133` 注册了 8 个 router 后没有 `@app.get("/{full_path:path}")` SPA fallback。
+   - **影响**:用户在浏览器对 `/projects/123/review` 直接刷新,FastAPI 返回 404;不能走前端 React Router。**M5 部署后用户体验破**,但 M1 本身没要求 SPA fallback(任务 #14 #13 没提)。归 M5 范畴更合适。
+   - **修复**:按 spec §15.6 在 `main.py` 末尾加:
+     ```python
+     @app.get("/{full_path:path}", include_in_schema=False)
+     async def spa_fallback(full_path: str):
+         if full_path.startswith("api/") or full_path == "health":
+             raise HTTPException(404)
+         static_dir = Path("/app/frontend/dist")
+         requested = static_dir / full_path
+         if requested.is_file():
+             return FileResponse(requested)
+         return FileResponse(static_dir / "index.html")
+     ```
+   - **责任**:推到 M4 / M5 收尾时统一加。
+
+3. **`worker/lifecycle.py:28` `AsyncPostgresSaver.from_conn_string()` 调用模式可能与 langgraph-checkpoint-postgres 2.0+ API 不一致**(待验证)
+   - **现状**:`saver = AsyncPostgresSaver.from_conn_string(...)` + `await saver.setup()` 直接走 — 与 spec §17.2 line 5577-5589 一致。
+   - **疑虑**:`langgraph-checkpoint-postgres==2.0.25`(uv.lock 锁定版本)的 `from_conn_string` 是 `@asynccontextmanager`,返回的是 ctx mgr 不是 saver 本身。直接调 `.setup()` 会 AttributeError。
+   - **影响**:worker 启动 `on_startup` 时炸,所有 workflow task 起不来。
+   - **修复**:若验证为真,改成
+     ```python
+     async def on_startup(ctx):
+         saver_cm = AsyncPostgresSaver.from_conn_string(settings.langgraph_dsn)
+         saver = await saver_cm.__aenter__()
+         await saver.setup()
+         ctx["checkpointer"] = saver
+         ctx["_saver_cm"] = saver_cm
+     async def on_shutdown(ctx):
+         cm = ctx.get("_saver_cm")
+         if cm: await cm.__aexit__(None, None, None)
+     ```
+   - **责任**:让 backend-lead 在能跑 worker 的环境(docker compose)实测一次;若炸,按上述模式修。spec §17.2 也可能需要同步更新。
+
+#### ✅ 通过项
+
+- **10 张表模型**(`models/`):全部字段与 §8 一致 — Project.encrypted_api_key_snapshot(D-C)/ Chapter.processing_started_at(D-AR/BF) + status enum reviewing/retrying/generating(D-AI)/ ChapterVersion.abandoned(FR-4.7)/ ReviewEvent.aborted NOT NULL default false(D-BI)/ TokenUsage.project_id ON DELETE CASCADE(FR-1.6)/ DocxJob.arq_job_id nullable + finalizing/invalidated 状态 + updated_at 双触发器(D-S/BQ/CG/BH)。`models/__init__.py` 全部 export。
+- **Migration 0001**(`migrations/versions/0001_initial.py`):10 张表按 FK 依赖正确顺序;**partial unique** `uq_docx_jobs_arq_job_id WHERE arq_job_id IS NOT NULL` + `uq_docx_jobs_project_inflight WHERE status IN ('pending','rendering_mermaid','pandoc','finalizing')`(D-S/BQ);**`ix_chapters_processing` partial WHERE 严格 D-BZ**:`status IN ('reviewing','retrying','generating') OR (status='pending' AND processing_started_at IS NOT NULL)`;token_usage CASCADE;ReviewEvent.aborted server_default false;**default admin seed**(bcrypt rounds=12,must_change_password=true)。
+- **db.py**:async engine + async_sessionmaker + `expire_on_commit=False`(D-DH 减少 detached 风险)+ `pool_pre_ping=True`(防游离连接)。
+- **deps.py M1 stub**(commit `d54a8bd` 阶段):D-EC 完整覆盖 — 读 `BID_APP_DEV_USER_ID` 或回退查 admin user;查不到抛 500 + 提示 alembic + seed。M2 完整版已替换(REVIEW-2 范围)。
+- **events/bus.py**:Redis pub/sub 跨进程(D-A/B);subscribe 用 asynccontextmanager;publish lazy `start()`;UTF-8 序列化 `ensure_ascii=False`。
+- **services/concurrency.py**(585 行,§10.7 全套):
+  - 三态 AcquireResult(ok/full/already_active/stale_evicted)+ Lua TRY_ACQUIRE(D-AB/AF/AN/AQ)
+  - HEARTBEAT/RELEASE Lua CAS 防误释放(D-AB)
+  - 双 TTL D-Y(RESERVE_TTL=300,ALIVE_TTL=60,HEARTBEAT_INTERVAL=20)
+  - `_evict_stale_project` SREM + DB UPDATE 绑定(D-AN)
+  - `cleanup_stale_chapters`:D-BB `get_alive_project_ids()` 排除 + `CAST(:active_ids AS int[])` typed array;reviewing/retrying 60s + pending(NOT NULL 守护)60s + generating 15min(D-AR/BF/BS/BZ);D-BL/BS Project.status=awaiting_review 同步切回
+  - `cleanup_stale_docx_jobs`:覆盖全 in-flight 含 finalizing(D-AY/BQ);D-BY finalizing+文件存在 → repair done;D-BH `updated_at < NOW() - 30min`
+  - `wake_queued_projects`:D-AP 不用 SCARD 用 alive count;D-AX 异常 queued 直接 failed 防死循环
+  - `project_heartbeat` async ctx mgr + lost_event(D-AM)
+- **worker/settings.py**:全 `@func(max_tries=1)`(D-Z/AY);`functions` 直接放函数对象(D-AJ);`max_jobs = max_concurrent_projects + 2`(D-AA);3 个 cron 全部对象(D-AJ)。
+- **worker/lifecycle.py**:reconcile + wake startup;shutdown close checkpointer。**遗留疑虑**见上 #3。
+- **worker/tasks.py**(874 行,三类任务 + generate_docx_task):
+  - 全部 `@func(max_tries=1)`,token-acquire 后立即 try/finally(D-AH),finally release_slot + wake(D-T 周期等于 task)
+  - SlotLost 走 `_slot_lost_compensation`,按 decision 分流回滚(D-AW/AZ/BI/BM/BT)
+  - ChapterGenerationFailed 不写 errors.log + 不 raise + project=awaiting_review(D-AU)
+  - generic Exception 写 errors.log + `_fail_project_and_run`(D-BA + D-X + D-AE)
+  - resume_review_task worker 入口写 ReviewEvent flush 拿 PK(D-AC/BT),decision=='revise' 才切 generating + processing_started_at=NOW()(D-AZ/BK)
+  - retry_failed_chapter_task abandon + retry_count=0 + processing_started_at=NOW()(D-BS / D-AC),`graph.aupdate_state(retry_count=0)` + `astream(None)` 续跑(D-I)
+- **api/projects.py**(577 行):
+  - `/start`:D-AF 校验 status='init'(line 335);D-C 真快照 `project.encrypted_api_key_snapshot = api_key.encrypted_key`(line 355);单次 `try_acquire`(D-T,line 369);D-AF already_active 兜底 409;extracting / queued 分流(D-T);**D-U 补偿全包**:enqueue 失败 release + status=init + run.status=aborted(line 405-417);arq_pool 未初始化 503(line 384)
+  - `POST /documents`:文件类型 + 大小白名单;**日配额聚合**(NFR-4)按 `settings.tz` `date_trunc('day', NOW() AT TIME ZONE :tz)` 聚合(line 263-281);markitdown 抽取容错;落 markdown_path
+  - `DELETE`:创建者 / admin gate;commit 后 rmtree 失败仅 log
+  - `PUT /outline` D-K:status='outline_ready' 校验;try_acquire 503 + Retry-After:60;enqueue resume_review_task 失败补偿 release
+  - `GET /proposal` `/proposal.md`:proposal.md 文件读 + Content-Disposition 中文文件名(filename 字段)
+- **api/chapters.py**:`/review` 行锁 `FOR UPDATE` + 状态 awaiting_review 校验(D-AD)→ reviewing 中间态 + processing_started_at=NOW()(D-AR)→ try_acquire 503 + Retry-After:60 → enqueue resume_review_task → **HTTPException + Exception 双补偿**回 awaiting_review + release(D-AO);ReviewEvent 由 worker 写不在 API 写(D-AC);`/retry` 同款,中间态 retrying;补偿回 failed
+- **api/stream.py**:Depends get_current_user;立即 `event: ready`;心跳兼容 `await asyncio.wait_for(events.next, timeout=20)` + `: ping\n\n`;CancelledError 安静退出;`X-Accel-Buffering: no`(防 nginx buffer);返回 StreamingResponse
+- **api/health.py**:仅 db + redis ping(D-G);未初始化 redis 走 "skipped" 不算 fail(主动 / 启动期容错)
+- **services/llm.py**(425 行,§11.1):
+  - `call_llm_stream`:`async with asyncio.timeout(SINGLE_CHAPTER_TIMEOUT_SECONDS)` 包整个流式收集(D-D);外层 except TimeoutError → `LLMTimeoutExceeded` + errors.log(D-BG)
+  - 每次重试都 `_write_llm_error(... attempt=...)`(D-BE);用尽 → `LLM exhausted`
+  - `call_llm_json`:同款总超时 + JSON parse 失败 _write_llm_error → LLMRetryFailed 走重试链(D-BO)
+  - `ChapterGenerationFailed` 异常类(D-AU);`_FAKE` env 路径(测试友好)
+- **workflow/state.py**:5 个 Loop 变量名严格(D-EE 头),不放 api_key(D-C)
+- **workflow/graph.py**:**严格 11 节点**(D-EE 三节点拆分回归);header 注释引用 #37 audit deviation 论据;CLI 路径 `checkpointer=None` 允许 in-memory 跑
+- **outline_review / human_review / merge_chapter / pick_chapter / parse_outline / write_chapter / gen_visuals / update_state / assemble**:
+  - update_state 用 `>` 而非 `>=`(spec line 1587)+ D-BK processing_started_at on revise→generating
+  - write_chapter D-AU ChapterGenerationFailed wrap + D-BF processing_started_at + D-C Project.encrypted_api_key_snapshot 读路径
+  - assemble D-CG + D-CM 全 in-flight invalidate;CLI 容错(catch-all)
+  - parse_outline JSON 容错 + 字段 setdefault + Loop var 重置
+- **workflow/sync.py**:D-BP 白名单 + isidentifier 双过滤;`save_chapter_version` 自动 `MAX(version)+1`;`record_review_event` 单事务 flush 拿 id
+- **CLI**:`run_local` 走 `extract_files`(不依赖 broken `extract_for_project`)+ 完整交互式审核;`test_llm` 三模型 smoke
+- **services/api_key_validator** + **services/docx_export**(M0 smoke 部分)+ **core/error_log**(D-AE JSONL 格式)+ **services/token_usage**(`uid<=0` skip + project_id<=0 → NULL)
+
+#### 🟡 非阻塞建议(留作 nitpick)
+
+- M1 / `services/document_extractor.py:55-59`:`extract_for_project` 返回类型注释是 dict[str, str] 但若文件读失败可能塞 None;现在 catch-all 把异常吞了所以仍是 str — 可省略 .read_text 异常返回 ''。
+- M0 / `workflow/prompts/write_chapter_prompt.py:110`:`target_chars = target_pages * 800`;spec §10.3 line 1483 写 "约 600 字"。代码内部一致(800),但与 spec 微差。建议要么改成 600,要么 spec 同步成 800。
+- M1 / `api/health.py:46`:`v.startswith("skipped")` 也算 ok,与 spec line 5028 "200 if all == ok else 503" 略宽松;启动期容错合理,建议保留并在 docstring 注明。
+- M1 / `worker/lifecycle.py` 的 `from_conn_string` 调用模式见上"中级问题 #3",待运行时验证。
+- M1 / `api/stream.py:14` docstring 说 "M1 阶段 stub";M2 完整版已替换 — 可同步更新注释。
+- M0 / `workflow/nodes/extract_documents.py:31-41` fallback try/except `from .document_extractor import` — 现在 services 已经存在,这个 fallback 永远不会触发。**冗余**,可清。
 
 ### REVIEW-2(待解锁)
 
-> 等任务 #18 #22 #23 完成。
+> 等任务 #18 #22 #23 完成。M2-1/-2/-3/-4/-5 + M3-1/-2/-3 已经合(commits `0ed5608` / `f14e077` / `d37b6de` / `9a4aa6c` / `14f14ea` + `c7f2e56` / `afcc307` / `6d64d96`)。剩 M3-4 (#23) 模板 docx 占位 + mermaid 中文字体最终确认。任务 #36 解锁后开干。
 
 ### REVIEW-3(待解锁)
 
-> 等任务 #27 完成。
+> 等任务 #27 完成。中间已做 M4 骨架预审(team-lead brief 提到的 70% 已合代码),发现要补的细节会先记到本文件。
 
 ### REVIEW-4(M5 部署)— 2026-05-03
 
