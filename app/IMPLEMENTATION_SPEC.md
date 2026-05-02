@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.14
+# 投标技术方案生成器 · 实施 Spec v3.15
 
 > **配套文档**:`REQUIREMENTS.md` v0.12(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.14 (2026-05-02)。基于 v3.13 修了 5 处 DOCX 状态机收尾隐患:**`on_stage` 异常透传**(删 try/except,让 _StaleJob 信号到 task 顶层而不是被吞掉,D-CB) / **`docx_job_id` 命名对外统一**(POST 返回 `{docx_job_id, arq_job_id, cached}`;GET 路径用 `docx_job_id`;REQUIREMENTS §9 同步,D-CC) / **GET /docx-job 内联 finalizing repair**(轮询路径上看到 finalizing + 文件存在立即修复成 done,延迟从 5min 降到 1 个轮询周期,D-CD) / **rename 后 done UPDATE 检查 rowcount**(rowcount=0 时 SELECT 当前状态判分支:已 done 静默,其它 log warning 返回 stale,D-CE) / **DocxJob 模型注释 + R12 同步 finalizing**(D-CF)。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.14 累计 90 处。
+> **版本**:v3.15 (2026-05-02)。基于 v3.14 修了 3 处:**DOCX 缓存失效机制落实**(DocxJob 加 `invalidated` 状态;`assemble` 节点重写 proposal.md 后 unlink + UPDATE done → invalidated;前端展示"原文档已更新,请重新生成";REQUIREMENTS FR-5.7 + 模型表同步,D-CG) / **DOCX 状态机回归测试 5 个用例**(_StaleJob skip pandoc / GET repair finalizing / arq_id 当 docx_job_id 查 → 404 / done rowcount=0 已 done 静默 / assemble invalidate,D-CH) / **D-AY 老描述同步 finalizing**(标"⚠️ 由 D-BQ / D-CF 收紧",D-CI)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.15 累计 93 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -167,7 +167,7 @@
 | **D-AV** ⚠️ 由 D-BB / D-BF 取代 | `cleanup_stale_chapters` 先取活跃 project 排除;`/review`/`/retry` 异常补偿清 `processing_started_at`(基础动机) | v3.7 cleanup 阈值 60s 与 RESERVE_TTL=300s 冲突。**最终实现**:D-BB 用真 alive ids(SET ∩ ALIVE_KEY)+ typed array CAST;D-BF 把 generating 也加进 cleanup(超时 15min)|
 | **D-AW** ⚠️ 由 D-AZ / D-BI 收紧 | SlotLost 补偿统一抽 `_slot_lost_compensation(project_id, run_id, current_chapter_id, action[, decision])`:覆盖 `reviewing/retrying/pending/generating`,run 下任意 `generating` 也回滚,RETURNING 判定 → project 切 awaiting_review 或不动 | v3.7 D-AT 只回滚"参数指向的章节",resume 跑下一章 SlotLost 时下一章 chapter_id 不在参数里。**最终实现**:D-AZ 按 decision 区分(approve/skip 回 awaiting_review,其它 failed);D-BI 同步把对应 ReviewEvent 标 aborted 防前端误显示 |
 | **D-AX** | `wake_queued_projects` 中 `try_acquire` 返回 `already_active` / `stale_evicted` / 或 run 缺失 → **立即 UPDATE projects.status='failed'**(不再仅 `continue`);返回累计 woke_count 而非 0 | v3.7 异常 queued 项目 `continue` 后,`SELECT FOR UPDATE SKIP LOCKED` 是事务级行锁,事务 commit 后释放,**下一轮循环又取到同一个 project**,wake 死循环占着 WAKE_LOCK 30s。立即标 failed 让 SKIP LOCKED 跳过该行;woke_count 让调用方与监控能区分"队列空"与"全满" |
-| **D-AY** | DOCX task `max_tries=2 → 1`(与 D-Z 其他任务一致);`cleanup_stale_docx_jobs` 覆盖 **所有 in-flight 状态**(`pending` / `rendering_mermaid` / `pandoc`)而非仅 pending | `max_tries=2` 与现有"第一次失败立刻 UPDATE failed"实现冲突——arq 重试进来 SELECT 看到 failed 直接 return,等于无重试,徒增复杂度。统一为 1 次更简单;DOCX 失败本就让用户手动重新生成更符合产品行为(用户能看到错误再决定是否重试)。cleanup 范围扩展是 R12 的真正闭环 |
+| **D-AY** ⚠️ 由 D-BQ / D-CF 收紧 | DOCX task `max_tries=2 → 1`(与 D-Z 其他任务一致);`cleanup_stale_docx_jobs` 覆盖**所有 in-flight 状态**;**最终 in-flight 状态列表**:`pending` / `rendering_mermaid` / `pandoc` / `finalizing`(D-BQ 加 finalizing,D-CF 同步注释/R12;D-CG 的 `invalidated` 是**显式终态**不算 in-flight) | `max_tries=2` 与"第一次失败立刻 UPDATE failed"实现冲突。统一 1 次 + cleanup 全 in-flight 范围才是 R12 的真正闭环 |
 | **D-AZ** | `_slot_lost_compensation` 接 `decision` 参数;**approve/skip → 章节回 awaiting_review**(决策有效但 update_state 没跑完,让用户重新提交一次);**revise / retry / start → 章节标 failed**(可能已开始重写);worker 入口对 approve/skip 也**不再切 generating**,只 revise 才切 | v3.8 worker 入口无条件把 reviewing → generating,但 approve/skip 实际不会"重写",`generating` 这个语义只对 revise 成立;同时 SlotLost 把 reviewing/retrying/pending/generating 全部标 failed 对 approve/skip 是过度补偿。按 decision 分流后语义对齐:状态机能讲清"approve/skip 走得是哪条路"|
 | **D-BA** | `_fail_project_and_run(project_id, run_id, error)` helper:三个 worker 顶层 generic exception 时**同时**写 Project.status='failed' 与 Run.status='failed' + finished_at + error;ChapterGenerationFailed / SlotLost **不动 Run**(章节级失败工作流仍可恢复)| `models.Run.status` 字段定义了 `running/done/failed/aborted` 但 v3.8 里 task crash 只写 Project,Run 永远停 running,审计 / 恢复看不到工作流真状态。同步后 Run 表能精准反映"本次 thread_id 执行结果",且 Run.error 比 errors.log 更便于查询(SQL 而不是文件检索)|
 | **D-BB** | `cleanup_stale_chapters` 用 `get_alive_project_ids()`(SET ∩ ALIVE_KEY 实存)排除而不是裸 `SMEMBERS ACTIVE_SET`;SQL 改 `r.project_id <> ALL(CAST(:active_ids AS int[]))` 显式 typed array | v3.8 直接排除 SET 全体,但 stale 自愈(D-AQ)有时间窗口,SET 里可能短暂含失效成员 → 那些项目的章节也被"误信任"跳过。改用真 alive 列表更精准。SQL CAST 防 SQLAlchemy/asyncpg 把 Python `[]` 错推断成 `text[]` 之类;空列表也安全(`<> ALL(ARRAY[]::int[])` 恒 true)|
@@ -201,6 +201,9 @@
 | **D-CD** | `get_docx_job` 端点查到 `status='finalizing'` 且 `proposal.docx` 文件存在 → inline `UPDATE done` 再返回;repair 后用新行覆盖 `row` 避免下方仍按 finalizing 映射 | v3.13 D-BY 把 finalizing repair 放在 cleanup(5 分钟周期)和 POST(用户主动触发);但前端最常走 GET 轮询,如果 task 已 rename 但 done UPDATE 失败,GET 会卡 processing 直到 cron 跑。inline repair 把延迟从 5min 缩到一次轮询;repair 不命中时回退到原映射逻辑,无副作用 |
 | **D-CE** | `generate_docx_task` 终态 `UPDATE done` 检查 `result.rowcount`:0 时 SELECT 当前状态分类处理 — 已 done(被 D-BY/D-CD 抢先 repair)→ log info 静默;其它 → log warning + 返回 `{"status": "stale", "output_path": str(final_path)}`;不删 final_path | v3.13 done UPDATE 后无 rowcount 检查,DB 状态可能已被并发 repair 改走;task 仍返回成功,数据真相依赖 DB 实际状态。明确 rowcount 分类:"已 done"是合法并发,静默;"其它"说明并发 repair 把它标 failed(理论上 D-BY 不会,但保留 warning + 返回 stale),给上层观测点 |
 | **D-CF** | DocxJob 模型注释里 `partial unique` 状态列表加 `'finalizing'`(D-BQ 之后 finalizing 也是 in-flight,但 v3.13 注释漏);R12 风险行扩展到 D-BX/D-BY/D-CD/D-CE 全链路,描述 finalizing 的"repair-or-fail"双路径而不是笼统 failed | 模型注释和 §9 migration SQL 不一致是落地实现层面的常见错源:实施者通常先看 model 注释,容易漏掉 finalizing。R12 文字若停留在"in-flight 超时标 failed",容易让实现者以为 cleanup 只标 failed 一条路径,把 D-BY 的 repair 实现简化成普通 failed 标注 |
+| **D-CG** | DocxJob.status 加 `invalidated`(显式终态,不算 in-flight);`assemble` 节点写 `proposal.md` 后同步 `unlink proposal.docx` + `UPDATE docx_jobs SET status='invalidated', output_path=NULL ... WHERE project_id=:p AND status='done'`;GET /docx-job 把 invalidated 直传给前端,展示"原文档已更新,请重新生成 DOCX";REQUIREMENTS FR-5.7 + DocxJob 模型表同步 | REQUIREMENTS FR-5.7 承诺"DOCX 缓存直到 markdown 重新生成才失效",但 v3.14 之前 assemble 节点只重写 proposal.md,既不删旧 proposal.docx 也不动 DocxJob,POST `/proposal.docx` 看 file exists 直接命中旧产物。invalidated 显式终态让"作废"语义可见(对比直接 unlink + 删 docx_jobs 行,前者保留审计、后者失了"用户曾生成过哪几次"的记录)。invalidated 不进 partial unique in-flight 列表,所以同 project 之后还能新建 pending |
+| **D-CH** | 补 5 个 DOCX 状态机回归测试:① on_stage rowcount=0 → _StaleJob 抛 + pandoc 不跑(D-BX/D-CB);② GET /docx-job repair finalizing 当文件存在(D-CD);③ arq_id 当 docx_job_id 查 → 404(D-CC);④ done UPDATE rowcount=0 但已 done → 静默 ok(D-CE);⑤ assemble invalidate 旧 done(D-CG)。fixture: docx_job_factory / project_factory / run_assemble_node | DOCX 状态机经过 D-BQ/D-BX/D-BY/D-CD/D-CE/D-CG 已经是最复杂、最容易回归的子系统,但 v3.13 测试清单还停留在 v3.10 的"序列化锁 / mermaid / 缓存"三项。补回归用例让每个新决策都有对应保护,落地 + 后续重构能立刻发现回归 |
+| **D-CI** | D-AY 标 ⚠️ "由 D-BQ / D-CF 收紧";描述里明确最终 in-flight 状态列表是 `pending/rendering_mermaid/pandoc/finalizing`(原文漏 finalizing);说明 invalidated 是显式终态不算 in-flight | D-AY 在表中位置较前(170 行),实施者通读时容易在最初接触到的"in-flight 状态列表"按字面实现,漏掉后面 D-BQ/D-CG 加的状态。一致性大于"决策表是历史日志"——表是当下的合约,不是 changelog |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -1024,11 +1027,16 @@ class DocxJob(Base, TimestampMixin):
     # ⭐ D-S:nullable=True;入队前先 INSERT 占位拿主键 id,enqueue 后再 UPDATE arq_job_id。
     # 唯一性走 partial unique index,允许多条 NULL。
     status: Mapped[str] = mapped_column(String(32), default="pending")
-    # pending|rendering_mermaid|pandoc|finalizing|done|failed
+    # pending|rendering_mermaid|pandoc|finalizing|done|failed|invalidated
     # ⭐ D-BQ:finalizing = "tmp 文件已生成,正在 atomic rename 成 proposal.docx"。
     # 这个短窗口让 cleanup/cron 可以扫到"DB done 但 rename 没完成"的中间状态;
     # done 的语义收紧为"rename 已成功 + 文件可下载",防 v3.11 的"先 done 再 rename"
     # 期间崩溃导致 download 端 409
+    # ⭐ D-CG:invalidated = "上游 markdown 重新生成,本 DOCX 产物已过期"。
+    # 由 assemble 节点(workflow 重写 proposal.md)同步标记;前端看到该状态
+    # 应当展示"原文档已更新,请重新生成 DOCX"并提供新 POST 入口。
+    # cleanup 不动 invalidated(它是显式终态,不是卡住);partial unique 也不算
+    # in-flight,允许同 project 在 invalidated 上再 INSERT 新 pending
     error: Mapped[str | None] = mapped_column(String(4000), nullable=True)
     output_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -1657,6 +1665,7 @@ async def run(state: WorkflowState) -> dict:
 - Project.status='done'
 - SSE 'proposal_ready'"""
 import sqlalchemy as sa
+import structlog
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1664,6 +1673,8 @@ from ..state import WorkflowState
 from ..sync import publish_event, sync_project_status
 from ...db import session_factory
 from ...workflow.prompts.assemble import build_proposal
+
+log = structlog.get_logger()
 
 
 async def run(state: WorkflowState) -> dict:
@@ -1689,6 +1700,28 @@ async def run(state: WorkflowState) -> dict:
     # 写 proposal.md(给 generate_docx_task 读)
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "proposal.md").write_text(final_md, encoding="utf-8")
+
+    # ⭐ D-CG:重写 proposal.md 后 DOCX 缓存必须失效
+    # 任何已生成的 proposal.docx 与对应 docx_jobs.done 都不再代表当前 markdown,
+    # 必须主动作废,否则用户下次 POST 看 file exists 直接命中旧产物(REQUIREMENTS
+    # FR-5.7 的"直到 markdown 重新生成才失效"承诺)
+    docx_path = project_dir / "proposal.docx"
+    if docx_path.exists():
+        try:
+            docx_path.unlink()
+        except Exception:
+            log.exception("docx_invalidate_unlink_failed",
+                          project_id=state["project_id"], path=str(docx_path))
+    async with session_factory() as s:
+        await s.execute(sa.text(
+            "UPDATE docx_jobs SET status='invalidated', "
+            "output_path=NULL, updated_at=NOW(), "
+            "error=COALESCE(error,'') || "
+            "  CASE WHEN COALESCE(error,'')='' THEN '' ELSE ' | ' END || "
+            "  'markdown invalidated by new assemble' "
+            "WHERE project_id=:p AND status='done'"
+        ), {"p": state["project_id"]})
+        await s.commit()
 
     await sync_project_status(state["project_id"], "done")
     await publish_event(state["project_id"], "proposal_ready")
@@ -4708,7 +4741,7 @@ async def get_docx_job(
     raw = row["status"]
     public_status = "processing" if raw in (
         "pending", "rendering_mermaid", "pandoc", "finalizing"
-    ) else raw   # done | failed
+    ) else raw   # done | failed | invalidated(D-CG)
     progress_hint = {
         "pending": "排队中",
         "rendering_mermaid": "渲染流程图...",
@@ -4716,6 +4749,8 @@ async def get_docx_job(
         "finalizing": "收尾中...",
         "done": "已完成",
         "failed": "失败",
+        # ⭐ D-CG:作废原因明确告诉用户,引导其重新触发生成
+        "invalidated": "原文档已更新,请重新生成 DOCX",
     }.get(raw, raw)
 
     return {
@@ -5584,7 +5619,13 @@ tests/integration/
 ├── test_docx.py
 │   ├── test_docx_export_serialization_lock
 │   ├── test_docx_export_with_mermaid
-│   └── test_docx_export_caches_after_first_run
+│   ├── test_docx_export_caches_after_first_run
+│   # ⭐ D-CH:DOCX 状态机回归用例
+│   ├── test_on_stage_rowcount_zero_raises_stale_and_skips_pandoc  # D-BX/D-CB
+│   ├── test_get_docx_job_repairs_finalizing_when_file_exists      # D-CD
+│   ├── test_get_docx_job_with_arq_id_returns_404                  # D-CC
+│   ├── test_done_update_rowcount_zero_with_done_status_returns_ok # D-CE
+│   └── test_assemble_invalidates_existing_done_docx               # D-CG
 └── test_worker_config.py             # ⭐ D-AJ 启动期断言
     ├── test_workflow_tasks_have_max_tries_1   # 三类 workflow task max_tries==1
     ├── test_docx_task_has_max_tries_1         # generate_docx_task max_tries==1(D-AY)
@@ -5648,6 +5689,104 @@ async def test_chapter_failed_after_3_retries(client, db_engine, monkeypatch):
     ...
     assert chapter.status == "approved"
 ```
+
+### 18.5 DOCX 状态机回归测试(D-CH)
+
+```python
+# tests/integration/test_docx.py — D-CH 新增 5 个用例
+import pytest
+import sqlalchemy as sa
+from pathlib import Path
+
+
+@pytest.mark.asyncio
+async def test_on_stage_rowcount_zero_raises_stale_and_skips_pandoc(
+    docx_job_factory, monkeypatch, tmp_path,
+):
+    """D-BX + D-CB:cleanup 抢标 failed 后 on_stage 应 raise _StaleJob,
+    pandoc 子进程不再被启动。"""
+    job = await docx_job_factory(status="failed")   # 模拟 cleanup 已抢标
+    pandoc_called = []
+    async def fake_pandoc(*args, **kw):
+        pandoc_called.append(args)
+    monkeypatch.setattr(
+        "asyncio.create_subprocess_exec", fake_pandoc,
+    )
+    from bid_app.worker.tasks import generate_docx_task
+    result = await generate_docx_task(
+        ctx={}, project_id=job.project_id, docx_job_id=job.id,
+    )
+    assert result == {"status": "stale", "output_path": None}
+    assert pandoc_called == []   # pandoc 没被调用
+
+
+@pytest.mark.asyncio
+async def test_get_docx_job_repairs_finalizing_when_file_exists(
+    client, docx_job_factory, project_factory,
+):
+    """D-CD:GET 端点看到 finalizing + 文件存在 → inline UPDATE done。"""
+    project = await project_factory()
+    (Path(project.dir_path) / "proposal.docx").write_bytes(b"fake docx")
+    job = await docx_job_factory(project_id=project.id, status="finalizing")
+    r = await client.get(f"/api/projects/{project.id}/docx-job/{job.id}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "done"           # 公开映射:done 不再是 processing
+    assert body["docx_job_id"] == job.id
+
+
+@pytest.mark.asyncio
+async def test_get_docx_job_with_arq_id_returns_404(client, docx_job_factory):
+    """D-CC:前端误把 arq_job_id 当 docx_job_id 查时,后端按 PK 不命中返回 404。"""
+    job = await docx_job_factory(arq_job_id="arq:abc123")
+    # 用 arq_job_id 字符串当作 path int 显然 422,这里测的是用错的 PK 整数
+    fake_pk = job.id + 99999
+    r = await client.get(f"/api/projects/{job.project_id}/docx-job/{fake_pk}")
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_done_update_rowcount_zero_with_done_status_returns_ok(
+    docx_job_factory, db,
+):
+    """D-CE:终态 done UPDATE rowcount==0 但 SELECT 看到当前已 done(被并发
+    GET/cleanup repair 抢先),task 应 log info 静默并返回 output_path,不报错。"""
+    job = await docx_job_factory(status="finalizing")
+    # 模拟 GET inline repair 抢先把 status 改成 done
+    await db.execute(sa.text(
+        "UPDATE docx_jobs SET status='done', output_path=:p "
+        "WHERE id=:i"
+    ), {"i": job.id, "p": "/tmp/proposal.docx"})
+    await db.commit()
+    # 现在 task 跑到 done UPDATE 阶段:WHERE status='finalizing' 命中 0 行,
+    # SELECT 看到当前 done → 静默返回成功
+    from bid_app.worker.tasks import _commit_done   # 假设抽出的 helper
+    result = await _commit_done(job.id, Path("/tmp/proposal.docx"))
+    # 不抛异常,返回 output_path
+    assert result["output_path"] == "/tmp/proposal.docx"
+
+
+@pytest.mark.asyncio
+async def test_assemble_invalidates_existing_done_docx(
+    project_factory, docx_job_factory, run_assemble_node,
+):
+    """D-CG:assemble 重写 proposal.md 后,旧 DocxJob.done → invalidated,
+    proposal.docx 文件被 unlink。"""
+    project = await project_factory()
+    docx_path = Path(project.dir_path) / "proposal.docx"
+    docx_path.write_bytes(b"old docx")
+    old_job = await docx_job_factory(project_id=project.id, status="done",
+                                     output_path=str(docx_path))
+    await run_assemble_node(project_id=project.id, run_id=...)
+    refreshed = await db.get(DocxJob, old_job.id)
+    assert refreshed.status == "invalidated"
+    assert refreshed.output_path is None
+    assert not docx_path.exists()
+```
+
+> 上述 fixture(`docx_job_factory` / `project_factory` / `run_assemble_node`)在
+> `conftest.py` 实现:工厂 fixture 直接 INSERT row 并 commit,绕过 API 走 DB,
+> 让用例聚焦在状态机分支而非 API 链路。
 
 ---
 
