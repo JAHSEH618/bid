@@ -19,12 +19,19 @@ from ..sync import publish_event
 log = structlog.get_logger()
 
 
-async def _resolve_api_key(project_id: int) -> str:
-    """⭐ D-C 真快照:从 ``Project.encrypted_api_key_snapshot`` 读后解密。
-    CLI fallback:回退 ``$BID_APP_CLI_API_KEY``。
+async def _resolve_api_key(project_id: int, run_id: int | None = None) -> str:
+    """⭐ D-C 真快照 + R10 严格失败语义(REVIEW-2 🔴 修复)。
+
+    生产路径(``run_id > 0``):snapshot 缺失 / decrypt 失败 / DB 异常都
+    raise(worker 顶层 ``_fail_project_and_run``);**不**回退环境变量,
+    防 .env 误注入 ``BID_APP_CLI_API_KEY`` 让 worker 偷换用户真快照。
+    CLI 路径(``run_id <= 0``)允许 ``$BID_APP_CLI_API_KEY`` fallback。
     """
     import os
 
+    is_production = run_id is not None and run_id > 0
+
+    encrypted: bytes | None = None
     try:
         from ...core.crypto import decrypt_api_key  # type: ignore[attr-defined]
         from ...models import Project  # type: ignore[attr-defined]
@@ -36,10 +43,26 @@ async def _resolve_api_key(project_id: int) -> str:
                 )
             )
             encrypted = row.scalar_one_or_none()
-        if encrypted is not None:
-            return decrypt_api_key(encrypted)
-    except Exception:
-        pass
+    except Exception as e:
+        if is_production:
+            raise RuntimeError(
+                f"db error resolving api_key for project {project_id}: {e}"
+            ) from e
+
+    if encrypted is not None:
+        try:
+            return decrypt_api_key(encrypted)  # type: ignore[name-defined]
+        except Exception as e:
+            if is_production:
+                raise RuntimeError(
+                    f"decrypt api_key failed for project {project_id} "
+                    f"(master_key 与启动时不一致?R10 检查): {e}"
+                ) from e
+
+    if is_production:
+        raise RuntimeError(
+            f"project {project_id} has no api_key snapshot; did /start succeed?"
+        )
 
     cli_key = os.environ.get("BID_APP_CLI_API_KEY")
     if cli_key:
@@ -51,7 +74,8 @@ async def _resolve_api_key(project_id: int) -> str:
 
 
 async def _resolve_user_id(project_id: int) -> int:
-    """CLI fallback:DB 不可用返回 0。"""
+    """``Project.api_key_owner`` 是 ``Mapped[int | None]``,行存在但字段
+    NULL 时返 0(REVIEW-2 🟡 #3 fix)。"""
     try:
         from ...models import Project  # type: ignore[attr-defined]
 
@@ -59,7 +83,7 @@ async def _resolve_user_id(project_id: int) -> int:
             row = await s.execute(
                 select(Project.api_key_owner).where(Project.id == project_id)
             )
-            return row.scalar_one()
+            return row.scalar_one_or_none() or 0
     except Exception:
         return 0
 
@@ -68,7 +92,7 @@ async def run(state: WorkflowState) -> dict[str, str]:
     project_id = state["project_id"]
     run_id = state.get("run_id")
 
-    api_key = await _resolve_api_key(project_id)
+    api_key = await _resolve_api_key(project_id, run_id=run_id)
     user_id = await _resolve_user_id(project_id)
 
     messages = build_messages(
