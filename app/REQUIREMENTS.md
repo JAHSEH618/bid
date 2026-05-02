@@ -386,7 +386,7 @@
 | **ChapterVersion** | `id` / `chapter_id` / `version` / `body_markdown` / `feedback_in` / `decision` / `abandoned` / `created_at` | 每次重写一条记录,保留历史;`abandoned`见 FR-4.7 retry_failed 语义 |
 | **ReviewEvent** | `id` / `chapter_id` / `reviewer_id` / `decision`(含 `retry_failed`)/ `feedback_text` / `aborted`(实现层)/ `created_at` | 审计:谁审了哪章 / 谁触发了 failed 重试;`aborted` 仅实现层用(SlotLost 撤销 approve/skip 时标记),前端"最近审核人"查询过滤 NOT aborted |
 | **TokenUsage** | `id` / `user_id` / `project_id` / `run_id` / `model` / `prompt_tokens` / `completion_tokens` / `created_at` | 计费/统计 |
-| **DocxJob** | `id` / `project_id` / `status`(`pending`/`rendering_mermaid`/`pandoc`/`finalizing`/`done`/`failed`/`invalidated`)/ `error` / `output_path` / `created_at` / `updated_at`(实现层)/ `finished_at` | DOCX 生成异步任务追踪;`finalizing` 与 `updated_at` 仅实现层用,保证"DB done ⇔ proposal.docx 文件存在"的原子性;`invalidated` 由 assemble 节点重写 `proposal.md` 后标记(D-CG),前端看到该状态展示"原文档已更新,请重新生成 DOCX",不暴露 API |
+| **DocxJob** | `id` / `project_id` / `status`(`pending`/`rendering_mermaid`/`pandoc`/`finalizing`/`done`/`failed`/`invalidated`)/ `error` / `output_path` / `created_at` / `updated_at`(实现层)/ `finished_at` | DOCX 生成异步任务追踪。状态分两类:① **对外业务状态**(API 暴露给前端):`pending`/`rendering_mermaid`/`pandoc` 经映射成 `processing`、`done`、`failed`、`invalidated`(D-CG/D-CN);② **实现层不暴露**:`finalizing` 经映射成 `processing`、`updated_at` 字段。`invalidated` 由 assemble 节点重写 `proposal.md` 后标记(D-CG),通过 GET `/docx-job/{docx_job_id}` 显式返回给前端,前端展示"原文档已更新,请重新生成 DOCX" |
 
 LangGraph 自身的 checkpoint 表(`checkpoints` / `writes`)由 `langgraph-checkpoint-postgres` 自动建,不在我们建模范围。
 
