@@ -12,14 +12,7 @@ import {
 import { useToast } from '@/hooks/useToast'
 import type { DocxJobStatus } from '@/lib/types'
 
-const STAGE_LABEL: Record<string, string> = {
-  pending: '排队中',
-  rendering_mermaid: '渲染图表',
-  pandoc: '生成 DOCX',
-  finalizing: '收尾',
-  processing: '生成中',
-}
-
+// 后端 stage 已返回中文进度提示(如「渲染流程图...」),前端直接用,不再二次映射。
 const STATUS_VARIANT: Record<
   DocxJobStatus,
   'secondary' | 'success' | 'destructive' | 'info' | 'warning'
@@ -29,14 +22,6 @@ const STATUS_VARIANT: Record<
   done: 'success',
   failed: 'destructive',
   invalidated: 'warning',
-}
-
-const STATUS_LABEL: Record<DocxJobStatus, string> = {
-  pending: '排队中',
-  processing: '生成中',
-  done: '已就绪',
-  failed: '失败',
-  invalidated: '已过期(原文档已更新)',
 }
 
 export interface DataExportPanelProps {
@@ -150,17 +135,13 @@ export function DataExportPanel({
 
         {job && (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Badge variant={STATUS_VARIANT[job.status]}>
-              {job.status === 'processing' && job.stage
-                ? STAGE_LABEL[job.stage] ?? STATUS_LABEL[job.status]
-                : STATUS_LABEL[job.status]}
-            </Badge>
+            <Badge variant={STATUS_VARIANT[job.status]}>{job.stage}</Badge>
             {isFailed && job.error && (
               <span className="text-destructive">{job.error}</span>
             )}
             {job.status === 'invalidated' && (
               <span className="text-amber-700">
-                原 Markdown 已重生成,请点击「生成 .docx」重新打包
+                请点击「生成 .docx」重新打包
               </span>
             )}
           </div>

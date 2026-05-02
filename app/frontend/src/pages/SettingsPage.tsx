@@ -14,43 +14,45 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import {
-  useApiKeyStatus,
+  useApiKeyInfo,
   useDeleteApiKey,
-  useMyUsage,
+  useMyTokenUsage,
   useSetApiKey,
   useTestApiKey,
+  type UsagePeriod,
 } from '@/api/me'
 import { useToast } from '@/hooks/useToast'
 import { ApiError } from '@/lib/apiFetch'
 
 export function SettingsPage() {
   const { toast } = useToast()
-  const status = useApiKeyStatus()
+  const apiKey = useApiKeyInfo()
   const setKey = useSetApiKey()
   const deleteKey = useDeleteApiKey()
   const testKey = useTestApiKey()
 
   const [keyInput, setKeyInput] = useState('')
+  const [period, setPeriod] = useState<UsagePeriod>('month')
+  const usage = useMyTokenUsage(period)
 
-  const month = new Date().toISOString().slice(0, 7)
-  const usage = useMyUsage(month)
-
-  const configured = status.data?.configured ?? false
+  const configured = apiKey.data != null
+  const info = apiKey.data
 
   const handleSave = async () => {
     if (!keyInput.trim()) {
       toast({ title: '请输入 API Key', variant: 'warning' })
       return
     }
+    if (keyInput.trim().length < 8) {
+      toast({ title: 'API Key 至少 8 位', variant: 'warning' })
+      return
+    }
     try {
       await setKey.mutateAsync(keyInput.trim())
       setKeyInput('')
-      toast({ title: 'API Key 已保存并校验通过', variant: 'success' })
+      toast({ title: 'API Key 已保存', variant: 'success' })
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '保存失败')
-          : '保存失败'
+      const msg = readError(err, '保存失败')
       toast({ title: '保存失败', description: msg, variant: 'destructive' })
     }
   }
@@ -68,10 +70,7 @@ export function SettingsPage() {
         })
       }
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '测试失败')
-          : '测试失败'
+      const msg = readError(err, '测试失败')
       toast({ title: '测试失败', description: msg, variant: 'destructive' })
     }
   }
@@ -87,7 +86,7 @@ export function SettingsPage() {
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">个人设置</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          配置 DashScope API Key 与查看本月 token 消费。
+          配置 DashScope API Key 与查看 token 消费。
         </p>
       </header>
 
@@ -98,16 +97,18 @@ export function SettingsPage() {
             DashScope API Key
           </CardTitle>
           <CardDescription>
-            Key 加密保存,后端不返回明文。新建项目前必须配置。
+            Key 加密保存,后端只返回掩码后的尾号。新建项目前必须配置。
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex items-center gap-2 text-sm">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
             状态:
-            {configured ? (
+            {apiKey.isLoading ? (
+              <span className="text-muted-foreground">加载中…</span>
+            ) : configured ? (
               <Badge variant="success">
                 <CheckCircle2 className="mr-1 h-3 w-3" />
-                已配置
+                已配置 {info?.masked}
               </Badge>
             ) : (
               <Badge variant="warning">
@@ -115,10 +116,10 @@ export function SettingsPage() {
                 未配置
               </Badge>
             )}
-            {status.data?.last_validated_at && (
+            {info?.last_validated_at && (
               <span className="text-xs text-muted-foreground">
                 上次校验:
-                {new Date(status.data.last_validated_at).toLocaleString('zh-CN')}
+                {new Date(info.last_validated_at).toLocaleString('zh-CN')}
               </span>
             )}
           </div>
@@ -140,7 +141,7 @@ export function SettingsPage() {
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              保存时后端会做一次最小调用验证,通过才落库。
+              保存后请点击「测试连通」验证 Key 可用。
             </p>
           </div>
         </CardContent>
@@ -166,9 +167,29 @@ export function SettingsPage() {
       </Card>
 
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base">本月 token 消费</CardTitle>
-          <CardDescription>{month}(按调用模型分组)</CardDescription>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle className="text-base">Token 消费</CardTitle>
+            <CardDescription>
+              {period === 'month' ? '当月' : '累计'}(按调用模型分组)
+            </CardDescription>
+          </div>
+          <div className="flex gap-1">
+            <Button
+              variant={period === 'month' ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setPeriod('month')}
+            >
+              当月
+            </Button>
+            <Button
+              variant={period === 'all' ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setPeriod('all')}
+            >
+              累计
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           {usage.isLoading && (
@@ -176,12 +197,14 @@ export function SettingsPage() {
           )}
           {usage.data && (
             <div className="space-y-3">
-              <div className="grid grid-cols-3 gap-3 text-sm">
-                <Stat label="输入 tokens" value={usage.data.total_input_tokens} />
-                <Stat label="输出 tokens" value={usage.data.total_output_tokens} />
+              <div className="grid grid-cols-2 gap-3 text-sm">
                 <Stat
-                  label="预估费用 (¥)"
-                  value={usage.data.total_cost.toFixed(2)}
+                  label="输入 tokens"
+                  value={usage.data.total_prompt}
+                />
+                <Stat
+                  label="输出 tokens"
+                  value={usage.data.total_completion}
                 />
               </div>
               <Separator />
@@ -191,21 +214,27 @@ export function SettingsPage() {
                     <th className="py-1.5 text-left">模型</th>
                     <th className="py-1.5 text-right">输入</th>
                     <th className="py-1.5 text-right">输出</th>
-                    <th className="py-1.5 text-right">费用 (¥)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {usage.data.by_model.map((m) => (
+                  {usage.data.rows.length === 0 && (
+                    <tr>
+                      <td
+                        colSpan={3}
+                        className="py-3 text-center text-muted-foreground"
+                      >
+                        暂无消费记录
+                      </td>
+                    </tr>
+                  )}
+                  {usage.data.rows.map((m) => (
                     <tr key={m.model} className="border-t">
                       <td className="py-2">{m.model}</td>
                       <td className="py-2 text-right tabular-nums">
-                        {m.input_tokens.toLocaleString()}
+                        {m.prompt_tokens.toLocaleString()}
                       </td>
                       <td className="py-2 text-right tabular-nums">
-                        {m.output_tokens.toLocaleString()}
-                      </td>
-                      <td className="py-2 text-right tabular-nums">
-                        {m.cost.toFixed(2)}
+                        {m.completion_tokens.toLocaleString()}
                       </td>
                     </tr>
                   ))}
@@ -228,4 +257,11 @@ function Stat({ label, value }: { label: string; value: number | string }) {
       </p>
     </div>
   )
+}
+
+function readError(err: unknown, fallback: string): string {
+  if (err instanceof ApiError && typeof err.body === 'object' && err.body) {
+    return (err.body as { detail?: string }).detail ?? fallback
+  }
+  return fallback
 }

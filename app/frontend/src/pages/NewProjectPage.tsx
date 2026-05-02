@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { useCreateProject } from '@/api/projects'
-import { useApiKeyStatus } from '@/api/me'
+import { useApiKeyInfo } from '@/api/me'
 import { useToast } from '@/hooks/useToast'
 import { ApiError } from '@/lib/apiFetch'
 
@@ -27,7 +27,7 @@ const schema = z.object({
 export function NewProjectPage() {
   const navigate = useNavigate()
   const create = useCreateProject()
-  const apiKey = useApiKeyStatus()
+  const apiKey = useApiKeyInfo()
   const { toast } = useToast()
   const [errors, setErrors] = useState<Record<string, string>>({})
 
@@ -60,7 +60,8 @@ export function NewProjectPage() {
     }
   }
 
-  const apiKeyMissing = apiKey.data && !apiKey.data.configured
+  // useApiKeyInfo:configured ⇔ data != null;404 → null。loading 中显示无横幅。
+  const apiKeyMissing = !apiKey.isLoading && apiKey.data == null
 
   return (
     <div className="container max-w-2xl space-y-6 py-8">

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, KeyRound, UserMinus } from 'lucide-react'
+import { Plus, KeyRound, UserMinus, UserCheck, Trash2 } from 'lucide-react'
 import {
   Card,
   CardContent,
@@ -22,24 +22,26 @@ import {
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
-  useAdminUsage,
+  useAdminTokenUsage,
   useAdminUsers,
   useCreateAdminUser,
-  useDisableUser,
-  useResetUserPassword,
+  useDeleteAdminUser,
+  useUpdateAdminUser,
 } from '@/api/admin'
+import type { UsagePeriod } from '@/api/me'
 import { useToast } from '@/hooks/useToast'
 import { ApiError } from '@/lib/apiFetch'
+import type { AdminTokenUsageRow } from '@/lib/types'
 
 export function AdminPage() {
-  const month = new Date().toISOString().slice(0, 7)
   const users = useAdminUsers()
-  const usage = useAdminUsage(month)
   const create = useCreateAdminUser()
-  const disable = useDisableUser()
-  const reset = useResetUserPassword()
+  const update = useUpdateAdminUser()
+  const remove = useDeleteAdminUser()
   const { toast } = useToast()
   const [open, setOpen] = useState(false)
+  const [period, setPeriod] = useState<UsagePeriod>('month')
+  const usage = useAdminTokenUsage(period)
 
   const handleCreate = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -47,8 +49,11 @@ export function AdminPage() {
     const username = ((fd.get('username') as string) ?? '').trim()
     const password = ((fd.get('password') as string) ?? '').trim()
     const role = (fd.get('role') as 'admin' | 'user') ?? 'user'
-    if (!username || password.length < 8) {
-      toast({ title: '用户名必填、密码至少 8 位', variant: 'warning' })
+    if (username.length < 3 || password.length < 8) {
+      toast({
+        title: '用户名 ≥ 3 字符,密码 ≥ 8 位',
+        variant: 'warning',
+      })
       return
     }
     try {
@@ -57,48 +62,98 @@ export function AdminPage() {
       setOpen(false)
       e.currentTarget.reset()
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '创建失败')
-          : '创建失败'
-      toast({ title: '创建失败', description: msg, variant: 'destructive' })
+      toast({
+        title: '创建失败',
+        description: readError(err, '创建失败'),
+        variant: 'destructive',
+      })
     }
   }
 
-  const handleReset = async (userId: number, username: string) => {
-    const newPwd = window.prompt(`为 ${username} 重置密码:`)?.trim()
+  const handleResetPwd = async (userId: number, username: string) => {
+    const newPwd = window.prompt(`为 ${username} 重置密码(≥ 8 位):`)?.trim()
     if (!newPwd) return
     if (newPwd.length < 8) {
       toast({ title: '至少 8 位', variant: 'warning' })
       return
     }
     try {
-      await reset.mutateAsync({ userId, newPassword: newPwd })
-      toast({ title: '密码已重置', variant: 'success' })
-    } catch {
-      toast({ title: '重置失败', variant: 'destructive' })
+      await update.mutateAsync({
+        userId,
+        body: { reset_password: newPwd },
+      })
+      toast({
+        title: '密码已重置,该用户下次登录需改密',
+        variant: 'success',
+      })
+    } catch (err) {
+      toast({
+        title: '重置失败',
+        description: readError(err, '重置失败'),
+        variant: 'destructive',
+      })
     }
   }
 
-  const handleDisable = async (userId: number, username: string) => {
-    if (!window.confirm(`确认禁用 ${username}?`)) return
+  const handleToggleActive = async (
+    userId: number,
+    username: string,
+    currentlyActive: boolean,
+  ) => {
+    if (
+      currentlyActive &&
+      !window.confirm(`确认禁用 ${username}?该用户将无法登录。`)
+    ) {
+      return
+    }
     try {
-      await disable.mutateAsync(userId)
-      toast({ title: '已禁用', variant: 'success' })
-    } catch {
-      toast({ title: '禁用失败', variant: 'destructive' })
+      await update.mutateAsync({
+        userId,
+        body: { is_active: !currentlyActive },
+      })
+      toast({
+        title: currentlyActive ? '已禁用' : '已启用',
+        variant: 'success',
+      })
+    } catch (err) {
+      toast({
+        title: '操作失败',
+        description: readError(err, '操作失败'),
+        variant: 'destructive',
+      })
     }
   }
+
+  const handleDelete = async (userId: number, username: string) => {
+    if (
+      !window.confirm(
+        `永久删除 ${username}?将连带 API Key 与 token 消费记录一起删除。\n注意:如该用户名下有项目会失败。`,
+      )
+    ) {
+      return
+    }
+    try {
+      await remove.mutateAsync(userId)
+      toast({ title: '已删除', variant: 'success' })
+    } catch (err) {
+      toast({
+        title: '删除失败',
+        description: readError(err, '删除失败'),
+        variant: 'destructive',
+      })
+    }
+  }
+
+  // 按 user_id 聚合 admin token usage,显示「用户级」摘要
+  const usageByUser = aggregateUsageByUser(usage.data?.rows ?? [])
 
   return (
     <div className="container max-w-6xl space-y-6 py-8">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">管理后台</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            用户管理与全员 token 消费汇总
-          </p>
-        </div>
+      <header>
+        <h1 className="text-2xl font-semibold tracking-tight">管理后台</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          用户管理与全员 token 消费汇总
+        </p>
       </header>
 
       <Tabs defaultValue="users">
@@ -127,12 +182,12 @@ export function AdminPage() {
                   <DialogHeader>
                     <DialogTitle>新建用户</DialogTitle>
                     <DialogDescription>
-                      用户首次登录会被强制要求修改密码(must_change_password)。
+                      用户首次登录会被强制要求修改密码。
                     </DialogDescription>
                   </DialogHeader>
                   <form onSubmit={handleCreate} className="space-y-3">
                     <div className="space-y-1.5">
-                      <Label htmlFor="username">用户名</Label>
+                      <Label htmlFor="username">用户名(≥ 3 字符)</Label>
                       <Input id="username" name="username" autoFocus />
                     </div>
                     <div className="space-y-1.5">
@@ -171,6 +226,7 @@ export function AdminPage() {
                     <th className="py-2 text-left">用户名</th>
                     <th className="py-2 text-left">角色</th>
                     <th className="py-2 text-left">状态</th>
+                    <th className="py-2 text-left">最近登录</th>
                     <th className="py-2 text-left">创建时间</th>
                     <th className="py-2 text-right">操作</th>
                   </tr>
@@ -198,27 +254,47 @@ export function AdminPage() {
                           </Badge>
                         )}
                       </td>
-                      <td className="py-3 text-muted-foreground">
+                      <td className="py-3 text-xs text-muted-foreground">
+                        {u.last_login_at
+                          ? new Date(u.last_login_at).toLocaleString('zh-CN')
+                          : '从未登录'}
+                      </td>
+                      <td className="py-3 text-xs text-muted-foreground">
                         {new Date(u.created_at).toLocaleDateString('zh-CN')}
                       </td>
                       <td className="py-3 text-right">
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => handleReset(u.id, u.username)}
-                          disabled={reset.isPending}
+                          onClick={() => handleResetPwd(u.id, u.username)}
+                          disabled={update.isPending}
+                          title="重置密码"
                         >
-                          <KeyRound className="mr-1 h-3.5 w-3.5" />
-                          重置密码
+                          <KeyRound className="h-3.5 w-3.5" />
                         </Button>
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => handleDisable(u.id, u.username)}
-                          disabled={!u.is_active || disable.isPending}
+                          onClick={() =>
+                            handleToggleActive(u.id, u.username, u.is_active)
+                          }
+                          disabled={update.isPending}
+                          title={u.is_active ? '禁用' : '启用'}
                         >
-                          <UserMinus className="mr-1 h-3.5 w-3.5" />
-                          禁用
+                          {u.is_active ? (
+                            <UserMinus className="h-3.5 w-3.5" />
+                          ) : (
+                            <UserCheck className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDelete(u.id, u.username)}
+                          disabled={remove.isPending}
+                          title="删除"
+                        >
+                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
                         </Button>
                       </td>
                     </tr>
@@ -234,41 +310,82 @@ export function AdminPage() {
 
         <TabsContent value="usage">
           <Card>
-            <CardHeader>
-              <CardTitle className="text-base">全员 token 消费</CardTitle>
-              <CardDescription>{month}</CardDescription>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0">
+              <div>
+                <CardTitle className="text-base">全员 token 消费</CardTitle>
+                <CardDescription>
+                  {period === 'month' ? '本月' : '累计'}(按用户聚合 + 模型明细)
+                </CardDescription>
+              </div>
+              <div className="flex gap-1">
+                <Button
+                  variant={period === 'month' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setPeriod('month')}
+                >
+                  本月
+                </Button>
+                <Button
+                  variant={period === 'all' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setPeriod('all')}
+                >
+                  累计
+                </Button>
+              </div>
             </CardHeader>
             <CardContent>
               <table className="w-full text-sm">
                 <thead className="text-xs text-muted-foreground">
                   <tr className="border-b">
                     <th className="py-2 text-left">用户</th>
+                    <th className="py-2 text-left">模型</th>
                     <th className="py-2 text-right">输入 tokens</th>
                     <th className="py-2 text-right">输出 tokens</th>
-                    <th className="py-2 text-right">费用 (¥)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {usage.data?.rows.map((r) => (
-                    <tr key={r.user_id} className="border-b last:border-0">
-                      <td className="py-2 font-medium">{r.username}</td>
-                      <td className="py-2 text-right tabular-nums">
-                        {r.total_input_tokens.toLocaleString()}
-                      </td>
-                      <td className="py-2 text-right tabular-nums">
-                        {r.total_output_tokens.toLocaleString()}
-                      </td>
-                      <td className="py-2 text-right tabular-nums">
-                        {r.total_cost.toFixed(2)}
+                  {usageByUser.length === 0 && !usage.isLoading && (
+                    <tr>
+                      <td
+                        colSpan={4}
+                        className="py-3 text-center text-muted-foreground"
+                      >
+                        暂无消费记录
                       </td>
                     </tr>
-                  ))}
+                  )}
+                  {usageByUser.flatMap((g) =>
+                    g.rows.map((r, i) => (
+                      <tr
+                        key={`${g.user_id}-${r.model}`}
+                        className="border-b last:border-0"
+                      >
+                        <td className="py-2 font-medium">
+                          {i === 0 ? g.username : ''}
+                        </td>
+                        <td className="py-2 text-xs text-muted-foreground">
+                          {r.model}
+                        </td>
+                        <td className="py-2 text-right tabular-nums">
+                          {r.prompt_tokens.toLocaleString()}
+                        </td>
+                        <td className="py-2 text-right tabular-nums">
+                          {r.completion_tokens.toLocaleString()}
+                        </td>
+                      </tr>
+                    )),
+                  )}
                   {usage.data && (
                     <tr className="font-medium">
-                      <td className="py-2">合计</td>
-                      <td colSpan={2}></td>
+                      <td colSpan={2} className="py-2">
+                        合计
+                      </td>
                       <td className="py-2 text-right tabular-nums">
-                        ¥ {usage.data.total_cost.toFixed(2)}
+                        {usage.data.total_prompt.toLocaleString()}
+                      </td>
+                      <td className="py-2 text-right tabular-nums">
+                        {usage.data.total_completion.toLocaleString()}
                       </td>
                     </tr>
                   )}
@@ -283,4 +400,34 @@ export function AdminPage() {
       </Tabs>
     </div>
   )
+}
+
+interface UserGroup {
+  user_id: number
+  username: string
+  rows: AdminTokenUsageRow[]
+}
+
+function aggregateUsageByUser(rows: AdminTokenUsageRow[]): UserGroup[] {
+  const map = new Map<number, UserGroup>()
+  for (const r of rows) {
+    const g = map.get(r.user_id)
+    if (g) {
+      g.rows.push(r)
+    } else {
+      map.set(r.user_id, {
+        user_id: r.user_id,
+        username: r.username,
+        rows: [r],
+      })
+    }
+  }
+  return [...map.values()]
+}
+
+function readError(err: unknown, fallback: string): string {
+  if (err instanceof ApiError && typeof err.body === 'object' && err.body) {
+    return (err.body as { detail?: string }).detail ?? fallback
+  }
+  return fallback
 }

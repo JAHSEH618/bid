@@ -1,9 +1,13 @@
-// DOCX 相关 API hooks。具体 schema 等 #22 (api/docx.py) 落地后回填。
+// DOCX 相关 API hooks。端点契约对齐 backend api/docx.py(M3-3)。
 //
-// 端点参考 IMPLEMENTATION_SPEC §15.3:
-//   - POST /api/projects/{id}/proposal.docx           触发(返回 {docx_job_id, arq_job_id, cached})
-//   - GET  /api/projects/{id}/proposal.docx           下载(FileResponse,前端走 window.open)
-//   - GET  /api/projects/{id}/docx-job/{job_id}       轮询状态(D-BW)
+// 端点:
+//   - POST /api/projects/{id}/proposal.docx     → {docx_job_id, arq_job_id, cached}
+//        · 命中缓存 → cached=true + 复用最近一次 done 的 docx_job_id(D-CK)
+//        · 已有进行中任务 → 409
+//   - GET  /api/projects/{id}/docx-job/{docx_job_id} → DocxJobDTO 轮询(D-BW)
+//        · 内部 finalizing 状态映射为 processing(D-BU 不暴露)
+//        · invalidated:assemble 重写后旧产物作废,前端展示「请重新生成」
+//   - GET  /api/projects/{id}/proposal.docx     FileResponse(浏览器 cookie + Content-Disposition)
 import {
   useMutation,
   useQuery,
@@ -11,13 +15,9 @@ import {
   type Query,
 } from '@tanstack/react-query'
 import { apiFetch, apiUrl } from '@/lib/apiFetch'
-import type { DocxJobDTO } from '@/lib/types'
+import type { DocxJobDTO, TriggerDocxResponse } from '@/lib/types'
 
-export interface TriggerDocxResponse {
-  docx_job_id: number
-  arq_job_id: string | null
-  cached: boolean
-}
+export type { TriggerDocxResponse } from '@/lib/types'
 
 export function useTriggerDocx() {
   const qc = useQueryClient()

@@ -7,6 +7,7 @@
 // 字段名 / 状态枚举 / 路径与 backend api/* 实际契约严格一致(commit 7dca873 / 2a189d1 / 44e974c)。
 
 import type {
+  AdminTokenUsageRow,
   ChapterStatus,
   ChapterVersionDTO,
   DocumentDTO,
@@ -14,7 +15,6 @@ import type {
   OutlineChapterDTO,
   OutlineResponseDTO,
   ProjectDTO,
-  TokenUsageRow,
   UserDTO,
 } from './types'
 import type { ProjectEvent } from '@/hooks/useSSE'
@@ -37,6 +37,7 @@ const adminUser: UserDTO = {
   role: 'admin',
   is_active: true,
   must_change_password: false,
+  last_login_at: '2026-05-02T07:30:00+08:00',
   created_at: '2026-04-01T09:00:00+08:00',
 }
 const memberUser: UserDTO = {
@@ -45,6 +46,7 @@ const memberUser: UserDTO = {
   role: 'user',
   is_active: true,
   must_change_password: false,
+  last_login_at: '2026-05-01T20:15:00+08:00',
   created_at: '2026-04-15T10:00:00+08:00',
 }
 const lisi: UserDTO = {
@@ -53,6 +55,7 @@ const lisi: UserDTO = {
   role: 'user',
   is_active: true,
   must_change_password: false,
+  last_login_at: null,
   created_at: '2026-04-20T11:00:00+08:00',
 }
 
@@ -230,38 +233,52 @@ const projectDocuments: Record<number, DocumentDTO[]> = {
 
 const docxJobs: Record<number, DocxJobDTO> = {
   102: {
-    id: 9001,
-    project_id: 102,
+    docx_job_id: 9001,
     status: 'done',
-    stage: null,
+    stage: '已完成',
     error: null,
-    filename: '智慧园区门禁系统_技术方案_20260502.docx',
     created_at: NOW,
+    updated_at: NOW,
+    finished_at: NOW,
   },
 }
 let lastDocxJobId = 9001
 
-const tokenUsageRows: TokenUsageRow[] = [
+const adminTokenUsageRows: AdminTokenUsageRow[] = [
   {
     user_id: 2,
     username: 'zhangsan',
-    total_input_tokens: 123_400,
-    total_output_tokens: 89_200,
-    total_cost: 4.62,
+    model: 'qwen3.6-max-preview',
+    prompt_tokens: 92_400,
+    completion_tokens: 71_100,
+  },
+  {
+    user_id: 2,
+    username: 'zhangsan',
+    model: 'qwen3.6-flash',
+    prompt_tokens: 31_000,
+    completion_tokens: 18_100,
   },
   {
     user_id: 3,
     username: 'lisi',
-    total_input_tokens: 56_800,
-    total_output_tokens: 42_100,
-    total_cost: 2.18,
+    model: 'qwen3.6-max-preview',
+    prompt_tokens: 38_200,
+    completion_tokens: 31_100,
+  },
+  {
+    user_id: 3,
+    username: 'lisi',
+    model: 'deepseek-v4-flash',
+    prompt_tokens: 18_600,
+    completion_tokens: 11_000,
   },
   {
     user_id: 1,
     username: 'admin',
-    total_input_tokens: 8_100,
-    total_output_tokens: 6_400,
-    total_cost: 0.31,
+    model: 'qwen3.6-flash',
+    prompt_tokens: 8_100,
+    completion_tokens: 6_400,
   },
 ]
 
@@ -336,64 +353,68 @@ function route(ctx: ResolveContext): unknown {
       currentUser = { ...adminUser, must_change_password: true }
       return currentUser
     }
-    currentUser = adminUsers.find((u) => u.username === b.username) ?? adminUser
+    currentUser =
+      adminUsers.find((u) => u.username === b.username) ?? adminUser
     return currentUser
   }
-  if (pathname === '/api/auth/logout' && method === 'POST') return null
+  if (pathname === '/api/auth/logout' && method === 'POST') return { ok: true }
   if (pathname === '/api/auth/me' && method === 'GET') return currentUser
   if (pathname === '/api/me/change-password' && method === 'POST') {
     currentUser = { ...currentUser, must_change_password: false }
-    return null
+    return { ok: true }
   }
 
   // ── Me / API Key ──
   if (pathname === '/api/me/api-key' && method === 'GET') {
+    if (!apiKeyConfigured) throw apiError(404, { detail: 'API Key 未配置' })
     return {
-      configured: apiKeyConfigured,
+      provider: 'dashscope',
+      masked: 'sk-***1234',
       last_validated_at: apiKeyLastValidatedAt,
+      created_at: '2026-04-15T10:00:00+08:00',
+      updated_at: apiKeyLastValidatedAt,
     }
   }
   if (pathname === '/api/me/api-key' && method === 'PUT') {
     apiKeyConfigured = true
     apiKeyLastValidatedAt = new Date().toISOString()
-    return null
+    return { ok: true }
   }
   if (pathname === '/api/me/api-key' && method === 'DELETE') {
     apiKeyConfigured = false
     apiKeyLastValidatedAt = null
-    return null
+    return { ok: true }
   }
   if (pathname === '/api/me/api-key/test' && method === 'GET') {
     if (!apiKeyConfigured) throw apiError(412, { detail: '尚未配置 API Key' })
-    return { ok: true }
+    apiKeyLastValidatedAt = new Date().toISOString()
+    return { ok: true, last_validated_at: apiKeyLastValidatedAt }
   }
-  if (pathname === '/api/me/usage' && method === 'GET') {
-    const month = ctx.query.get('month') ?? '2026-05'
+  if (pathname === '/api/me/token-usage' && method === 'GET') {
+    const period = ctx.query.get('period') ?? 'month'
+    const rows = [
+      {
+        model: 'qwen3.6-max-preview',
+        prompt_tokens: 38_200,
+        completion_tokens: 31_100,
+      },
+      {
+        model: 'qwen3.6-flash',
+        prompt_tokens: 12_400,
+        completion_tokens: 7_800,
+      },
+      {
+        model: 'deepseek-v4-flash',
+        prompt_tokens: 6_200,
+        completion_tokens: 3_200,
+      },
+    ]
     return {
-      month,
-      total_input_tokens: 56_800,
-      total_output_tokens: 42_100,
-      total_cost: 2.18,
-      by_model: [
-        {
-          model: 'qwen3.6-max-preview',
-          input_tokens: 38_200,
-          output_tokens: 31_100,
-          cost: 1.74,
-        },
-        {
-          model: 'qwen3.6-flash',
-          input_tokens: 12_400,
-          output_tokens: 7_800,
-          cost: 0.28,
-        },
-        {
-          model: 'deepseek-v4-flash',
-          input_tokens: 6_200,
-          output_tokens: 3_200,
-          cost: 0.16,
-        },
-      ],
+      user_id: currentUser.id,
+      period,
+      rows,
+      total_prompt: rows.reduce((s, r) => s + r.prompt_tokens, 0),
+      total_completion: rows.reduce((s, r) => s + r.completion_tokens, 0),
     }
   }
 
@@ -411,29 +432,50 @@ function route(ctx: ResolveContext): unknown {
       role: b.role,
       is_active: true,
       must_change_password: true,
+      last_login_at: null,
       created_at: new Date().toISOString(),
     }
     adminUsers.push(u)
     return u
   }
-  if (pathname.endsWith('/disable') && pathname.startsWith('/api/admin/users/')) {
+  // PATCH /api/admin/users/{id} 改密 / 禁用 / 改角色
+  if (
+    pathname.startsWith('/api/admin/users/') &&
+    method === 'PATCH' &&
+    pathname.split('/').length === 5
+  ) {
     const id = Number(pathname.split('/')[4])
     const u = adminUsers.find((x) => x.id === id)
-    if (u) u.is_active = false
-    return null
+    if (!u) throw apiError(404, { detail: 'user not found' })
+    const b = ctx.body as {
+      role?: 'admin' | 'user'
+      is_active?: boolean
+      reset_password?: string
+    }
+    if (b.role) u.role = b.role
+    if (typeof b.is_active === 'boolean') u.is_active = b.is_active
+    if (b.reset_password) u.must_change_password = true
+    return u
   }
+  // DELETE /api/admin/users/{id}
   if (
-    pathname.endsWith('/password') &&
-    pathname.startsWith('/api/admin/users/')
+    pathname.startsWith('/api/admin/users/') &&
+    method === 'DELETE' &&
+    pathname.split('/').length === 5
   ) {
-    return null
+    const id = Number(pathname.split('/')[4])
+    const ix = adminUsers.findIndex((x) => x.id === id)
+    if (ix >= 0) adminUsers.splice(ix, 1)
+    return { ok: true }
   }
-  if (pathname === '/api/admin/usage' && method === 'GET') {
-    const month = ctx.query.get('month') ?? '2026-05'
+  if (pathname === '/api/admin/token-usage' && method === 'GET') {
+    const period = ctx.query.get('period') ?? 'month'
+    const rows = adminTokenUsageRows
     return {
-      month,
-      rows: tokenUsageRows,
-      total_cost: tokenUsageRows.reduce((s, r) => s + r.total_cost, 0),
+      period,
+      rows,
+      total_prompt: rows.reduce((s, r) => s + r.prompt_tokens, 0),
+      total_completion: rows.reduce((s, r) => s + r.completion_tokens, 0),
     }
   }
 
@@ -470,7 +512,8 @@ function route(ctx: ResolveContext): unknown {
     const pid = Number(docxJobMatch[1])
     const jid = Number(docxJobMatch[2])
     const job = docxJobs[pid]
-    if (!job || job.id !== jid) throw apiError(404, { detail: 'job not found' })
+    if (!job || job.docx_job_id !== jid)
+      throw apiError(404, { detail: 'job not found' })
     return job
   }
 
@@ -590,24 +633,31 @@ function route(ctx: ResolveContext): unknown {
       }
     }
     if (sub === '/proposal.docx' && method === 'POST') {
+      const now = new Date().toISOString()
       const job: DocxJobDTO = {
-        id: ++lastDocxJobId,
-        project_id: pid,
+        docx_job_id: ++lastDocxJobId,
         status: 'processing',
-        stage: 'rendering_mermaid',
+        stage: '渲染流程图...',
         error: null,
-        filename: `${proj.name}_技术方案_20260502.docx`,
-        created_at: new Date().toISOString(),
+        created_at: now,
+        updated_at: now,
+        finished_at: null,
       }
       docxJobs[pid] = job
       window.setTimeout(() => {
         const j = docxJobs[pid]
         if (j) {
           j.status = 'done'
-          j.stage = null
+          j.stage = '已完成'
+          j.finished_at = new Date().toISOString()
+          j.updated_at = j.finished_at
         }
       }, 4_000)
-      return { docx_job_id: job.id, arq_job_id: 'mock-arq-job', cached: false }
+      return {
+        docx_job_id: job.docx_job_id,
+        arq_job_id: 'mock-arq-job',
+        cached: false,
+      }
     }
   }
 

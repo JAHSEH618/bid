@@ -3,12 +3,15 @@
 
 export type UserRole = 'admin' | 'user'
 
+// 后端 MeResponse(schemas/auth.py),从 auth/me 端点返回。
+// admin 端 AdminUserResponse 字段相同,合用同一类型即可。
 export interface UserDTO {
   id: number
   username: string
   role: UserRole
   is_active: boolean
   must_change_password: boolean
+  last_login_at: string | null
   created_at: string
 }
 
@@ -131,22 +134,63 @@ export type DocxJobStatus =
   | 'failed'
   | 'invalidated'
 
+// 后端 GET /api/projects/{id}/docx-job/{docx_job_id} 实际返回(D-BU 不暴露 finalizing,
+// 内部状态映射为 processing)。
 export interface DocxJobDTO {
-  id: number
-  project_id: number
+  docx_job_id: number
   status: DocxJobStatus
-  stage?: string | null
-  error?: string | null
-  filename?: string | null
+  stage: string  // 进度文案;invalidated 时为「原文档已更新,请重新生成 DOCX」
+  error: string | null
   created_at: string
+  updated_at: string | null
+  finished_at: string | null
 }
 
-export interface TokenUsageRow {
+export interface TriggerDocxResponse {
+  docx_job_id: number
+  arq_job_id: string | null
+  cached: boolean
+}
+
+// 后端 ApiKeyInfoResponse(schemas/auth.py)。
+// GET /api/me/api-key 已配置 → 200 + 此结构;未配置 → 404。
+export interface ApiKeyInfoDTO {
+  provider: string
+  masked: string
+  last_validated_at: string | null
+  created_at: string
+  updated_at: string | null
+}
+
+// 自己的 token usage(后端 TokenUsageSummary)。period ∈ {month, all}。
+export interface MyTokenUsageRow {
+  model: string
+  prompt_tokens: number
+  completion_tokens: number
+}
+
+export interface MyTokenUsageDTO {
+  user_id: number
+  period: string
+  rows: MyTokenUsageRow[]
+  total_prompt: number
+  total_completion: number
+}
+
+// admin 全局 token usage(后端 AdminTokenUsageSummary)。多了 user_id / username。
+export interface AdminTokenUsageRow {
   user_id: number
   username: string
-  total_input_tokens: number
-  total_output_tokens: number
-  total_cost: number
+  model: string
+  prompt_tokens: number
+  completion_tokens: number
+}
+
+export interface AdminTokenUsageDTO {
+  period: string
+  rows: AdminTokenUsageRow[]
+  total_prompt: number
+  total_completion: number
 }
 
 export type ReviewDecision = 'approve' | 'revise' | 'skip'

@@ -1,14 +1,20 @@
-// 管理员 hooks。具体 schema 等 #18 (api/admin.py) 落地后回填。
+// 管理员 hooks。端点契约对齐 backend api/admin.py(M2-5)。
 //
-// 端点参考 REQUIREMENTS §9 管理员:
-//   - GET  /api/admin/users
-//   - POST /api/admin/users                      body: {username, password, role}
-//   - PUT  /api/admin/users/{id}/password        body: {new_password}
-//   - PUT  /api/admin/users/{id}/disable
-//   - GET  /api/admin/usage?month=YYYY-MM
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+// 端点:
+//   - GET    /api/admin/users              list[AdminUserResponse]
+//   - POST   /api/admin/users              {username, password, role} → AdminUserResponse(201)
+//   - PATCH  /api/admin/users/{id}         {role?, is_active?, reset_password?} → AdminUserResponse
+//   - DELETE /api/admin/users/{id}         → {ok}
+//   - GET    /api/admin/token-usage?period=month|all → AdminTokenUsageSummary
+//
+// 注意:
+//   - 改密 / 禁用 / 改角色都走同一个 PATCH(不再是分离端点)
+//   - 删除是 DELETE(不是 PUT /disable;DELETE 端点也存在)
+//   - 全局 token usage 路径是 /token-usage(不是 /usage)
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/apiFetch'
-import type { UserDTO, UserRole, TokenUsageRow } from '@/lib/types'
+import type { AdminTokenUsageDTO, UserDTO, UserRole } from '@/lib/types'
+import type { UsagePeriod } from './me'
 
 export function useAdminUsers() {
   return useQuery({
@@ -37,44 +43,51 @@ export function useCreateAdminUser() {
   })
 }
 
-export function useResetUserPassword() {
+export interface UpdateUserPayload {
+  role?: UserRole
+  is_active?: boolean
+  reset_password?: string
+}
+
+export function useUpdateAdminUser() {
+  const qc = useQueryClient()
   return useMutation({
     mutationFn: ({
       userId,
-      newPassword,
+      body,
     }: {
       userId: number
-      newPassword: string
+      body: UpdateUserPayload
     }) =>
-      apiFetch(`/api/admin/users/${userId}/password`, {
-        method: 'PUT',
-        body: JSON.stringify({ new_password: newPassword }),
+      apiFetch<UserDTO>(`/api/admin/users/${userId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
       }),
-  })
-}
-
-export function useDisableUser() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (userId: number) =>
-      apiFetch(`/api/admin/users/${userId}/disable`, { method: 'PUT' }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['admin', 'users'] })
     },
   })
 }
 
-export interface AdminUsage {
-  month: string
-  rows: TokenUsageRow[]
-  total_cost: number
+export function useDeleteAdminUser() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (userId: number) =>
+      apiFetch<{ ok: boolean }>(`/api/admin/users/${userId}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['admin', 'users'] })
+    },
+  })
 }
 
-export function useAdminUsage(month: string | null) {
+export function useAdminTokenUsage(period: UsagePeriod) {
   return useQuery({
-    queryKey: ['admin', 'usage', month],
+    queryKey: ['admin', 'token-usage', period],
     queryFn: () =>
-      apiFetch<AdminUsage>(`/api/admin/usage?month=${encodeURIComponent(month!)}`),
-    enabled: month != null,
+      apiFetch<AdminTokenUsageDTO>(
+        `/api/admin/token-usage?period=${period}`,
+      ),
   })
 }

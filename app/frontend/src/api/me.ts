@@ -1,23 +1,40 @@
-// 个人设置 hooks。具体 schema 等 #16 / #18 落地后回填。
+// 个人设置 hooks。端点契约对齐 backend api/me.py(M2 commit 9a4aa6c)。
 //
-// 端点参考 REQUIREMENTS §9 个人设置:
-//   - GET    /api/me/api-key         返回 {configured: bool, last_validated_at?: string}
-//   - PUT    /api/me/api-key         body: {key}
-//   - DELETE /api/me/api-key
-//   - GET    /api/me/api-key/test    返回 {ok: bool, error?: string}
-//   - GET    /api/me/usage?month=YYYY-MM
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { apiFetch } from '@/lib/apiFetch'
+// 端点:
+//   - GET    /api/me/api-key            ApiKeyInfoResponse,未配置 404
+//   - PUT    /api/me/api-key            body: {key}                 → {ok}
+//   - DELETE /api/me/api-key            → {ok} (幂等)
+//   - GET    /api/me/api-key/test       → {ok, last_validated_at} 或 {ok: false, error}
+//   - GET    /api/me/token-usage?period=month|all  → TokenUsageSummary
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseQueryOptions,
+} from '@tanstack/react-query'
+import { ApiError, apiFetch } from '@/lib/apiFetch'
+import type { ApiKeyInfoDTO, MyTokenUsageDTO } from '@/lib/types'
 
-export interface ApiKeyStatus {
-  configured: boolean
-  last_validated_at: string | null
+// 404 视为未配置(返 null);其它错误正常抛。
+async function fetchApiKeyInfo(): Promise<ApiKeyInfoDTO | null> {
+  try {
+    return await apiFetch<ApiKeyInfoDTO>('/api/me/api-key')
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null
+    throw err
+  }
 }
 
-export function useApiKeyStatus() {
-  return useQuery({
+export function useApiKeyInfo(
+  options?: Omit<
+    UseQueryOptions<ApiKeyInfoDTO | null>,
+    'queryKey' | 'queryFn'
+  >,
+) {
+  return useQuery<ApiKeyInfoDTO | null>({
     queryKey: ['me', 'api-key'],
-    queryFn: () => apiFetch<ApiKeyStatus>('/api/me/api-key'),
+    queryFn: fetchApiKeyInfo,
+    ...options,
   })
 }
 
@@ -25,7 +42,7 @@ export function useSetApiKey() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (key: string) =>
-      apiFetch('/api/me/api-key', {
+      apiFetch<{ ok: boolean }>('/api/me/api-key', {
         method: 'PUT',
         body: JSON.stringify({ key }),
       }),
@@ -38,7 +55,8 @@ export function useSetApiKey() {
 export function useDeleteApiKey() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => apiFetch('/api/me/api-key', { method: 'DELETE' }),
+    mutationFn: () =>
+      apiFetch<{ ok: boolean }>('/api/me/api-key', { method: 'DELETE' }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['me', 'api-key'] })
     },
@@ -48,32 +66,25 @@ export function useDeleteApiKey() {
 export interface ApiKeyTestResult {
   ok: boolean
   error?: string
+  last_validated_at?: string | null
 }
 
 export function useTestApiKey() {
+  const qc = useQueryClient()
   return useMutation({
     mutationFn: () => apiFetch<ApiKeyTestResult>('/api/me/api-key/test'),
+    onSuccess: (data) => {
+      if (data.ok) qc.invalidateQueries({ queryKey: ['me', 'api-key'] })
+    },
   })
 }
 
-export interface MyUsage {
-  month: string
-  total_input_tokens: number
-  total_output_tokens: number
-  total_cost: number
-  by_model: Array<{
-    model: string
-    input_tokens: number
-    output_tokens: number
-    cost: number
-  }>
-}
+export type UsagePeriod = 'month' | 'all'
 
-export function useMyUsage(month: string | null) {
+export function useMyTokenUsage(period: UsagePeriod) {
   return useQuery({
-    queryKey: ['me', 'usage', month],
+    queryKey: ['me', 'token-usage', period],
     queryFn: () =>
-      apiFetch<MyUsage>(`/api/me/usage?month=${encodeURIComponent(month!)}`),
-    enabled: month != null,
+      apiFetch<MyTokenUsageDTO>(`/api/me/token-usage?period=${period}`),
   })
 }
