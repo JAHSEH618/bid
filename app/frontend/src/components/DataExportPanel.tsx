@@ -10,6 +10,7 @@ import {
   useTriggerDocx,
 } from '@/api/docx'
 import { useToast } from '@/hooks/useToast'
+import { readApiError } from '@/lib/apiFetch'
 import type { DocxJobStatus } from '@/lib/types'
 
 // 后端 stage 已返回中文进度提示(如「渲染流程图...」),前端直接用,不再二次映射。
@@ -65,7 +66,7 @@ export function DataExportPanel({
       onError: (err) => {
         toast({
           title: 'DOCX 触发失败',
-          description: String(err),
+          description: readApiError(err, '后端无法接收 DOCX 任务'),
           variant: 'destructive',
         })
       },
