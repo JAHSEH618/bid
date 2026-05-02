@@ -1,7 +1,10 @@
 # 投标技术方案生成器 · Web App 需求文档
 
-> **版本**:v0.11(待评审) **日期**:2026-05-02 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
+> **版本**:v0.12(待评审) **日期**:2026-05-02 **形态**:内网服务器 docker compose、多用户(团队共享池)、Python 后端 + Web 前端、HTTP-only
 > **工作流内核**:见同目录上级的《技术方案自动生成工作流 — Dify 搭建指南(含人工审核).md》(以下简称 **v10 设计文档**),本需求文档**不重复**其中工作流逻辑细节。
+
+**v0.12 变更**(相对 v0.11,1 处语义对齐):
+- **FR-5.8 DOCX 排队语义**:从"其他 docx 请求排队"改成"短时间排队(120 秒)等不到锁就失败,用户可重试"。原文字暗示无界排队,但实现上等锁的 task 占着 arq worker job 槽,会饿死 workflow task(与 D-AA / D-BR 的 worker slot 守护冲突);明确成短等失败更符合实际行为,与 spec D-BR 实现一致。
 
 **v0.11 变更**(相对 v0.10,3 处实现层字段同步):
 - **数据模型**:Chapter 增加 `processing_started_at`(实现层内部字段,用于 cleanup 中间态超时回滚);ReviewEvent 增加 `aborted`(SlotLost 撤销 approve/skip 时标记,前端"最近审核人"过滤);DocxJob 增加 `updated_at` 与 `finalizing` 状态(原子完成保护)。这些字段都是**实现层内部**用,不暴露给上游 API/UI 契约。
@@ -191,7 +194,7 @@
   - 用户如需替换,直接覆盖此文件后重启容器
 - FR-5.6 DOCX 文件名格式:`{project_name}_技术方案_{YYYYMMDD}.docx`(YYYYMMDD 用 Asia/Shanghai 时区,D8)。
 - FR-5.7 DOCX 生成是**按需触发**(用户点"下载 .docx"才跑),不在工作流末端自动生成;首次生成后缓存到 `{project_dir}/proposal.docx`,直到 markdown 重新生成才失效。
-- FR-5.8 **DOCX 导出在 arq worker 中串行执行**(同时只允许 1 个 docx 导出任务),避免 mermaid-cli 的 chromium 进程同时启动多份打爆 2c4g 内存。其他 docx 请求排队。
+- FR-5.8 **DOCX 导出在 arq worker 中串行执行**(同时只允许 1 个 docx 导出任务),避免 mermaid-cli 的 chromium 进程同时启动多份打爆 2c4g 内存。其他 docx 请求**短时间排队等待串行锁**(默认 120 秒,与 worker slot 配额对齐),**超时即失败,前端给可重试按钮**;**不做无界排队**——避免后到的 DOCX 持续占用 arq worker job 槽,饿死 workflow task。
 - FR-5.9 生成失败(Pandoc 报错 / mermaid 全部失败)需返回明确的错误码和阶段信息,前端给出可重试按钮。
 - FR-5.10 **DOCX 生成耗时 SLA**:10 章方案 < 15 秒(简化后比 Plan C 快约一半)。
 

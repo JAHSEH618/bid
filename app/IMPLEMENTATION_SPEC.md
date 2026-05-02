@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.12
+# 投标技术方案生成器 · 实施 Spec v3.13
 
-> **配套文档**:`REQUIREMENTS.md` v0.11(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.12 (2026-05-02)。基于 v3.11 修了 5 处剩余隐患:**DOCX `finalizing` 状态 + atomic rename 顺序**(rendering→pandoc→finalizing→rename→done,死亡窗口缩到 0;download 端 done 但文件丢失自动修正,D-BQ) / **DOCX `_module_lock` 加 120s timeout**(防 worker slot 被等锁的 DOCX 占满饿死 workflow,D-BR) / **retry pending cleanup**(retry 切 pending 同步写 `processing_started_at`;cleanup 加 `pending AND processing_started_at IS NOT NULL` 60s 分支,D-BS) / **ReviewEvent 用精确 `id` 补偿**(worker 入口 flush 拿 `review_event_id`,SlotLost WHERE id=:rev_id 而非 LIMIT 1,D-BT) / **REQUIREMENTS 数据模型同步**(Chapter `processing_started_at` / ReviewEvent `aborted` / DocxJob `updated_at` + `finalizing`;R12 文字精化,D-BU)。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.12 累计 79 处。
+> **配套文档**:`REQUIREMENTS.md` v0.12(讲"做什么"),本文档讲"怎么做"。
+> **版本**:v3.13 (2026-05-02)。基于 v3.12 修了 6 处剩余隐患:**REQUIREMENTS FR-5.8 排队语义改"短等失败"**(消除 D-BR 与文档冲突,D-BV) / **GET /docx-job/{id} 端点实现**(REQUIREMENTS §9 列了但 v3.12 缺;finalizing → 前端映射 processing,D-BW) / **DOCX 阶段切换 WHERE 状态前置**(rendering 切换 WHERE status='pending';on_stage 切 pandoc WHERE status='rendering_mermaid';rowcount==0 时 _StaleJob 退出 + unlink tmp,D-BX) / **finalizing repair**(cleanup 与 POST 缓存命中前都做"finalizing + 文件存在 → done"修复,防 rename 成功但 done 失败时分叉,D-BY) / **partial index 改条件**(`status IN(reviewing/retrying/generating) OR (pending AND processing_started_at IS NOT NULL)`,D-BZ) / **决策表旧描述同步**(D-S/D-AS/D-BH/D-BN 加"由 D-BQ 收紧",D-CA)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.13 累计 85 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -136,7 +136,7 @@
 | **D-P** ⚠️ 由 D-T 取代 | 并发项目上限**双层防护**:业务层 Redis 跟踪 + arq `WorkerSettings.max_jobs=N`(兜底) | 业务侧需要"超限就 queued"的语义。最终实现见 D-T(SET + alive TTL,**非计数器**) |
 | **D-Q** | 登录失败锁定**用 Redis 计数 + 锁 key**,不依赖 slowapi 的请求级限流 | FR-6.7 要求"5 次失败后锁该 IP 5 分钟",slowapi 是"匀速速率",语义不一致;改用 `INCR + EXPIRE` 双 key |
 | **D-R** | `.env` **单文件方案**:`gen-secrets.sh` 从 `.env.example` seed + sed 替换占位符,生成最终唯一 `.env`,compose 直接读 | docker compose `${VAR}` 插值只读 compose 项目根 `.env` / 宿主 env,**不**读 service 的 `env_file:` 列表;两文件方案中 postgres `${POSTGRES_PASSWORD}` 会插到占位符,起不来 |
-| **D-S** | DocxJob.arq_job_id `nullable=true` + **partial unique index** `WHERE arq_job_id IS NOT NULL`;同时 `(project_id) WHERE status IN ('pending','rendering_mermaid','pandoc')` 也 partial unique | 入队前先 INSERT 拿 id 必须支持空 arq_job_id;并发同项目两次 POST docx 应被 DB 阻断,而不是靠应用层抢锁 |
+| **D-S** ⚠️ 由 D-BQ 扩展 | DocxJob.arq_job_id `nullable=true` + **partial unique index** `WHERE arq_job_id IS NOT NULL`;**(project_id) partial unique 的 status 列表最终为** `('pending','rendering_mermaid','pandoc','finalizing')`(D-BQ 增加 finalizing) | 入队前先 INSERT 拿 id 必须支持空 arq_job_id;并发同项目两次 POST docx 应被 DB 阻断,而不是靠应用层抢锁;finalizing 也是 in-flight,必须进唯一约束防同时两个 job |
 | **D-T** | 并发名额用 **Redis SET + 每项目 alive TTL key**,不用计数器;**worker 启动时 reconcile**;唤醒由幂等 `wake_queued_projects(arq_pool)` 函数,不让"占不到名额的任务"留在 arq 里重试。**人工等待不占名额**——task 因 interrupt 退出时 release;`/review` `/confirm-outline` `/retry` 在 enqueue 前重新 `try_acquire`,占不到 → 503 + Retry-After:60 | 计数器在 worker 崩溃时会泄漏正数;SET 与 alive key TTL 配合可识别僵尸条目;worker 进程结束后 heartbeat 必停 → "interrupt 期间持续占名额"物理上不可行;改成"task 周期 = slot 周期"语义干净,且 awaiting_review 时其他项目可以跑 |
 | **D-U** | DB commit 后再 enqueue 走**补偿动作**:enqueue 失败 → 回退 DB status + release slot + 503。`wake_queued_projects` 同样:enqueue 失败 → release + 把项目改回 queued | outbox 表对内部 10 用户工具 over-engineering;补偿动作 + reconcile 兜底已足够;reconcile 在 worker 启动时也会清理"无 alive key 但状态 running"的僵尸项目 |
 | **D-V** | Redis 用 **`noeviction` 内存策略**,不用 `allkeys-lru` | 同一 Redis 同时承载 arq 队列、active set、login lock、event pub/sub、limiter 计数。LRU 策略下,内存压力大时 Redis 会**默默驱逐任意 key**,可能让 arq 任务、并发名额、登录锁全部消失,触发难定位的 silent 故障。`noeviction` 让写入在内存满时显式失败,我们在监控 / OOM 风险下能立刻发现 |
@@ -161,7 +161,7 @@
 | **D-AP** | `wake_queued_projects` **不预判 SCARD**,直接调 `try_acquire_project_slot`,内部按 alive count 判断 | SCARD 把僵尸成员算入,与 D-AN "alive count = 真容量"冲突——僵尸存在时 SCARD 显示满,wake 不唤醒;实际 alive_count < max,有可用名额。删 SCARD 后 wake 真实反映容量 |
 | **D-AQ** | `try_acquire` 区分 stale(`-2`)与真 already_active(`-1`):Lua 检查 SISMEMBER 后再查 ALIVE_KEY 存在性;stale 时 Python `_evict_stale_project` 同步移除 + DB 标 failed,然后递归一次 acquire | v3.6 SISMEMBER==1 直接返回 already_active,但 ALIVE_KEY 已过期的 stale 成员被卡住,直到 cron 60s 后才清。stale 自愈 + 维持 D-AN "SREM 必须伴随 DB 同步"原则(只是绑定位置在 Python) |
 | **D-AR** | chapters 加 `processing_started_at`;cron `cleanup_stale_chapters` 每分钟扫 `reviewing/retrying` 状态超 60s 的章节,回滚到 awaiting_review/failed | API commit 中间态后进程崩溃(arq 没拿到、worker 重启等)会让章节卡中间态;前端禁用按钮永远点不开。超时回滚让用户能重新提交审核或重试 |
-| **D-AS** ⚠️ 由 D-AY 扩展 | cron `cleanup_stale_docx_jobs` 每 5 分钟扫 `DocxJob.status` 在 **任意 in-flight 状态**(`pending` / `rendering_mermaid` / `pandoc`)超 30 分钟的标 failed | v3.7 只覆盖 pending,不够——pandoc / chromium 在 docker 里 OOM 死锁 / 进程崩溃时,job 卡在 rendering_mermaid 或 pandoc 阶段,partial unique index `uq_docx_jobs_project_inflight` 阻塞后续 DOCX 永远新建不了。覆盖全部 in-flight 状态才能真正自愈 |
+| **D-AS** ⚠️ 由 D-AY / D-BH / D-BQ / D-BY 扩展 | cron `cleanup_stale_docx_jobs` 每 5 分钟扫 `DocxJob.status` 在 **任意 in-flight 状态**(`pending` / `rendering_mermaid` / `pandoc` / `finalizing`)超 30 分钟的标 failed;**finalizing 加 repair 分支**(文件已存在 → 修复成 done) | v3.7 只覆盖 pending。最终实现 D-AY 加全 in-flight 范围、D-BH 改用 updated_at、D-BQ 加 finalizing、D-BY 加 finalizing repair(rename 成功但 done UPDATE 异常时文件已就位,标 done 比标 failed 更准) |
 | **D-AT** ⚠️ 由 D-AW / D-AZ 扩展 | worker `SlotLost` 分支**幂等回滚章节状态**;最终形态由 D-AW(覆盖 reviewing/retrying/pending/generating)+ D-AZ(按 decision 区分:approve/skip 回 awaiting_review,revise 标 failed)定义 | v3.6 SlotLost 只 release slot,章节卡中间态;补偿与 D-AR cron 互补——cron 兜底 60s 阈值,SlotLost 立即触发 |
 | **D-AU** | LLM-2 章节生成失败语义化:`services/llm.py` 加 `ChapterGenerationFailed`,`write_chapter` 节点把 `LLMRetryFailed` / `Timeout` 包成它再 raise;worker 三类 task 加 `except ChapterGenerationFailed`:**不写 errors.log**(节点已写 chapter.last_error)/ **不 raise**(arq 不重试)/ project 切 `awaiting_review` | v3.7 章节 3 次失败后裸 raise,被 task 顶层 `except Exception` 捕获 → `_set_project_status(project, 'failed')`,违反 FR-3.9/FR-4.7 "工作流暂停在该章节,等用户手动 retry" 的语义。语义化异常让"章节级失败"和"task 真崩溃"在 except 链里精准分流;LLM-1 / 抽取阶段失败仍走 generic Exception → project failed(那才是真项目级失败)|
 | **D-AV** ⚠️ 由 D-BB / D-BF 取代 | `cleanup_stale_chapters` 先取活跃 project 排除;`/review`/`/retry` 异常补偿清 `processing_started_at`(基础动机) | v3.7 cleanup 阈值 60s 与 RESERVE_TTL=300s 冲突。**最终实现**:D-BB 用真 alive ids(SET ∩ ALIVE_KEY)+ typed array CAST;D-BF 把 generating 也加进 cleanup(超时 15min)|
@@ -176,13 +176,13 @@
 | **D-BE** ⚠️ 由 D-BG 扩展 | `services/llm.py` 主代码直接在 `call_llm_stream` 的重试 catch 块调 `_write_llm_error(project_id, ...)`,落 errors.log;§19.2 不再重复实现,只留对照说明 | v3.8 主代码 §11.1 只写 `log.warning`,errors.log 写入散在 §19.2 的"调用点"附录里,落地时极易漏写;FR-3.9 明确要求"重试日志记录到 errors.log"。合并到主代码避免实现分裂,保持需求 ↔ 实现一一可追溯 |
 | **D-BF** | `write_chapter` 节点切 generating 时一并 SET `processing_started_at=NOW()`;`cleanup_stale_chapters` 加 `generating` 分支(超时 = single_chapter_timeout + 5min margin = 15min);`ix_chapters_processing` 索引 partial WHERE 也覆盖 generating | v3.9 cleanup 只扫 reviewing/retrying。worker 进程被 SIGKILL/OOM 直接死时不会进 SlotLost 分支,generating 章节没有任何兜底自愈机制,会永久卡住。配合 D-BB 的 active_ids 排除,15 分钟阈值在"LLM 单章 600s + 调度容错"和"用户能合理等到回滚"之间取平衡 |
 | **D-BG** | `call_llm_stream` / `call_llm_json` 都在 `asyncio.timeout` 外层捕 `TimeoutError`,写 `LLM total timeout` errors.log 后 raise `LLMTimeoutExceeded`;`call_llm_json` 重试链也调 `_write_llm_error`(与 stream 等价对齐) | v3.9 errors.log 仅覆盖 stream 模型的网络/限流重试。① JSON 模型(LLM-1 提纲 / LLM-3 可视化)的重试只写 structlog 不进项目级日志;② 外层总超时(FR-3.10 600s 兜底 / JSON 120s)从 asyncio.timeout 抛 TimeoutError 不会进重试 catch,errors.log 直接漏。统一外层 catch + helper 调用,消除三个盲区 |
-| **D-BH** | `DocxJob` 加 `updated_at`(server_default + 显式 SQL SET);cleanup 用 `updated_at < NOW() - 30min` 而不是 `created_at`;`generate_docx_task` 终态 UPDATE 加 `WHERE status IN ('pending','rendering_mermaid','pandoc')` 防覆盖,`rowcount==0` warning 并丢弃产出 | v3.9 cleanup 用 `created_at` 判超时,但 task 进 rendering_mermaid 后会等 export_docx 内的串行锁(可能 > 30min);cron 标 failed 后 task 仍可能拿到锁继续跑并 `UPDATE done`,**覆盖** failed 状态导致数据腐烂。`updated_at` 让"无进展" vs "在跑"可区分;终态 WHERE 防止竞态覆盖;rowcount==0 时不返回 output_path,避免前端展示无效产物 |
+| **D-BH** ⚠️ 由 D-BQ / D-BX 收紧 | `DocxJob` 加 `updated_at`(server_default + 显式 SQL SET);cleanup 用 `updated_at < NOW() - 30min`;终态 UPDATE 加 WHERE 防覆盖。**最终实现** D-BQ 把"防覆盖"扩展到全阶段(`finalizing` 状态 + atomic rename 之后才 done);D-BX 把每次阶段切换都加状态前置 + rowcount 守护 | v3.9 cleanup 用 `created_at` 判超时,但 task 进 rendering_mermaid 后会等 export_docx 内的串行锁(可能 > 30min);cron 标 failed 后 task 仍可能拿到锁继续跑并 UPDATE done,**覆盖** failed 状态导致数据腐烂。最终通过 finalizing + 阶段守护双层防护闭环 |
 | **D-BI** | `ReviewEvent` 加 `aborted` Boolean 默认 false;`_slot_lost_compensation` 在 approve/skip 分支(章节回 awaiting_review 时)同步 `UPDATE ... SET aborted=true` 标记最近一条 pending ReviewEvent;前端"最近审核人/决策"查询加 `WHERE aborted=false` | v3.9 worker 入口写 ReviewEvent 后 graph 半路 SlotLost,approve/skip 章节回 awaiting_review 但 ReviewEvent 仍存,前端"上次审核人"按最近事件取会误显示一个**未真正生效**的决策(用户以为已审,实际还要重审)。aborted 字段保留审计原意("做过这个动作")同时区分"是否生效",前端过滤即可消除歧义 |
 | **D-BJ** | D-AV / D-AW 标 ⚠️ "由 ... 取代",描述压缩到核心动机 + 指向最终决策的指针 | 决策表里同名机制有多版迭代痕迹时,落地工程师可能照旧版描述实现。明示"最终口径见 D-XX"减少误读 |
 | **D-BK** | 所有把章节切到 `generating` 的位置都同步 SET `processing_started_at=NOW()`:`update_state` revise 分支(`sync_chapter_to_db`)+ `resume_review_task` revise 分支(原始 SQL)+ `write_chapter` 节点(已在 D-BF 加) | v3.10 D-BF 只在 `write_chapter` 写,但章节先经 update_state 或 worker 入口切 generating,write_chapter 实际执行前还有调度窗口。worker 在该窗口被 SIGKILL → 章节卡 generating 且 `processing_started_at IS NULL`,cron `< NOW() - INTERVAL` 比较 NULL 永远为 NULL → 不会被回滚。统一在所有切 generating 处写时间戳,保持"generating ⇒ processing_started_at NOT NULL"不变量,cleanup 才能闭环 |
 | **D-BL** | `cleanup_stale_chapters` RETURNING 带回 project_id;对回滚 generating 章节的 project,UPDATE projects SET status='awaiting_review' WHERE status IN ('running','extracting','outlining','failed') | v3.10 cleanup 只改 chapter,不动 project。worker SIGKILL 后 reconcile_periodic 会把 project 标 failed,即使 chapter 后续被本 cron 标 failed 用户能 retry,但 project=failed 阻止了交互(前端通常按 project.status 决定是否暴露 retry)。把 project 切 awaiting_review 让"chapter 失败 → 用户 P5 retry"路径与 SlotLost 路径行为一致。允许从 failed → awaiting_review 反向流转,因为现在确定有 failed chapter 可恢复 |
 | **D-BM** | `_slot_lost_compensation` approve/skip 分支先 `r1.fetchall()` 拿命中行;**仅当非空才标 ReviewEvent aborted**;空时说明 update_state 已落 approved/skipped,决策真生效,不再撤销 | v3.10 无条件标 aborted,但 approve/skip 决策可能已经被 update_state 节点真落库到 chapter(approved/skipped),回滚 SQL 命中 0 行;此时把 ReviewEvent 标 aborted 是错的:那条决策真生效了,审计应该保留。rowcount 守卫让"标 aborted"和"chapter 真被回滚"严格同步 |
-| **D-BN** | `export_docx` / `_export_docx_inner` 写到 `proposal.{job_id}.tmp.docx`(tmp 路径);`generate_docx_task` 在 DB done UPDATE 成功(`rowcount > 0`)后 `tmp_path.rename(final_path)`(同 FS atomic);rowcount==0 → `tmp_path.unlink(missing_ok=True)`,且 rename 失败 → 兜底标 failed + unlink | v3.10 export_docx 直接写终态 `proposal.docx`。cron 把 DocxJob 标 failed 后 task 仍可能写完文件;接着 GET /proposal.docx 看到 file exists 直接返回 cached(§15.3 缓存命中逻辑),把不完整 / 实际已 failed 的产物展示给用户。tmp + atomic rename 让"DB 成功 ⇔ 终态文件存在"严格同步 |
+| **D-BN** ⚠️ 由 D-BQ 收紧顺序 | `export_docx` / `_export_docx_inner` 写到 `proposal.{job_id}.tmp.docx`(tmp 路径);`generate_docx_task` 做 atomic rename。**最终顺序** D-BQ:抢占 finalizing → rename → done(原 D-BN 是 done → rename,中间崩溃 DB done 但文件不存在);rename 失败兜底标 failed + unlink | v3.10 export_docx 直接写终态 `proposal.docx`。cron 把 DocxJob 标 failed 后 task 仍可能写完文件;接着 GET /proposal.docx 看到 file exists 直接返回 cached,把不完整产物展示给用户。tmp + finalizing + atomic rename 三件套让"DB 成功 ⇔ 终态文件存在"严格同步 |
 | **D-BO** | `call_llm_json` JSON 解析失败 raise `LLMRetryFailed` **之前**也调 `_write_llm_error(... attempt=...)`;最终重试用尽时落 `LLM exhausted`(JSON 路径) | v3.10 D-BG 只覆盖了网络/限流错误。JSON parse 走另一条 raise 路径,errors.log 只在 ServiceUnavailable 等情形写,LLM-1 / LLM-3 因为 JSON 解析失败而最终 fail 时项目级日志为空。补完后 D-BG "call_llm_json 重试链都写 errors.log" 完全成立 |
 | **D-BP** | `_build_update_sql(fields)` 实际实现:`_CHAPTER_SYNC_ALLOWED` 白名单(`status` / `final_text` / `last_error` / `retry_count` / `processing_started_at`),不在白名单或 key 不是 Python 标识符 → `raise ValueError`;set 子句拼字段名,值仍走 `:k` 绑定 | v3.10 `sync_chapter_to_db` 调了 `_build_update_sql` 但文档没给实现;落地时调用方可能写 `chapter_id=...`(列不存在)或拼任意字段名,前者静默失败、后者潜在拼出错误 SQL。白名单让错误在调用时立即暴露;字段名不绑定参数(:k 是值绑定),所以白名单 + isidentifier 双重过滤是必要的 |
 | **D-BQ** | DOCX 引入 `finalizing` 状态:`rendering_mermaid → pandoc → finalizing(抢占,带 WHERE)→ tmp_path.rename → done(WHERE status='finalizing')`;partial unique index、cleanup、in-flight failed 兜底 SQL 都包含 finalizing;download 端 done 但文件不存在 → 自动 UPDATE failed | v3.11 task 是"先 UPDATE done 再 rename",中间崩溃 → DB done 但 `proposal.docx` 不存在,download 端 409 卡死。引入 finalizing 后"finalizing → rename → done"是可恢复中间态:rename 前崩 → 文件不存在但 DB 仍 finalizing,被 cleanup 标 failed;rename 成功后 done UPDATE 一次性原子完成。download 端的兜底是文件层面被人为删除等 catastrophic 情形的最后一道 |
@@ -190,6 +190,12 @@
 | **D-BS** | retry worker 切 pending 时同步 SET `processing_started_at=NOW()`;`cleanup_stale_chapters` 加 `pending AND processing_started_at IS NOT NULL` 分支(60s 阈值);`ix_chapters_processing` partial WHERE 加 pending;cleanup 切 Project=awaiting_review 也覆盖 pending → failed 的 project | v3.11 retry worker 把 chapter retrying → pending 后 `graph.astream(None)`。如果 worker 在切 pending 后 / graph 启动前崩溃,chapter 卡 pending 永久(cleanup 不扫 pending)。NOT NULL 守护防止初始未跑过的 pending 章节被误回滚——只有 retry 路径才会写 processing_started_at |
 | **D-BT** | resume worker 入口 `s.flush()` 拿 `review_event_id`,传给 `_slot_lost_compensation`;补偿端 `UPDATE review_events SET aborted=true WHERE id=:rev_id`,而不是按 chapter_id 取最近一条 | v3.11 D-BI 按"最近一条 NOT aborted ReviewEvent"标 aborted;若补偿延迟期间用户又提交新审核,新事件会被错标。精确 id 让补偿与具体事件一一对应,无论补偿何时跑都正确 |
 | **D-BU** | REQUIREMENTS.md v0.11:Chapter 加 `processing_started_at`,ReviewEvent 加 `aborted`,DocxJob 加 `updated_at` 与 `finalizing`(均标"实现层");R12 文字 `created_at > 30min` → `updated_at < NOW() - 30min`,同时补 finalizing/atomic rename 链路说明 | spec 实现层加了字段但 REQUIREMENTS 数据模型表没同步,上下游契约不一致;且实现层字段不应被外部 API 误以为是契约的一部分,需明确"实现层内部"。R12 文字按 `< NOW() - 30min` 才符合"超过 30 分钟未更新"的真实语义,`> 30min` 是反向比较 |
+| **D-BV** | REQUIREMENTS.md v0.12 把 FR-5.8"其他 docx 请求排队"改成"短时间排队(120 秒)等不到锁就失败,前端可重试";不做无界排队 | 原文字暗示无界排队,但 spec D-BR 实际是 120s 超时即失败(防 DOCX 占满 worker slot 饿死 workflow)。需求服从实现,语义对齐 |
+| **D-BW** | 新增 `GET /api/projects/{id}/docx-job/{docx_job_id}` 端点(REQUIREMENTS §9 列了但 v3.12 缺);返回 `{status, stage, error, ...}`;**`finalizing` 内部状态对前端映射成 `processing`**,`pending`/`rendering_mermaid`/`pandoc` 同样映射 `processing`;done/failed 直传 | REQUIREMENTS API 表 v0.10 起列了 `/docx-job/{job_id}`,但 spec §15.3 一直只实现 POST + GET 下载;前端无法轮询进度。`finalizing` 是 D-BU 标"实现层"的内部态,API 不应直接暴露(否则前端要为它写一套 UI 文案),映射成 `processing` 是对外语义最干净的处理 |
+| **D-BX** | `generate_docx_task` 阶段切换全部加 WHERE 状态前置 + rowcount 守护:`pending → rendering_mermaid` `WHERE status='pending'`;`rendering_mermaid → pandoc`(via `_update_stage`)`WHERE status='rendering_mermaid'`;rowcount==0 → raise `_StaleJob` → 上层 unlink tmp 并 return | v3.12 阶段切换都是裸 `UPDATE WHERE id=:i`,cleanup 把 job 标 failed 后,task 仍能把它改回 rendering_mermaid / pandoc(SQL 不带状态前置)。每阶段加 WHERE 让"cleanup 已 failed → 后续阶段都跳过"严格成立;`_StaleJob` 做信号,task 收到后清半成品 tmp 文件并安静退出,不再 raise 给 arq |
+| **D-BY** | `cleanup_stale_docx_jobs` 加 finalizing repair pass:扫所有 finalizing 行,文件存在 → repair 成 done,文件不存在 + 超时 → 标 failed;POST `/proposal.docx` 命中 cached 文件前也修复"finalizing 但文件就位"的孤儿 | v3.12 D-BQ 让 task 顺序变成"finalizing → rename → done",但 rename 成功后 done UPDATE 仍可能因 DB 异常失败(网络抖动 / pool 耗尽),DB 卡 finalizing,文件已存在。后续 cleanup 直接标 failed 是错的——产物完整应当 repair 成 done。POST 端的额外 repair 是防御性兜底:用户在 cleanup cron 跑之前已经触发新 POST 也能立刻看到正确状态 |
+| **D-BZ** | `ix_chapters_processing` partial WHERE 改成 `status IN ('reviewing','retrying','generating') OR (status='pending' AND processing_started_at IS NOT NULL)` | v3.11 条件 `status IN ('reviewing','retrying','pending','generating')` 让所有初始 pending 章节(processing_started_at IS NULL)也进索引,但 cleanup 的 pending 分支带 NOT NULL 守护,初始 pending 永远扫不到。索引收紧到"真正会被扫到的行"才精准 |
+| **D-CA** | D-S / D-AS / D-BH / D-BN 等老决策行加"⚠️ 由 D-BQ / D-BX / D-BY 收紧"标记;描述压缩到核心动机 + 指向最终决策 | 决策表里同名机制有多版迭代痕迹时,落地工程师可能照旧版描述实现。D-BQ 之后 finalizing 流程已显著重塑 DOCX lifecycle,旧描述里的字段列表(in-flight 状态、unique 列)漏掉 finalizing 容易让实现者以为不需要 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -1193,10 +1199,12 @@ def upgrade() -> None:
     op.create_index(
         "ix_chapters_processing", "chapters",
         ["status", "processing_started_at"],
-        # D-BF + D-BS:覆盖 cleanup 会扫的全部状态(reviewing/retrying/pending/generating)
-        # pending 仅在 retry worker 切之后才有 processing_started_at,初始 pending 不进
+        # ⭐ D-BZ:精准 partial WHERE — pending 仅在 retry worker 写过 processing_started_at
+        # 才进索引,初始 pending(NULL)不进。reviewing/retrying/generating 必有时间戳。
+        # 这才与"cleanup 扫的所有 chapter 都进索引,无关 chapter 不进"对齐
         postgresql_where=sa.text(
-            "status IN ('reviewing','retrying','pending','generating')"
+            "status IN ('reviewing','retrying','generating') "
+            "OR (status='pending' AND processing_started_at IS NOT NULL)"
         ),
     )
 
@@ -1765,6 +1773,7 @@ API 调用方语义:
 
 import asyncio
 import contextlib
+from pathlib import Path
 import redis.asyncio as redis_async
 import sqlalchemy as sa
 import structlog
@@ -2040,14 +2049,45 @@ async def cleanup_stale_chapters(ctx) -> None:
 
 
 async def cleanup_stale_docx_jobs(ctx) -> None:
-    """arq cron 每 5 分钟跑(D-AS / D-AY / D-BH / D-BQ):**所有 in-flight 状态**超时都标 failed。
-    R12 风险项的明确实现。
+    """arq cron 每 5 分钟跑(D-AS / D-AY / D-BH / D-BQ / D-BY):
+    **所有 in-flight 状态**超时都标 failed;**`finalizing` 加文件存在 repair**。
 
     ⚠️ D-BH 修正:用 `updated_at` 判超时而不是 `created_at`。
-    ⚠️ D-BQ 扩展:新增 `finalizing` 状态进 in-flight 列表(覆盖 task crash 在
-    "DB done 之前 / rename 之后"的极小窗口)。
+    ⚠️ D-BQ 扩展:新增 `finalizing` 状态进 in-flight 列表。
+
+    ⚠️ D-BY 修正:`finalizing` 单独处理 — task 已经 atomic rename 完成 tmp 但 DB
+    `done` UPDATE 异常时,文件已存在但 DB 仍 finalizing。这种情况应当 **repair**
+    成 done 而不是 failed,因为产物完整。规则:
+    - finalizing + proposal.docx 存在 → repair 为 done
+    - finalizing + 文件不存在 + updated_at 超时 → 标 failed(rename 之前崩了)
+    其它 in-flight 状态超时直接 failed。
     """
+    repair_done_count = 0
     async with session_factory() as s:
+        # ⭐ D-BY repair pass 1:finalizing 但文件已存在 → done
+        # 用 UPDATE...RETURNING + 在 Python 端校验文件存在,避免 SQL 直接读文件系统
+        finalizing = (await s.execute(sa.text(
+            "SELECT dj.id, dj.project_id, p.dir_path "
+            "FROM docx_jobs dj JOIN projects p ON p.id = dj.project_id "
+            "WHERE dj.status='finalizing'"
+        ))).mappings().all()
+        for row in finalizing:
+            file_path = Path(row["dir_path"]) / "proposal.docx"
+            if file_path.exists():
+                # 文件已就位,task 在 done UPDATE 之前崩 → repair 成 done
+                upd = await s.execute(sa.text(
+                    "UPDATE docx_jobs SET status='done', "
+                    "output_path=:p, finished_at=NOW(), updated_at=NOW() "
+                    "WHERE id=:i AND status='finalizing' RETURNING id"
+                ), {"i": row["id"], "p": str(file_path)})
+                if upd.first() is not None:
+                    repair_done_count += 1
+                    log.info("docx_finalizing_repaired_to_done",
+                             docx_job_id=row["id"], project_id=row["project_id"])
+        if repair_done_count:
+            await s.commit()
+
+        # pass 2:剩下的 in-flight(包括 rename 前崩的 finalizing)按超时标 failed
         result = await s.execute(sa.text(
             f"""
             UPDATE docx_jobs
@@ -2062,8 +2102,9 @@ async def cleanup_stale_docx_jobs(ctx) -> None:
         ))
         rows = result.fetchall()
         await s.commit()
-    if rows:
-        log.warning("cleanup_stale_docx_jobs", count=len(rows),
+    if rows or repair_done_count:
+        log.warning("cleanup_stale_docx_jobs",
+                    failed=len(rows), repaired_to_done=repair_done_count,
                     jobs=[(r.id, r.project_id, r.status) for r in rows])
 
 
@@ -3652,25 +3693,45 @@ async def generate_docx_task(ctx, *, project_id: int, docx_job_id: int) -> dict:
             raise RuntimeError(f"proposal.md missing at {md_path}")
         markdown = md_path.read_text(encoding="utf-8")
 
-    # 2. 标记进入 rendering 阶段(D-BH:同时刷 updated_at)
+    # 2. ⭐ D-BX:进 rendering_mermaid 加 WHERE status='pending' 前置;
+    # rowcount==0 说明已被 cleanup 标 failed,task 应当退出而不是继续推进
+    class _StaleJob(Exception):
+        """阶段切换发现 cleanup 已抢标 failed,放弃任务。"""
     async with session_factory() as s:
-        await s.execute(
+        result = await s.execute(
             sa.text("UPDATE docx_jobs SET status='rendering_mermaid', "
-                    "updated_at=NOW() WHERE id=:i"),
+                    "updated_at=NOW() WHERE id=:i AND status='pending'"),
             {"i": docx_job_id},
         )
         await s.commit()
+        if result.rowcount == 0:
+            log.warning("docx_stage_blocked_at_rendering",
+                        docx_job_id=docx_job_id,
+                        hint="cleanup 已把 job 标 failed;不再启动 mermaid 渲染")
+            return {"status": "stale", "output_path": None}
 
-    # ⭐ D-BD + D-BH:回调让 export_docx 在 mermaid → pandoc 切换时通知本 task,
-    # 同时刷 updated_at,让 cleanup 能区分"在跑"vs"卡住"
+    # ⭐ D-BD + D-BH + D-BX:on_stage 切换 WHERE status 前置 + rowcount 守护;
+    # cleanup 抢标 failed 时 raise _StaleJob 让 export_docx 立刻退出,task 收到后
+    # unlink tmp 退出。allowed_from 描述"该阶段的合法前驱状态"
+    _ALLOWED_FROM = {
+        "pandoc": ("rendering_mermaid",),
+    }
     async def _update_stage(stage: str) -> None:
+        prev_states = _ALLOWED_FROM.get(stage)
+        if not prev_states:
+            raise ValueError(f"unknown stage: {stage}")
+        in_clause = ",".join(f"'{s}'" for s in prev_states)
         async with session_factory() as s:
-            await s.execute(
-                sa.text("UPDATE docx_jobs SET status=:s, updated_at=NOW() "
-                        "WHERE id=:i"),
+            r = await s.execute(
+                sa.text(f"UPDATE docx_jobs SET status=:s, updated_at=NOW() "
+                        f"WHERE id=:i AND status IN ({in_clause})"),
                 {"s": stage, "i": docx_job_id},
             )
             await s.commit()
+            if r.rowcount == 0:
+                log.warning("docx_stage_blocked",
+                            docx_job_id=docx_job_id, stage=stage)
+                raise _StaleJob(stage)
 
     # 3. 真正执行(锁在 export_docx 内,产物写入 tmp 路径)
     final_path = project_dir / "proposal.docx"     # ⭐ D-L 固定缓存名(终态)
@@ -3684,6 +3745,19 @@ async def generate_docx_task(ctx, *, project_id: int, docx_job_id: int) -> dict:
             on_stage=_update_stage,
             job_id=docx_job_id,                      # ⭐ D-BN:tmp 文件名后缀
         )
+    except _StaleJob as se:
+        # ⭐ D-BX:cleanup 抢标 failed,清理半成品 tmp(若已生成)并放弃任务,
+        # 不再 raise 给 arq(arq 会显示 task failed,但 DB 已 failed,无需再标)
+        log.info("docx_task_stale_exit",
+                 docx_job_id=docx_job_id, stage=str(se))
+        # 注:tmp 文件路径由 _export_docx_inner 决定(proposal.{job_id}.tmp.docx),
+        # 由于 _StaleJob 是 on_stage 内部抛的,tmp 文件可能已经生成完成
+        # 也可能还没生成完成;统一尝试 unlink
+        try:
+            (project_dir / f"proposal.{docx_job_id}.tmp.docx").unlink(missing_ok=True)
+        except Exception:
+            log.exception("docx_tmp_unlink_failed", docx_job_id=docx_job_id)
+        return {"status": "stale", "output_path": None}
     except Exception as e:
         # ⭐ D-BH + D-BQ:WHERE 覆盖所有 in-flight 防覆盖 cleanup 抢标的行
         async with session_factory() as s:
@@ -4492,9 +4566,17 @@ async def trigger_docx(
 ):
     project = await _get_done_project(db, project_id)
 
-    # 已缓存 → 不重生成,前端轮询 /docx-job/null 自然知道(此处直接告诉前端)
+    # ⭐ D-BY:命中缓存前先 repair 任何"finalizing 但文件已就位"的孤儿 job;
+    # 否则下面 cached.exists()=True 直接返回 cached,但 DB 还停在 finalizing,
+    # 前端 GET /docx-job 看到 processing → 用户体验混乱
     cached = Path(project.dir_path) / "proposal.docx"
     if cached.exists():
+        await db.execute(sa.text(
+            "UPDATE docx_jobs SET status='done', output_path=:p, "
+            "finished_at=NOW(), updated_at=NOW() "
+            "WHERE project_id=:pid AND status='finalizing'"
+        ), {"p": str(cached), "pid": project_id})
+        await db.commit()
         return {"job_id": None, "cached": True}
 
     # ⭐ D-AK 顺序修正:先 commit pending 行,再 enqueue,最后 update arq_job_id。
@@ -4542,6 +4624,49 @@ async def trigger_docx(
         await db.commit()
 
     return {"job_id": job.job_id, "docx_job_id": job_pk, "cached": False}
+
+
+# ⭐ D-BW:GET DOCX 任务进度 — REQUIREMENTS.md FR-5/§9 列了端点但 v3.12 之前缺实现。
+# 前端轮询此端点了解 DOCX 生成进度。`finalizing` 是实现层内部态,
+# 对前端**映射成 `processing`**(v3.12 D-BU 把 finalizing 标"实现层")
+@router.get("/{project_id}/docx-job/{docx_job_id}")
+async def get_docx_job(
+    project_id: int,
+    docx_job_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    row = (await db.execute(sa.text(
+        "SELECT id, project_id, status, error, output_path, "
+        "created_at, updated_at, finished_at "
+        "FROM docx_jobs WHERE id=:i AND project_id=:p"
+    ), {"i": docx_job_id, "p": project_id})).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(404, "docx job not found")
+
+    # 内部 → 前端的 status 映射:不暴露 finalizing(实现层细节)
+    raw = row["status"]
+    public_status = "processing" if raw in (
+        "pending", "rendering_mermaid", "pandoc", "finalizing"
+    ) else raw   # done | failed
+    progress_hint = {
+        "pending": "排队中",
+        "rendering_mermaid": "渲染流程图...",
+        "pandoc": "转换文档...",
+        "finalizing": "收尾中...",
+        "done": "已完成",
+        "failed": "失败",
+    }.get(raw, raw)
+
+    return {
+        "docx_job_id": row["id"],
+        "status": public_status,
+        "stage": progress_hint,        # 给前端展示的中文短语
+        "error": row["error"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "finished_at": row["finished_at"],
+    }
 
 
 @router.get("/{project_id}/proposal.docx")
