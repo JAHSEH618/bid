@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.23
+# 投标技术方案生成器 · 实施 Spec v3.24
 
 > **配套文档**:`REQUIREMENTS.md` v0.12(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.23 (2026-05-02)。基于 v3.22 修了 3 处测试链路细节:**`db` / `user_factory` / `project_factory` / `docx_job_factory` / `auth_client` 全部显式依赖 `db_engine`**(触发 schema create_all/drop_all,避免打到默认数据库或撞 "relation does not exist",D-DJ) / **assemble 测试用真实 `run_id`**(从 DB 查 project 当前 Run id,不再写死 `1`,防 fixture 顺序变动后误更新,D-DK) / **`test_docx.py` 头注释补全**(补 D-DD/D-DE/D-DH/D-DJ/D-DK 标签,与 §18.5 标题对齐,D-DL)。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.23 累计 122 处。
+> **版本**:v3.24 (2026-05-02)。基于 v3.23 修了 3 处测试 DB 隔离细节:**`settings.test_database_url` + 名字 `_test` 强校验**(独立测试库,防 teardown 的 drop_all 误炸开发库,D-DM) / **`_use_test_session_factory` fixture monkeypatch 各模块 `session_factory` + override `get_db`**(应用所有路径走 test engine,不再依赖被忽视的全局单例,D-DN) / **`db_engine` 注释口径修正**(去掉"session-scope 共享"误导,明确默认 function scope,D-DO)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.24 累计 125 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -230,9 +230,12 @@
 | **D-DG** | conftest.py 加 `mock_redis_lock` fixture:`monkeypatch.setattr("bid_app.services.docx_export._redis_lock", _no_redis_lock)`,no-op asynccontextmanager;四个直接调 `generate_docx_task` 的 D-CX/D-DA/D-DB/D-DF 用例都 use 这个 fixture | `export_docx` 串行化包装在 `_module_lock`(asyncio.Lock,同进程 OK)之后还有 `_redis_lock`(`redis.asyncio.from_url + r.lock(...)`,需要真实 Redis)。直接调 task 的测试只 fake 了 subprocess,没 fake Redis lock,在没真实 Redis 的 CI 环境会卡在 `r.ping()` / `lock.acquire()` 上,根本走不到 mermaid / on_stage / pandoc / unlink 等核心断言。单独抽 fixture 让 use 它的用例语义清晰(任何不需要真 Redis 的 task 单测都加上)|
 | **D-DH** | `project_factory` 改成"单事务 add → flush → 可选 add(Run) → 单次 commit → refresh(p)";原"commit → refresh → add(Run) → commit"双 commit 路径在 SQLAlchemy 默认 `expire_on_commit=True` 下让 p 在第二次 commit 时进 expired 状态,返回后访问 `p.id` / `p.dir_path` 触发 async lazy-load 在已关闭 session 上失败 | session_factory 没显式配 `expire_on_commit=False` 时(spec 也没明确配),double commit 必出 detached/lazy-load 问题。flush 拿到 p.id 之后 add Run + 单次 commit,语义干净 + 无 expire 风险;refresh 在 commit 后单次拿全字段,后续返回的 p 在 detached 状态下也能直接读(因为已经 hydrated)|
 | **D-DI** | §18.5 标题在 v3.20 加完 D-DA/D-DB 后,v3.21/v3.22 的 D-DD/D-DE/D-DF/D-DG/D-DH 都没补;统一改成"汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH)";test_docx.py 头注释同步 | 标题与节内容长期错位会让人误以为某些决策没回归用例覆盖。一次性把 v3.20-v3.22 加的标签都同步进标题,后续维护只需在新增决策时同步即可 |
-| **D-DJ** | conftest.py 的 `db` / `user_factory` / `project_factory` / `docx_job_factory` / `auth_client` 都加 `db_engine` 形参,显式依赖 §18.1 的 schema fixture | v3.22 之前 `db` 等 fixture 直接用全局 `session_factory`,**不**依赖 `db_engine`,导致 DOCX 测试不会触发 `Base.metadata.create_all`。后果分两种:① 没建表 → "relation does not exist";② 测试 `database_url` 指到默认开发库 → 污染开发数据。显式依赖 `db_engine` 让 schema 在每次测试运行时被正确创建/销毁。注:若 `db_engine` 是独立测试 engine,实施时还要在 conftest 顶部 monkeypatch 各模块已 import 的 `session_factory` + override `get_db`(本决策不展开,§18.1 是 yield-style fixture 默认能跑) |
+| **D-DJ** ⚠️ 由 D-DM / D-DN / D-DO 收紧 | conftest.py 的 `db` / `user_factory` / `project_factory` / `docx_job_factory` / `auth_client` 都依赖 schema fixture(原 `db_engine`,**最终经 D-DN 改为依赖 `_use_test_session_factory`** 拿到的是已 monkeypatch 过 session_factory 的环境)| v3.22 之前完全不依赖 schema fixture,DOCX 测试不会触发 `Base.metadata.create_all`,撞 "relation does not exist" 或污染默认库。**最终实现** D-DM 把 URL 隔离到 `_test` 库 + 名字校验、D-DN 把 session_factory / get_db 真正切到 test engine、D-DO 修注释口径,D-DJ 的"避免污染开发库"目标才真正闭环 |
 | **D-DK** | 两处 assemble 测试(`test_assemble_invalidates_existing_done_docx` / `test_assemble_invalidates_inflight_jobs`)的 `state["run_id"]` 从写死 `1` 改成从 DB `SELECT id FROM runs WHERE project_id=:p ORDER BY started_at DESC LIMIT 1` | `project_factory(create_done_run=True)` 默认建 Run,但 fixture 隔离 / 测试顺序变化时该 Run 的 id 不一定是 1(可能是 2、3、N)。写死会让"更新错 Run"或"不更新任何 Run"的 bug 静默通过。查真实 id 让测试与 fixture 行为耦合,后续 Run 模型改字段也不影响 |
 | **D-DL** | `tests/integration/test_docx.py` 头注释补全 D-DD/D-DE/D-DH/D-DJ/D-DK 标签,与 §18.5 标题对齐(D-DI 只同步了标题,文件头还停在 v3.20 状态) | D-DI 的承诺包含"test_docx.py 头注释同步",但 v3.22 落地时只改了标题。文件头是工程师按 grep 标签找用例的入口,标题与注释口径一致才能让"决策 ↔ 用例"双向可追溯 |
+| **D-DM** | `Settings` 加 `test_database_url` property:在 `database_url` 基础上把 `database` 名追加 `_test` 后缀;`db_engine` fixture 用它,且启动校验"DB 名必须以 `_test` 结尾",不满足直接 `RuntimeError` 中止 | v3.23 `db_engine` 直接用 `settings.database_url`,teardown 的 `drop_all` 在本地 `.env` 指向开发库时会**直接清空开发数据**。独立测试库 + 名字强校验是双层防线:即使有人误改 `test_database_url` property 跑一个不带 `_test` 的库,fixture 也会抢在 create_all 之前 raise。后续若团队需要指向另一台 DB 服务器,可加 `test_postgres_*` 字段覆盖 property |
+| **D-DN** | conftest.py 加 `_use_test_session_factory` fixture:① `async_sessionmaker(db_engine, expire_on_commit=False)` 创建 TestSession;② 用 `monkeypatch.setattr` 替换 `bid_app.db.session_factory` 与 `bid_app.workflow.sync` / `bid_app.workflow.nodes.assemble` / `bid_app.worker.tasks` / `bid_app.services.concurrency` / `bid_app.services.llm` 等已 import 的引用;③ `app.dependency_overrides[get_db]` 让 HTTP 端点也走 test session;`db` / `user_factory` / `project_factory` / `docx_job_factory` / `auth_client` 都改成依赖 `_use_test_session_factory` 而不是裸 `db_engine` | v3.23 D-DJ 只让 fixture 依赖 `db_engine` 触发 schema create_all,但**应用代码**(worker tasks / assemble 节点 / API 端点)仍用模块顶部 import 的全局 `session_factory`,实际写入还是默认数据库。必须显式 monkeypatch 各模块已 import 的引用 + 替换 `get_db` 才能让"测试只打到 test engine"的承诺落地。`expire_on_commit=False` 同时缓解 D-DH 的 detached 风险扩散到 fixture 之外的代码路径 |
+| **D-DO** | `db_engine` fixture docstring 去掉"session-scope 共享 schema"误导;明确"默认 function scope,每次测试独立 create/drop";如需 session-scope 加速要显式 `scope="session"` 并自行处理事务回滚 | v3.23 注释里写"session-scope 共享 schema, test-scope 包在事务外回滚也行"是错的 — `@pytest_asyncio.fixture` 默认 function scope。注释和实际行为不一致会让实施者误判测试生命周期(以为只 create_all 一次,实际每个测试都做);要么改注释,要么显式 scope。当前选 function 维持"测试隔离强"的默认 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -714,6 +717,19 @@ class Settings(BaseSettings):
         pwd = quote(self.postgres_password, safe="")
         return (f"postgresql+asyncpg://{self.postgres_user}:{pwd}"
                 f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}")
+
+    @property
+    def test_database_url(self) -> str:
+        """⭐ D-DM:独立测试库 URL,与生产/开发库严格分离。
+        策略:复用 postgres_user/password/host/port,**database 名固定加 `_test` 后缀**;
+        测试 fixture(`db_engine`)启动时再校验名字必须含 `_test`,避免误删开发库。
+        本 property 不读环境变量,所以 conftest 直接 `settings.test_database_url`
+        就能拿到一致的派生 URL,无需另设 `TEST_DATABASE_URL` 环境变量;
+        如果团队需要指向另一台 DB 服务器,可在 Settings 加 `test_postgres_*` 字段
+        覆盖此 property。"""
+        pwd = quote(self.postgres_password, safe="")
+        return (f"postgresql+asyncpg://{self.postgres_user}:{pwd}"
+                f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}_test")
 
     @property
     def langgraph_dsn(self) -> str:
@@ -5705,8 +5721,22 @@ from bid_app.config import settings
 
 @pytest_asyncio.fixture
 async def db_engine():
-    """每个测试一个全新的 schema(用 transaction-rollback 模式更快)。"""
-    engine = create_async_engine(settings.database_url, future=True)
+    """⭐ D-DM + D-DO:每个测试(function scope,默认)一个全新的 schema。
+    用 `settings.test_database_url`(独立测试库)而不是 `database_url`,
+    启动校验 DB 名必须以 `_test` 结尾 — 防 teardown 的 `drop_all` 在
+    `.env` 指错时把开发库表删光。
+
+    若需 session-scope 共享 schema 加速(整套测试只 create/drop 一次),
+    显式加 `scope="session"`,但要确保事务边界不污染数据(各测试用 SAVEPOINT
+    回滚或 truncate)。当前 function scope 隔离最强,慢但不留状态。
+    """
+    url = settings.test_database_url
+    if "_test" not in url.rsplit("/", 1)[-1]:
+        raise RuntimeError(
+            f"refusing to drop_all on non-test DB: {url!r};"
+            " set TEST_DATABASE_URL to a database whose name ends with '_test'"
+        )
+    engine = create_async_engine(url, future=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
@@ -5859,7 +5889,7 @@ async def test_chapter_failed_after_3_retries(client, db_engine, monkeypatch):
     assert chapter.status == "approved"
 ```
 
-### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH / D-DJ / D-DK / D-DL)
+### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH / D-DJ / D-DK / D-DL / D-DM / D-DN / D-DO)
 
 **conftest.py 必备 fixture**(D-CR:测试代码依赖,需在 conftest.py 落地):
 
@@ -5887,24 +5917,64 @@ from bid_app.models import DocxJob, Project, Run, User
 # `asyncio_mode = "auto"` 让 @pytest.fixture 自动识别,但不如显式装饰器明确
 
 @pytest_asyncio.fixture
-async def db(db_engine):
+async def _use_test_session_factory(db_engine, monkeypatch):
+    """⭐ D-DN:把所有已 import 的 `session_factory` 切到 test engine,
+    并 override FastAPI 的 `get_db`。
+
+    问题:`bid_app.db.session_factory` 是模块级单例,各模块在 import 时
+    `from ..db import session_factory` 拿到的是同一对象;monkeypatch 后再 import
+    OK,但已 import 的引用不会变。所以必须**逐个 monkeypatch**已知用 session_factory
+    的模块。下方列出的几个是 v3.23 spec 里的全部出现点,新增模块要同步加。
+
+    用 `expire_on_commit=False` 让 fixture/测试拿到的对象在 commit 之后还能访问
+    属性(D-DH 已通过 flush+单 commit 缓解,但 fixture 之外的 task 内部代码也会
+    多 commit,统一关 expire 最稳)。
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from bid_app import db as bid_db
+    from bid_app.deps import get_db
+    from bid_app.main import app
+    test_session_factory = async_sessionmaker(
+        db_engine, expire_on_commit=False, class_=bid_db.session_factory.class_,
+    )
+    # 模块级单例替换 — 已 import `from bid_app.db import session_factory`
+    # 的模块都需要在这里加上
+    targets = [
+        "bid_app.db",
+        "bid_app.workflow.sync",
+        "bid_app.workflow.nodes.assemble",
+        "bid_app.worker.tasks",
+        "bid_app.services.concurrency",
+        "bid_app.services.llm",   # _llm_project_dir 用
+    ]
+    for mod in targets:
+        monkeypatch.setattr(f"{mod}.session_factory", test_session_factory)
+
+    async def _test_get_db():
+        async with test_session_factory() as s:
+            yield s
+    app.dependency_overrides[get_db] = _test_get_db
+    yield test_session_factory
+    app.dependency_overrides.pop(get_db, None)
+
+
+@pytest_asyncio.fixture
+async def db(_use_test_session_factory):
     """裸 session,测试中直接 INSERT/UPDATE/SELECT。
 
-    ⭐ D-DJ:**显式依赖 `db_engine`**(§18.1)以触发 schema create_all/drop_all。
-    没有这个依赖,只用 `session_factory()` 会打到默认数据库且没建表 → 测试要么
-    撞 "relation does not exist",要么污染开发库。`db_engine` 是 yield-style
-    fixture,session-scope 共享 schema,test-scope 包在事务外回滚也行。
+    ⭐ D-DJ + D-DN:依赖 `_use_test_session_factory`(它本身依赖 `db_engine`),
+    保证 ① schema 已建 ② 应用所有路径走 test engine,不污染开发库。
     """
-    async with session_factory() as s:
+    async with _use_test_session_factory() as s:
         yield s
 
 
 @pytest_asyncio.fixture
-async def user_factory(db_engine):
+async def user_factory(_use_test_session_factory):
     """⭐ D-CW:Project.created_by 是非空 FK,project_factory 不能写死 1;
     测试需要先建 User,project_factory 默认引用本 fixture 创建的 user.id。"""
     async def _make(**overrides):
-        async with session_factory() as s:
+        async with _use_test_session_factory() as s:
             u = User(
                 username=overrides.pop("username", f"t_{uuid.uuid4().hex[:8]}"),
                 password_hash=overrides.pop("password_hash", hash_password("x")),
@@ -5921,7 +5991,7 @@ async def user_factory(db_engine):
 
 
 @pytest_asyncio.fixture
-async def project_factory(tmp_path, user_factory, db_engine):
+async def project_factory(tmp_path, user_factory, _use_test_session_factory):
     """创建 status='done' 的 Project + 真磁盘目录;created_by 引用真 User。
 
     ⭐ D-DD:默认 `create_done_run=True` 同时插一条 `Run(status='done')`。
@@ -5938,7 +6008,7 @@ async def project_factory(tmp_path, user_factory, db_engine):
         # 原写法是"commit → refresh → add(Run) → commit",第二次 commit 在
         # `expire_on_commit=True` 默认下会让 p 进 expired 状态,返回后访问
         # p.id / p.dir_path 触发 async lazy-load 在 detached session 上失败。
-        async with session_factory() as s:
+        async with _use_test_session_factory() as s:
             p = Project(
                 name=overrides.pop("name", "t"),
                 dir_path=str(pdir),
@@ -5962,10 +6032,10 @@ async def project_factory(tmp_path, user_factory, db_engine):
 
 
 @pytest_asyncio.fixture
-async def docx_job_factory(db_engine):
+async def docx_job_factory(_use_test_session_factory):
     async def _make(*, project_id, status="pending", arq_job_id=None,
                     output_path=None, error=None):
-        async with session_factory() as s:
+        async with _use_test_session_factory() as s:
             j = DocxJob(project_id=project_id, status=status,
                         arq_job_id=arq_job_id,
                         output_path=output_path, error=error)
@@ -5996,7 +6066,7 @@ def mock_redis_lock(monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def auth_client(user_factory, db_engine):
+async def auth_client(user_factory, _use_test_session_factory):
     """⭐ D-CR + D-CW:override get_current_user 跳过鉴权;httpx >= 0.28
     要求用 ASGITransport(app=...) 而不是 AsyncClient(app=...)(后者已弃用)。"""
     fake_user = await user_factory()
@@ -6026,6 +6096,7 @@ from bid_app.models import DocxJob
 @pytest.mark.asyncio
 async def test_on_stage_rowcount_zero_raises_stale_and_skips_pandoc(
     db, project_factory, docx_job_factory, monkeypatch, tmp_path, mock_redis_lock,
+    _use_test_session_factory,
 ):
     """⭐ D-BX + D-CB + D-CL:**测试触发点是 on_stage 切 pandoc 那一刻**,
     cleanup 在那个瞬间把 status 从 rendering_mermaid 抢标 failed → on_stage 抛
@@ -6061,7 +6132,7 @@ async def test_on_stage_rowcount_zero_raises_stale_and_skips_pandoc(
     async def render_then_steal_status(*args, **kw):
         result = await orig_render(*args, **kw)
         # mermaid 跑完 → 模拟 cleanup 把 status 直接改到 failed
-        async with session_factory() as s:
+        async with _use_test_session_factory() as s:
             await s.execute(sa.text(
                 "UPDATE docx_jobs SET status='failed', "
                 "error='stolen by cleanup', updated_at=NOW() WHERE id=:i"
@@ -6114,7 +6185,7 @@ async def test_get_docx_job_with_wrong_pk_returns_404(
 
 @pytest.mark.asyncio
 async def test_commit_done_with_already_done_returns_ok(
-    db, project_factory, docx_job_factory,
+    db, project_factory, docx_job_factory, _use_test_session_factory,
 ):
     """⭐ D-CE + D-CL:`_commit_done` 在 rowcount=0 但当前已 done 时静默成功。
     模拟 GET/cleanup repair 在 task `_commit_done` 之前抢先把 status 改 done。"""
@@ -6123,7 +6194,7 @@ async def test_commit_done_with_already_done_returns_ok(
     final_path = Path(project.dir_path) / "proposal.docx"
     final_path.write_bytes(b"x")
     # 模拟 D-BY/D-CD 抢先 repair
-    async with session_factory() as s:
+    async with _use_test_session_factory() as s:
         await s.execute(sa.text(
             "UPDATE docx_jobs SET status='done', output_path=:p "
             "WHERE id=:i"
