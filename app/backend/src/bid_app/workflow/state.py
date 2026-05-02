@@ -34,8 +34,10 @@ class WorkflowState(TypedDict, total=False):
     # 若为 None / [] 走"自动确认",直接用 LLM-1 生成的 chapters 进入循环。
     _outline_confirmed_chapters: list[dict[str, Any]] | None
 
-    # === 章节生成节点之间的临时载体 ===
-    # write_chapter 输出的章节正文,gen_visuals/merge_chapter 消费;
+    # === 节点之间的临时载体 ===
+    # generate_outline 输出 LLM-1 原始 JSON 字符串,parse_outline 消费。
+    _outline_json: str
+    # write_chapter 输出的章节正文,review_chapter (LLM-3 视觉)/merge_chapter 消费;
     # update_state 写完成后清空。
     _pending_chapter_text: str
     _pending_visuals_json: str
