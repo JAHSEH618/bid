@@ -11,7 +11,7 @@ import { useReviewChapter, useRetryChapter } from '@/api/chapters'
 import { useProjectStream, type ProjectEvent } from '@/hooks/useSSE'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
-import type { ReviewDecision } from '@/lib/types'
+import type { ChapterStatus, ReviewDecision } from '@/lib/types'
 
 export function ChapterReviewPage() {
   const { id } = useParams<{ id: string }>()
@@ -214,10 +214,14 @@ export function ChapterReviewPage() {
                 </TabsTrigger>
               </TabsList>
               <TabsContent value="current">
-                <ChapterPreview
-                  markdown={previewMarkdown}
-                  isStreaming={isStreaming}
-                />
+                {previewMarkdown ? (
+                  <ChapterPreview
+                    markdown={previewMarkdown}
+                    isStreaming={isStreaming}
+                  />
+                ) : (
+                  <ChapterEmptyHint status={activeChapter.status} />
+                )}
               </TabsContent>
               <TabsContent value="versions">
                 <p className="text-sm text-muted-foreground">
@@ -237,5 +241,50 @@ export function ChapterReviewPage() {
         />
       </main>
     </div>
+  )
+}
+
+// 当前 chapter 没有可显示的 markdown 时,根据状态给用户合适的提示。
+// 后端 OutlineResponse 不返回 final_text,所以已 approved/skipped 的章节,
+// 用户从其他页面回来不会看到正文(除非这次 SSE 流过)。这是 M1 的限制。
+function ChapterEmptyHint({ status }: { status: ChapterStatus }) {
+  if (status === 'pending') {
+    return (
+      <p className="text-sm text-muted-foreground">
+        本章尚未轮到生成,请等待前序章节完成。
+      </p>
+    )
+  }
+  if (status === 'generating' || status === 'retrying') {
+    return (
+      <p className="text-sm text-muted-foreground">
+        正在生成本章…(若长时间无内容涌入,可刷新页面重新建立 SSE 连接)
+      </p>
+    )
+  }
+  if (status === 'reviewing') {
+    return (
+      <p className="text-sm text-muted-foreground">
+        审核已提交,后端处理中…
+      </p>
+    )
+  }
+  if (status === 'approved' || status === 'skipped') {
+    return (
+      <p className="text-sm text-muted-foreground">
+        {status === 'approved' ? '已通过' : '已跳过'},章节正文已并入全文。
+        刷新后无历史内容查看(本期后端不暴露已审章节正文,见全文页)。
+      </p>
+    )
+  }
+  if (status === 'failed') {
+    return (
+      <p className="text-sm text-destructive">
+        本章生成失败。请点击下方「重新生成本章」。
+      </p>
+    )
+  }
+  return (
+    <p className="text-sm text-muted-foreground">章节尚未就绪。</p>
   )
 }
