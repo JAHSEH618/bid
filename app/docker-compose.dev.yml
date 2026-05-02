@@ -1,0 +1,42 @@
+# 开发用 compose:仅起 db + redis,后端 / 前端 / arq worker 在宿主机用 uv / pnpm 直接跑
+# 参考 IMPLEMENTATION_SPEC §7.2:docker compose -f docker-compose.dev.yml up -d
+# 数据卷使用项目本地目录,避免污染生产 /var/lib/bid-app/
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bid-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bid_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-bid_app}
+      TZ: Asia/Shanghai
+    ports:
+      - "${POSTGRES_DEV_PORT:-5432}:5432"
+    volumes:
+      - ./.dev-data/postgres:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
+      # D-EA / D-DS:首启自动建测试库 ${POSTGRES_DB}_test(数据卷为空时执行)
+      - ./docker/init-test-db.sh:/docker-entrypoint-initdb.d/10-init-test-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bid_app}"]
+      interval: 5s
+      retries: 6
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=50"]
+
+  redis:
+    image: redis:7-alpine
+    container_name: bid-redis-dev
+    restart: unless-stopped
+    # noeviction:与生产一致,防止 LRU 静默驱逐 arq 队列 / 并发 SET / 限流计数(D-V)
+    command: redis-server --maxmemory 200mb --maxmemory-policy noeviction --appendonly yes
+    ports:
+      - "${REDIS_DEV_PORT:-6379}:6379"
+    volumes:
+      - ./.dev-data/redis:/data
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 6

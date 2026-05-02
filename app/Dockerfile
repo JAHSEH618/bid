@@ -1,0 +1,77 @@
+# bid-app 单镜像(前端构建 + 后端运行时合并)
+# 参考 IMPLEMENTATION_SPEC §17.1
+
+# ──── Stage 1: 前端构建 ────
+FROM node:20-alpine AS frontend-builder
+WORKDIR /frontend
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY frontend/ ./
+RUN pnpm build
+
+# ──── Stage 2: 后端运行时 ────
+FROM python:3.12-slim-bookworm AS runtime
+
+ENV TZ=Asia/Shanghai \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pandoc \
+        chromium \
+        fonts-noto-cjk \
+        fonts-noto-cjk-extra \
+        nodejs \
+        npm \
+        curl \
+        gnupg \
+        lsb-release \
+        tzdata \
+        supervisor \
+        cron \
+        ca-certificates \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+       gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+       > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        postgresql-client-16 \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @mermaid-js/mermaid-cli@11.4.0
+
+COPY docker/mermaid-config.json /etc/mermaid-config.json
+COPY docker/puppeteer-config.json /etc/puppeteer-config.json
+COPY docker/mermaid.css /etc/mermaid.css
+
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+COPY backend/pyproject.toml backend/uv.lock /app/backend/
+RUN cd /app/backend && uv sync --frozen --no-dev
+
+COPY backend/ /app/backend/
+
+COPY --from=frontend-builder /frontend/dist /app/frontend/dist
+
+COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+COPY docker/pg-backup.sh /usr/local/bin/pg-backup.sh
+RUN chmod +x /usr/local/bin/pg-backup.sh \
+    && echo "0 3 * * * root . /etc/bid-app.env && /usr/local/bin/pg-backup.sh >> /var/log/pg-backup.log 2>&1" \
+       > /etc/cron.d/bid-app-backup \
+    && chmod 0644 /etc/cron.d/bid-app-backup
+
+RUN mkdir -p /var/lib/bid-app/projects /var/lib/bid-app/backups
+
+EXPOSE 12123
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf", "-n"]

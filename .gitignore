@@ -9,3 +9,32 @@
 .idea/
 *.swp
 *~
+
+# Secrets (per IMPLEMENTATION_SPEC §6.2):.env.example 入库,所有真值不入库
+app/.env
+app/.env.local
+app/.env.*.local
+app/.env.bak
+
+# Dev compose 本地数据卷(仅 docker-compose.dev.yml 使用)
+app/.dev-data/
+
+# Python / Node 构建产物
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+dist/
+build/
+*.egg-info/
+
+# 测试产物
+.pytest_cache/
+.coverage
+htmlcov/
+
+# uv
+.uv-cache/
+
+# Logs
+*.log
