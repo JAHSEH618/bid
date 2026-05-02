@@ -1,0 +1,277 @@
+"""章节审核与重试(§15.2 / D-I / D-AD / D-AO / D-AR / D-AC)。
+
+端点:
+  · POST /api/projects/{id}/chapters/{idx}/review
+      → resume_review_task(D-I);chapter awaiting_review → reviewing 中间态;
+        失败补偿全包(回 awaiting_review,释放 slot)。ReviewEvent 由 worker 写。
+  · POST /api/projects/{id}/chapters/{idx}/retry
+      → retry_failed_chapter_task;chapter failed → retrying 中间态;
+        失败补偿全包(回 failed,释放 slot)。retry_count=0 / abandoned 由 worker 做。
+"""
+from __future__ import annotations
+
+from typing import Annotated
+
+import sqlalchemy as sa
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..deps import get_current_user, get_db
+from ..models import Run, User
+from ..schemas.chapters import ReviewRequest
+from ..services.concurrency import (
+    release_project_slot,
+    try_acquire_project_slot,
+)
+
+router = APIRouter(prefix="/api/projects", tags=["chapters"])
+log = structlog.get_logger()
+
+
+async def _get_active_run(db: AsyncSession, project_id: int) -> Run:
+    row = await db.execute(
+        select(Run)
+        .where(Run.project_id == project_id)
+        .order_by(Run.started_at.desc())
+        .limit(1)
+    )
+    run = row.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "no active run for project; did /start succeed?",
+        )
+    return run
+
+
+# ============== /review ==============
+
+
+@router.post("/{project_id}/chapters/{idx}/review")
+async def review_chapter(
+    project_id: int,
+    idx: int,
+    body: ReviewRequest,
+    request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, bool]:
+    """⭐ D-I + D-AD + D-AO + D-AR + D-AC。"""
+    if body.decision == "revise" and not (body.feedback or "").strip():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "revise must include feedback"
+        )
+
+    run = await _get_active_run(db, project_id)
+
+    # 行锁 + 状态校验
+    chapter = (
+        await db.execute(
+            sa.text(
+                "SELECT id, status FROM chapters "
+                "WHERE run_id=:r AND index=:i FOR UPDATE"
+            ),
+            {"r": run.id, "i": idx},
+        )
+    ).mappings().one_or_none()
+    if chapter is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
+    if chapter["status"] != "awaiting_review":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"chapter is {chapter['status']}, only awaiting_review can be reviewed",
+        )
+
+    chapter_id = chapter["id"]
+    # ⭐ D-AD 中间态 + D-AR processing_started_at
+    await db.execute(
+        sa.text(
+            "UPDATE chapters SET status='reviewing', "
+            "processing_started_at=NOW() WHERE id=:c"
+        ),
+        {"c": chapter_id},
+    )
+    await db.commit()
+
+    acquired_token: str | None = None
+    try:
+        result = await try_acquire_project_slot(project_id)
+        if result.reason == "already_active":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试"
+            )
+        if not result.acquired:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="系统繁忙(并发上限已达),请稍后重试",
+                headers={"Retry-After": "60"},
+            )
+        acquired_token = result.token
+
+        arq_pool = getattr(request.app.state, "arq_pool", None)
+        if arq_pool is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
+            )
+
+        await arq_pool.enqueue_job(
+            "resume_review_task",
+            project_id=project_id,
+            run_id=run.id,
+            thread_id=run.langgraph_thread_id,
+            resume_payload={
+                "kind": "chapter_review",
+                "decision": body.decision,
+                "feedback": body.feedback or "",
+            },
+            slot_token=acquired_token,
+            reviewer_id=user.id,
+            chapter_id=chapter_id,
+        )
+    except HTTPException:
+        if acquired_token:
+            await release_project_slot(project_id, acquired_token)
+        await db.execute(
+            sa.text(
+                "UPDATE chapters SET status='awaiting_review', "
+                "processing_started_at=NULL "
+                "WHERE id=:c AND status='reviewing'"
+            ),
+            {"c": chapter_id},
+        )
+        await db.commit()
+        raise
+    except Exception as e:
+        log.exception(
+            "review_unexpected_error",
+            project_id=project_id,
+            chapter_id=chapter_id,
+        )
+        if acquired_token:
+            await release_project_slot(project_id, acquired_token)
+        await db.execute(
+            sa.text(
+                "UPDATE chapters SET status='awaiting_review', "
+                "processing_started_at=NULL "
+                "WHERE id=:c AND status='reviewing'"
+            ),
+            {"c": chapter_id},
+        )
+        await db.commit()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "审核处理异常,请稍后重试"
+        ) from e
+
+    # ⭐ D-AC:ReviewEvent 由 worker 入口写,API 不再写
+    return {"ok": True}
+
+
+# ============== /retry ==============
+
+
+@router.post("/{project_id}/chapters/{idx}/retry")
+async def retry_chapter(
+    project_id: int,
+    idx: int,
+    request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, bool]:
+    """⭐ FR-4.7 + D-AD + D-AO + D-AR。仅 ``status='failed'`` 章节可触发。"""
+    run = await _get_active_run(db, project_id)
+
+    chapter = (
+        await db.execute(
+            sa.text(
+                "SELECT id, status FROM chapters "
+                "WHERE run_id=:r AND index=:i FOR UPDATE"
+            ),
+            {"r": run.id, "i": idx},
+        )
+    ).mappings().one_or_none()
+    if chapter is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
+    if chapter["status"] != "failed":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"chapter is {chapter['status']}, not failed",
+        )
+
+    chapter_id = chapter["id"]
+    await db.execute(
+        sa.text(
+            "UPDATE chapters SET status='retrying', "
+            "processing_started_at=NOW() WHERE id=:c"
+        ),
+        {"c": chapter_id},
+    )
+    await db.commit()
+
+    acquired_token: str | None = None
+    try:
+        result = await try_acquire_project_slot(project_id)
+        if result.reason == "already_active":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试"
+            )
+        if not result.acquired:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="系统繁忙,请稍后重试",
+                headers={"Retry-After": "60"},
+            )
+        acquired_token = result.token
+
+        arq_pool = getattr(request.app.state, "arq_pool", None)
+        if arq_pool is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
+            )
+
+        await arq_pool.enqueue_job(
+            "retry_failed_chapter_task",
+            project_id=project_id,
+            run_id=run.id,
+            thread_id=run.langgraph_thread_id,
+            chapter_index=idx,
+            chapter_id=chapter_id,
+            reviewer_id=user.id,
+            slot_token=acquired_token,
+        )
+    except HTTPException:
+        if acquired_token:
+            await release_project_slot(project_id, acquired_token)
+        await db.execute(
+            sa.text(
+                "UPDATE chapters SET status='failed', "
+                "processing_started_at=NULL "
+                "WHERE id=:c AND status='retrying'"
+            ),
+            {"c": chapter_id},
+        )
+        await db.commit()
+        raise
+    except Exception as e:
+        log.exception(
+            "retry_unexpected_error",
+            project_id=project_id,
+            chapter_id=chapter_id,
+        )
+        if acquired_token:
+            await release_project_slot(project_id, acquired_token)
+        await db.execute(
+            sa.text(
+                "UPDATE chapters SET status='failed', "
+                "processing_started_at=NULL "
+                "WHERE id=:c AND status='retrying'"
+            ),
+            {"c": chapter_id},
+        )
+        await db.commit()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "重试处理异常,请稍后重试"
+        ) from e
+
+    return {"ok": True}

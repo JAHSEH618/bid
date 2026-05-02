@@ -30,6 +30,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -500,3 +501,53 @@ async def confirm_outline(
         )
 
     return {"ok": True}
+
+
+# ========== /proposal(全文整合产物) ==========
+
+
+@router.get("/{project_id}/proposal")
+async def get_proposal_text(
+    project_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """JSON 形式返回 ``proposal.md`` 内容(给前端 ProposalPage 渲染)。"""
+    project = await _get_project_or_404(db, project_id)
+    md_path = Path(project.dir_path) / "proposal.md"
+    if not md_path.exists():
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"proposal.md not found; project status='{project.status}',"
+            "工作流是否已跑到 assemble?",
+        )
+    text = md_path.read_text(encoding="utf-8")
+    return {
+        "project_id": project.id,
+        "status": project.status,
+        "markdown": text,
+        "chars": len(text),
+    }
+
+
+@router.get("/{project_id}/proposal.md")
+async def download_proposal_md(
+    project_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> PlainTextResponse | FileResponse:
+    """直接下载 ``proposal.md`` 文件(``Content-Disposition`` 含项目名)。"""
+    project = await _get_project_or_404(db, project_id)
+    md_path = Path(project.dir_path) / "proposal.md"
+    if not md_path.exists():
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "proposal.md not found"
+        )
+    safe_name = "".join(
+        "_" if ch in '<>:"/\\|?*' else ch for ch in project.name
+    )[:80] or "proposal"
+    return FileResponse(
+        md_path,
+        media_type="text/markdown; charset=utf-8",
+        filename=f"{safe_name}.md",
+    )
