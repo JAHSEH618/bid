@@ -177,7 +177,31 @@ async def delete_project(
     return {"ok": True}
 
 
-# ========== Documents 上传 ==========
+# ========== Documents 列表 + 上传 ==========
+
+
+@router.get(
+    "/{project_id}/documents",
+    response_model=list[DocumentUploadResponse],
+)
+async def list_documents(
+    project_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> list[Document]:
+    """列出项目已上传的文档(给 DocumentUploadPage 跨会话回看用)。
+
+    NOTE:不在 REQUIREMENTS §9 显式列出,但 backend ↔ frontend 契约对账时
+    确认:用户刷新 / 跨会话回看时需要恢复"已上传记录"。返回顺序按
+    ``id ASC``,前端可在 client-side 按 ``kind`` 分桶。
+    """
+    await _get_project_or_404(db, project_id)
+    rows = await db.execute(
+        select(Document)
+        .where(Document.project_id == project_id)
+        .order_by(Document.id.asc())
+    )
+    return list(rows.scalars().all())
 
 
 @router.post(
