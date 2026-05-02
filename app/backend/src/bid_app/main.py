@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from hashlib import sha256
 
 import redis.asyncio as redis_async
+from arq.connections import RedisSettings, create_pool
 from fastapi import FastAPI
 
 from bid_app.config import settings
@@ -60,8 +61,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     顺序:
       1. 启动横幅(M5-4)— 必须在最前
-      2. redis async client 实例化挂 ``app.state.redis``(/health 用,M1)
-      3. (M1+) LangGraph AsyncPostgresSaver setup
+      2. redis async client 挂 ``app.state.redis``(/health / login throttle)
+      3. arq pool 挂 ``app.state.arq_pool``(API enqueue_job 用)
       4. (M2/M3) 继续 append
     """
     _print_startup_banner()
@@ -69,19 +70,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     redis_client = redis_async.from_url(settings.redis_url, decode_responses=True)
     app.state.redis = redis_client
 
-    # M1+ 在此 append:
-    # await checkpointer.setup()
-    # ...
+    arq_pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    app.state.arq_pool = arq_pool
 
     try:
         yield
     finally:
         try:
+            await arq_pool.aclose()
+        except Exception:
+            pass
+        try:
             await redis_client.aclose()
         except Exception:
             pass
-        # M1+ 在此 append shutdown:
-        # await checkpointer.close()
 
 
 app = FastAPI(
@@ -95,11 +97,12 @@ app = FastAPI(
 
 
 # === 路由挂载(M1) ===
-# 顺序无关紧要,但保持业务 API 集中,health 在最前。
 from bid_app.api import health as _health_router  # noqa: E402
+from bid_app.api import projects as _projects_router  # noqa: E402
 from bid_app.api import stream as _stream_router  # noqa: E402
 
 app.include_router(_health_router.router)
 app.include_router(_stream_router.router)
-# M1-7 / M1-9:projects / chapters router 在 #14 / #13 挂
+app.include_router(_projects_router.router)
+# M1-9:chapters router 在 #13 挂
 # M2 / M3:auth / me / admin / docx router 后续挂
