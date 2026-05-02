@@ -195,7 +195,7 @@
   - **不含**封面、页眉、页脚、目录、公章占位
   - 用户如需替换,直接覆盖此文件后重启容器
 - FR-5.6 DOCX 文件名格式:`{project_name}_技术方案_{YYYYMMDD}.docx`(YYYYMMDD 用 Asia/Shanghai 时区,D8)。
-- FR-5.7 DOCX 生成是**按需触发**(用户点"下载 .docx"才跑),不在工作流末端自动生成;首次生成后缓存到 `{project_dir}/proposal.docx`,**直到 markdown 重新生成才失效**。失效机制(实现层 D-CG):工作流 `assemble` 节点重写 `proposal.md` 后,同步 `unlink proposal.docx` + 把对应 `DocxJob.status` 从 `done` 改成 `invalidated`,前端 GET 看到 invalidated 提示"原文档已更新,请重新生成 DOCX"并暴露重新生成入口。
+- FR-5.7 DOCX 生成是**按需触发**(用户点"下载 .docx"才跑),不在工作流末端自动生成;首次生成后缓存到 `{project_dir}/proposal.docx`,**直到 markdown 重新生成才失效**。失效机制(实现层 D-CG / D-CM):工作流 `assemble` 节点重写 `proposal.md` 后,同步 `unlink proposal.docx` + 把本项目**所有未终结的 DocxJob**(`done` 与全部 in-flight `pending`/`rendering_mermaid`/`pandoc`/`finalizing`)改成 `invalidated`。同时作废 in-flight 是为了防"旧 markdown 的 task 之后完成后写入脏 done"。前端 GET `/docx-job` 看到 invalidated 提示"原文档已更新,请重新生成 DOCX"并暴露重新生成入口。
 - FR-5.8 **DOCX 导出在 arq worker 中串行执行**(同时只允许 1 个 docx 导出任务),避免 mermaid-cli 的 chromium 进程同时启动多份打爆 2c4g 内存。其他 docx 请求**短时间排队等待串行锁**(默认 120 秒,与 worker slot 配额对齐),**超时即失败,前端给可重试按钮**;**不做无界排队**——避免后到的 DOCX 持续占用 arq worker job 槽,饿死 workflow task。
 - FR-5.9 生成失败(Pandoc 报错 / mermaid 全部失败)需返回明确的错误码和阶段信息,前端给出可重试按钮。
 - FR-5.10 **DOCX 生成耗时 SLA**:10 章方案 < 15 秒(简化后比 Plan C 快约一半)。
