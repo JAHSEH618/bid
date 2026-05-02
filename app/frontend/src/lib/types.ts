@@ -11,27 +11,31 @@ export interface UserDTO {
   created_at: string
 }
 
+// REQUIREMENTS FR-1.2:`init` → `extracting` → `outlining` → `outline_ready`
+// → `running` → `awaiting_review` → ... → `done` / `failed` / `aborted`;
+// 旁路 `queued`(FR-1.3 D-T 并发等位)。
 export type ProjectStatus =
-  | 'draft'
+  | 'init'
+  | 'queued'
   | 'extracting'
   | 'outlining'
-  | 'awaiting_outline_review'
-  | 'writing'
-  | 'awaiting_chapter_review'
-  | 'assembling'
-  | 'completed'
+  | 'outline_ready'
+  | 'running'
+  | 'awaiting_review'
+  | 'done'
   | 'failed'
-  | 'paused'
-  | 'canceled'
+  | 'aborted'
 
 export interface ProjectDTO {
   id: number
   name: string
+  description?: string | null
   status: ProjectStatus
   current_index: number
   total_chapters: number
-  owner_id: number
-  owner_username?: string
+  created_by: number
+  created_by_username?: string
+  api_key_owner?: number | null
   created_at: string
   updated_at: string
 }
@@ -93,11 +97,15 @@ export interface ProjectDetailDTO {
   current_index: number
 }
 
+// 对外业务状态(D-CG / D-CN):in-flight 状态(pending / rendering_mermaid /
+// pandoc / finalizing)经后端映射为 `processing` 暴露;`invalidated` 显式终态,
+// 表示 markdown 重生后旧 DOCX 被作废。
 export type DocxJobStatus =
   | 'pending'
   | 'processing'
   | 'done'
   | 'failed'
+  | 'invalidated'
 
 export interface DocxJobDTO {
   id: number

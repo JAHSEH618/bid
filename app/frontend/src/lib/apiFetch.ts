@@ -4,6 +4,9 @@
 //   - 401/428 在这里直接 location.replace 跳转,避免每个 hook 自己写一遍。
 //   - 拦截器对 /api/auth/login 自身放行(否则登录失败会陷入循环)。
 //   - cookie 走 credentials: 'include'(JWT httpOnly cookie,§14)。
+//   - DEV 期默认走 mock(lib/mock.ts);设置 VITE_API_REAL=1 切回真请求。
+
+import { isMockApiError, isMockEnabled, mockResolve } from './mock'
 
 const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ''
 
@@ -38,6 +41,21 @@ export async function apiFetch<T = unknown>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  if (isMockEnabled()) {
+    try {
+      return await mockResolve<T>(path, init)
+    } catch (err) {
+      if (isMockApiError(err)) {
+        if (!isPassthrough(path)) {
+          if (err.status === 401) redirect('/login')
+          else if (err.status === 428) redirect('/change-password')
+        }
+        throw new ApiError(err.status, err.body)
+      }
+      throw err
+    }
+  }
+
   const isFormData = init.body instanceof FormData
   const headers: HeadersInit = {
     ...(init.body && !isFormData ? { 'Content-Type': 'application/json' } : {}),

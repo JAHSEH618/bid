@@ -22,12 +22,21 @@ const STAGE_LABEL: Record<string, string> = {
 
 const STATUS_VARIANT: Record<
   DocxJobStatus,
-  'secondary' | 'success' | 'destructive' | 'info'
+  'secondary' | 'success' | 'destructive' | 'info' | 'warning'
 > = {
   pending: 'info',
   processing: 'info',
   done: 'success',
   failed: 'destructive',
+  invalidated: 'warning',
+}
+
+const STATUS_LABEL: Record<DocxJobStatus, string> = {
+  pending: '排队中',
+  processing: '生成中',
+  done: '已就绪',
+  failed: '失败',
+  invalidated: '已过期(原文档已更新)',
 }
 
 export interface DataExportPanelProps {
@@ -142,16 +151,17 @@ export function DataExportPanel({
         {job && (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Badge variant={STATUS_VARIANT[job.status]}>
-              {job.status === 'processing'
-                ? STAGE_LABEL[job.stage ?? 'processing'] ?? '生成中'
-                : job.status === 'done'
-                  ? '已就绪'
-                  : job.status === 'failed'
-                    ? '失败'
-                    : STAGE_LABEL[job.stage ?? 'pending'] ?? '排队中'}
+              {job.status === 'processing' && job.stage
+                ? STAGE_LABEL[job.stage] ?? STATUS_LABEL[job.status]
+                : STATUS_LABEL[job.status]}
             </Badge>
             {isFailed && job.error && (
               <span className="text-destructive">{job.error}</span>
+            )}
+            {job.status === 'invalidated' && (
+              <span className="text-amber-700">
+                原 Markdown 已重生成,请点击「生成 .docx」重新打包
+              </span>
             )}
           </div>
         )}

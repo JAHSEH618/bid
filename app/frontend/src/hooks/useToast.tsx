@@ -10,7 +10,12 @@ import {
 import { cn } from '@/lib/utils'
 
 // 极简 toast。比 shadcn 完整 toast 短,够用就好;后续如需 Promise/Action 再升级。
-export type ToastVariant = 'default' | 'success' | 'destructive' | 'warning'
+export type ToastVariant =
+  | 'default'
+  | 'success'
+  | 'destructive'
+  | 'warning'
+  | 'info'
 
 export interface ToastInput {
   title?: string
@@ -86,6 +91,7 @@ function ToastViewport({
             t.variant === 'success' && 'border-emerald-200 bg-emerald-50',
             t.variant === 'destructive' && 'border-destructive bg-destructive/10',
             t.variant === 'warning' && 'border-amber-200 bg-amber-50',
+            t.variant === 'info' && 'border-sky-200 bg-sky-50',
           )}
         >
           {t.title && <div className="font-medium">{t.title}</div>}

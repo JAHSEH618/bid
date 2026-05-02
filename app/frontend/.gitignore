@@ -6,6 +6,13 @@ dist-ssr
 .vite
 .eslintcache
 
+# tsc -b 的增量缓存(local-only)
+*.tsbuildinfo
+
+# 由 vite.config.ts 编译出的临时 .d.ts / .js(prod 不需要,被 .gitignore)
+vite.config.d.ts
+vite.config.js
+
 .env
 .env.*
 !.env.example

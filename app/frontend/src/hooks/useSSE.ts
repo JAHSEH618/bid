@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { isMockEnabled, MockProjectEventSource } from '@/lib/mock'
 
 // SSE 事件类型对齐 IMPLEMENTATION_SPEC §16.3 + REQUIREMENTS FR-3.5。
 // 字段细节(payload schema)在 #11 后端 stream 实现完成后再补,这里只锁顶层结构。
@@ -42,9 +43,10 @@ export function useProjectStream(
     if (projectId == null) return
     if (options.enabled === false) return
 
-    const es = new EventSource(`/api/projects/${projectId}/stream`, {
-      withCredentials: true,
-    })
+    const url = `/api/projects/${projectId}/stream`
+    const es: EventSource | MockProjectEventSource = isMockEnabled()
+      ? new MockProjectEventSource(url)
+      : new EventSource(url, { withCredentials: true })
 
     es.onopen = () => {
       optionsRef.current.onOpen?.()

@@ -1,38 +1,116 @@
+import type { ReactNode } from 'react'
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import App from './App'
-import { PlaceholderPage } from './pages/PlaceholderPage'
+import { RequireAuth } from './components/RequireAuth'
+import { AppShell } from './components/AppShell'
+import { LoginPage } from './pages/LoginPage'
+import { ChangePasswordPage } from './pages/ChangePasswordPage'
+import { ProjectListPage } from './pages/ProjectListPage'
+import { NewProjectPage } from './pages/NewProjectPage'
+import { DocumentUploadPage } from './pages/DocumentUploadPage'
+import { OutlineConfirmPage } from './pages/OutlineConfirmPage'
+import { ChapterReviewPage } from './pages/ChapterReviewPage'
+import { ProposalPage } from './pages/ProposalPage'
+import { SettingsPage } from './pages/SettingsPage'
+import { AdminPage } from './pages/AdminPage'
 
-// 路由骨架(IMPLEMENTATION_SPEC §16.1)。
-// RequireAuth / 真实页面在 #28 / #25 / #24 / #27 接入,这里先用 PlaceholderPage 占位避免 RouterProvider 报错。
+// IMPLEMENTATION_SPEC §16.1 + REQUIREMENTS P0~P8。
+// /change-password 用 allowMustChange 让 must_change_password=true 的用户能访问。
+// AppShell 提供顶部导航 + DashScopeBanner;login / change-password 不挂壳。
+function Authed({
+  children,
+  shell = true,
+}: {
+  children: ReactNode
+  shell?: boolean
+}) {
+  if (!shell) return <RequireAuth>{children}</RequireAuth>
+  return (
+    <RequireAuth>
+      <AppShell>{children}</AppShell>
+    </RequireAuth>
+  )
+}
+
 export const router = createBrowserRouter([
   {
     element: <App />,
     children: [
-      { path: '/login', element: <PlaceholderPage title="登录" /> },
+      { path: '/login', element: <LoginPage /> },
       {
         path: '/change-password',
-        element: <PlaceholderPage title="修改密码" />,
+        element: (
+          <RequireAuth allowMustChange>
+            <ChangePasswordPage />
+          </RequireAuth>
+        ),
       },
-      { path: '/', element: <PlaceholderPage title="项目列表" /> },
-      { path: '/projects/new', element: <PlaceholderPage title="新建项目" /> },
+      {
+        path: '/',
+        element: (
+          <Authed>
+            <ProjectListPage />
+          </Authed>
+        ),
+      },
+      {
+        path: '/projects/new',
+        element: (
+          <Authed>
+            <NewProjectPage />
+          </Authed>
+        ),
+      },
       {
         path: '/projects/:id/upload',
-        element: <PlaceholderPage title="文档上传" />,
+        element: (
+          <Authed>
+            <DocumentUploadPage />
+          </Authed>
+        ),
       },
       {
         path: '/projects/:id/outline',
-        element: <PlaceholderPage title="大纲确认" />,
+        element: (
+          <Authed>
+            <OutlineConfirmPage />
+          </Authed>
+        ),
       },
       {
         path: '/projects/:id/review',
-        element: <PlaceholderPage title="章节审核" />,
+        element: (
+          <Authed>
+            <ChapterReviewPage />
+          </Authed>
+        ),
       },
       {
         path: '/projects/:id/proposal',
-        element: <PlaceholderPage title="完整方案" />,
+        element: (
+          <Authed>
+            <ProposalPage />
+          </Authed>
+        ),
       },
-      { path: '/settings', element: <PlaceholderPage title="设置" /> },
-      { path: '/admin', element: <PlaceholderPage title="管理后台" /> },
+      {
+        path: '/settings',
+        element: (
+          <Authed>
+            <SettingsPage />
+          </Authed>
+        ),
+      },
+      {
+        path: '/admin',
+        element: (
+          <RequireAuth requireAdmin>
+            <AppShell>
+              <AdminPage />
+            </AppShell>
+          </RequireAuth>
+        ),
+      },
       { path: '*', element: <Navigate to="/" replace /> },
     ],
   },
