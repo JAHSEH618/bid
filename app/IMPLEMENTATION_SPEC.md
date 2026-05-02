@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.8
+# 投标技术方案生成器 · 实施 Spec v3.9
 
 > **配套文档**:`REQUIREMENTS.md` v0.10(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.8 (2026-05-02)。基于 v3.7 修了 5 处剩余隐患:章节 LLM 失败**与 task 崩溃区分**(`ChapterGenerationFailed` 让 project 切 `awaiting_review` 而非 `failed`,D-AU) / `cleanup_stale_chapters` **排除 active 项目避免误伤**(60s 与 RESERVE_TTL=300s 不再冲突,D-AV) / SlotLost 分支**覆盖更多章节状态**(`generating/pending` 也回滚,project 切 `awaiting_review`,D-AW;原 D-AT 进一步细化) / `wake_queued_projects` **异常 queued 项目标 failed**(防卡队列 + 返回唤醒计数,D-AX) / DOCX `max_tries=2 → 1` + cleanup 覆盖 `rendering_mermaid/pandoc`(D-AY,D-AS 范围扩展)。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.8 累计 57 处。
+> **版本**:v3.9 (2026-05-02)。基于 v3.8 修了 6 处剩余隐患:SlotLost **按 review decision 区分**(approve/skip 回 awaiting_review,只有 revise/retry 才标 failed,D-AZ) / Run.status **与 Project.status 同步**(新增 `_fail_project_and_run` helper,D-BA) / cleanup 用 **真 alive ids + typed array CAST**(精准排除 + 类型推断稳健性,D-BB) / 测试断言 DOCX `max_tries=1`(D-BC) / DOCX **pandoc 状态接到生命周期**(`on_stage` 回调,与 §8 status 字段对齐,D-BD) / LLM `errors.log` **直写主代码**(消除 §11.1 vs §19.2 分裂,D-BE)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.9 累计 63 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -146,7 +146,7 @@
 | **D-Z** ⚠️ 由 D-AY 收紧 | workflow 三类 task **`max_tries=1`**;DOCX task **原 `max_tries=2` → 现 `max_tries=1`**(D-AY) | LLM 失败后 task 抛异常,arq 默认会自动重试整个 task,这会:① 绕过 API 端 `try_acquire`(违反 D-T 名额管理);② 与 FR-3.9/FR-4.7 的"用户手动 /retry"语义冲突;③ 浪费 LLM 调用。崩溃恢复改靠 LangGraph checkpoint(用户下次 /retry 时从最近成功节点续跑)。DOCX 原打算自动重试一次但需要 `ctx['job_try']` 配合"只在最后一次标 failed"逻辑,与现有"第一次失败立刻 UPDATE failed"实现冲突——第二次重试进来 SELECT 看到 done/failed 直接退出,等于没真重试。统一为 1 次更简单;失败由用户从 P6 点"重新生成"触发新 DocxJob |
 | **D-AA** | `WorkerSettings.max_jobs = max_concurrent_projects + 2`,给 DOCX task 留余量;DOCX Redis 锁 `blocking_timeout` 缩短到 120s 防止"等锁的 DOCX 占满 worker job 槽" | DOCX 串行锁让多个 DOCX 任务在 arq worker 里阻塞等待,如果 max_jobs 等于项目并发上限,等锁的 DOCX 把 worker 槽全占,新 workflow task 入队后排在 arq 队列里饿死 |
 | **D-AB** | slot **lease token**:`try_acquire` 返回 uuid token 存到 ALIVE_KEY 值;task 入口 `ensure_project_slot(token)` 校验;`heartbeat`/`release` 用 Lua CAS 仅当 token 匹配才操作 | 仅靠 RESERVE_TTL 不能消除时序竞态:worker 阻塞 / 排队 > 5 分钟时 ALIVE_KEY 过期 → reconcile 把 ACTIVE_SET 清掉 → task 后续启动时**不知道**自己已被踢,继续跑导致并发超限。token 让 task 能精确判断"我还持有 slot 吗",失败可重新 acquire 或退出 |
-| **D-AC** | `ReviewEvent` 在 **worker 入口**写,不在 API 端写 | v3.3 把 ReviewEvent 写在 enqueue 后,如果 enqueue 成功但 commit 失败,动作执行了但事件没写。改在 worker 入口写,与 graph 真正执行同生同灭:worker 拿到 task 之前不写,worker 执行前必写,失败时 ReviewEvent 也保留(记录"用户做过这个动作")。代价是 enqueue 后 worker 拿到 task 之前的极小窗口里 DB 看不到 ReviewEvent,但这是正确的——审计应该反映"实际发生过"而不是"被请求过" |
+| **D-AC** ⚠️ 由 D-AZ 收紧 | `ReviewEvent` 在 **worker 入口**写,不在 API 端写;**仅 revise 切 generating**,approve/skip 保持 reviewing 由 update_state 节点切到 approved/skipped(D-AZ) | v3.3 把 ReviewEvent 写在 enqueue 后,enqueue 成功但 commit 失败时事件没写。改在 worker 入口写,与 graph 真正执行同生同灭。v3.8 一律切 generating 把 approve/skip 误归类成"正在写章节",D-AZ 修正 |
 | **D-AD** | API 端审核/重试加 **`SELECT ... FOR UPDATE` 行锁** + 状态校验 | 防止过期页面 / 双击 / 多用户同时审同一章节导致重复提交;状态校验确保只有 `awaiting_review` 章节能被 review、`failed` 章节能被 retry |
 | **D-AE** | errors.log 用 **JSONL 格式**,traceback 作为单行 JSON 字符串字段 | v3.3 设计的 key=val 平文本假设"每行 < PIPE_BUF 4KB 不交错",但 traceback 多行长字段打破假设。JSONL 把多行字段编码成单行 JSON,单次 write 完成,跨进程 append 不交错 |
 | **D-AF** | `try_acquire_project_slot` 三态返回:`token` / `None+full` / `None+already_active`;**仅 added==1 时**才 SET ALIVE_KEY;`/start` 必须校验 `project.status=='init'` | v3.4 Lua 在 `size < max` 内不区分 added=0/1 都 SET ALIVE_KEY,会覆盖正在跑 task 的 token,task 入口 `ensure_project_slot` 仍能通过(因为新 token 是同一进程 acquire 写的),但物理上是两份"持有人";严格化后 already_active 直接拒绝,防止重复启动 |
@@ -162,12 +162,18 @@
 | **D-AQ** | `try_acquire` 区分 stale(`-2`)与真 already_active(`-1`):Lua 检查 SISMEMBER 后再查 ALIVE_KEY 存在性;stale 时 Python `_evict_stale_project` 同步移除 + DB 标 failed,然后递归一次 acquire | v3.6 SISMEMBER==1 直接返回 already_active,但 ALIVE_KEY 已过期的 stale 成员被卡住,直到 cron 60s 后才清。stale 自愈 + 维持 D-AN "SREM 必须伴随 DB 同步"原则(只是绑定位置在 Python) |
 | **D-AR** | chapters 加 `processing_started_at`;cron `cleanup_stale_chapters` 每分钟扫 `reviewing/retrying` 状态超 60s 的章节,回滚到 awaiting_review/failed | API commit 中间态后进程崩溃(arq 没拿到、worker 重启等)会让章节卡中间态;前端禁用按钮永远点不开。超时回滚让用户能重新提交审核或重试 |
 | **D-AS** ⚠️ 由 D-AY 扩展 | cron `cleanup_stale_docx_jobs` 每 5 分钟扫 `DocxJob.status` 在 **任意 in-flight 状态**(`pending` / `rendering_mermaid` / `pandoc`)超 30 分钟的标 failed | v3.7 只覆盖 pending,不够——pandoc / chromium 在 docker 里 OOM 死锁 / 进程崩溃时,job 卡在 rendering_mermaid 或 pandoc 阶段,partial unique index `uq_docx_jobs_project_inflight` 阻塞后续 DOCX 永远新建不了。覆盖全部 in-flight 状态才能真正自愈 |
-| **D-AT** ⚠️ 由 D-AW 扩展 | worker `SlotLost` 分支**幂等回滚章节状态**:resume 的 reviewing → awaiting_review;retry 的 retrying → failed;用 `WHERE status=...` 防止已经流转到下游的状态被覆盖 | v3.6 SlotLost 只 release slot,章节卡中间态;补偿与 D-AR cron 互补——cron 兜底 60s 阈值,SlotLost 立即触发 |
+| **D-AT** ⚠️ 由 D-AW / D-AZ 扩展 | worker `SlotLost` 分支**幂等回滚章节状态**;最终形态由 D-AW(覆盖 reviewing/retrying/pending/generating)+ D-AZ(按 decision 区分:approve/skip 回 awaiting_review,revise 标 failed)定义 | v3.6 SlotLost 只 release slot,章节卡中间态;补偿与 D-AR cron 互补——cron 兜底 60s 阈值,SlotLost 立即触发 |
 | **D-AU** | LLM-2 章节生成失败语义化:`services/llm.py` 加 `ChapterGenerationFailed`,`write_chapter` 节点把 `LLMRetryFailed` / `Timeout` 包成它再 raise;worker 三类 task 加 `except ChapterGenerationFailed`:**不写 errors.log**(节点已写 chapter.last_error)/ **不 raise**(arq 不重试)/ project 切 `awaiting_review` | v3.7 章节 3 次失败后裸 raise,被 task 顶层 `except Exception` 捕获 → `_set_project_status(project, 'failed')`,违反 FR-3.9/FR-4.7 "工作流暂停在该章节,等用户手动 retry" 的语义。语义化异常让"章节级失败"和"task 真崩溃"在 except 链里精准分流;LLM-1 / 抽取阶段失败仍走 generic Exception → project failed(那才是真项目级失败)|
 | **D-AV** | `cleanup_stale_chapters` 先取 `ACTIVE_SET`,**排除有 alive reservation 的 project**(章节 NOT IN 这些 project 才回滚);`/review`/`/retry` 的异常补偿同时清 `processing_started_at` | v3.7 cleanup 阈值 60s 与 RESERVE_TTL=300s 冲突:worker 启动延迟 60~300s 时章节被误回滚但 slot 还被 reservation 持有。排除 active 项目后,信任 RESERVE_TTL 内 worker 接管;真没接管会被 reconcile 在 300s 后清 ACTIVE_SET,下一轮 cleanup 自然回滚。补偿清 processing_started_at 防 cron 看到旧时间戳重复触发 |
 | **D-AW** | SlotLost 补偿统一抽 `_slot_lost_compensation(project_id, run_id, current_chapter_id, action)`:① 当前 `chapter_id` 在 `reviewing/retrying/pending/generating` 全部回滚到 failed;② run 下任意 `generating` 章节(下一章场景)也标 failed;③ 至少回滚了一行 → project 切 `awaiting_review`;0 行(start 阶段卡 extract/outline)→ 不动 project,让 reconcile 标 failed | v3.7 D-AT 只回滚"参数指向的章节",但 resume 可能跑过几章后在生成下一章时 SlotLost,下一章 chapter_id 不在参数里,卡 generating 永久不可达;同样 retry 切到 pending 后 graph 切 generating 期间丢锁也漏。统一补偿覆盖所有可能的中间/下游态;是否切 awaiting_review 用 RETURNING 判定"有没有真发生章节回滚",避免 start 早期阶段被错判成 awaiting_review |
 | **D-AX** | `wake_queued_projects` 中 `try_acquire` 返回 `already_active` / `stale_evicted` / 或 run 缺失 → **立即 UPDATE projects.status='failed'**(不再仅 `continue`);返回累计 woke_count 而非 0 | v3.7 异常 queued 项目 `continue` 后,`SELECT FOR UPDATE SKIP LOCKED` 是事务级行锁,事务 commit 后释放,**下一轮循环又取到同一个 project**,wake 死循环占着 WAKE_LOCK 30s。立即标 failed 让 SKIP LOCKED 跳过该行;woke_count 让调用方与监控能区分"队列空"与"全满" |
 | **D-AY** | DOCX task `max_tries=2 → 1`(与 D-Z 其他任务一致);`cleanup_stale_docx_jobs` 覆盖 **所有 in-flight 状态**(`pending` / `rendering_mermaid` / `pandoc`)而非仅 pending | `max_tries=2` 与现有"第一次失败立刻 UPDATE failed"实现冲突——arq 重试进来 SELECT 看到 failed 直接 return,等于无重试,徒增复杂度。统一为 1 次更简单;DOCX 失败本就让用户手动重新生成更符合产品行为(用户能看到错误再决定是否重试)。cleanup 范围扩展是 R12 的真正闭环 |
+| **D-AZ** | `_slot_lost_compensation` 接 `decision` 参数;**approve/skip → 章节回 awaiting_review**(决策有效但 update_state 没跑完,让用户重新提交一次);**revise / retry / start → 章节标 failed**(可能已开始重写);worker 入口对 approve/skip 也**不再切 generating**,只 revise 才切 | v3.8 worker 入口无条件把 reviewing → generating,但 approve/skip 实际不会"重写",`generating` 这个语义只对 revise 成立;同时 SlotLost 把 reviewing/retrying/pending/generating 全部标 failed 对 approve/skip 是过度补偿。按 decision 分流后语义对齐:状态机能讲清"approve/skip 走得是哪条路"|
+| **D-BA** | `_fail_project_and_run(project_id, run_id, error)` helper:三个 worker 顶层 generic exception 时**同时**写 Project.status='failed' 与 Run.status='failed' + finished_at + error;ChapterGenerationFailed / SlotLost **不动 Run**(章节级失败工作流仍可恢复)| `models.Run.status` 字段定义了 `running/done/failed/aborted` 但 v3.8 里 task crash 只写 Project,Run 永远停 running,审计 / 恢复看不到工作流真状态。同步后 Run 表能精准反映"本次 thread_id 执行结果",且 Run.error 比 errors.log 更便于查询(SQL 而不是文件检索)|
+| **D-BB** | `cleanup_stale_chapters` 用 `get_alive_project_ids()`(SET ∩ ALIVE_KEY 实存)排除而不是裸 `SMEMBERS ACTIVE_SET`;SQL 改 `r.project_id <> ALL(CAST(:active_ids AS int[]))` 显式 typed array | v3.8 直接排除 SET 全体,但 stale 自愈(D-AQ)有时间窗口,SET 里可能短暂含失效成员 → 那些项目的章节也被"误信任"跳过。改用真 alive 列表更精准。SQL CAST 防 SQLAlchemy/asyncpg 把 Python `[]` 错推断成 `text[]` 之类;空列表也安全(`<> ALL(ARRAY[]::int[])` 恒 true)|
+| **D-BC** | `test_docx_task_has_max_tries_1` 替换 v3.7 留下的 `_2`;断言 `mt == 1` | D-AY 改了实现但忘改测试,启动期断言会假报失败;同步修正 |
+| **D-BD** | `export_docx(... on_stage=callable)` 回调,`_export_docx_inner` 在 mermaid 完成 / pandoc 开始时调 `await on_stage("pandoc")`;`generate_docx_task` 实现 `_update_stage` 写 DocxJob.status='pandoc' | v3.8 定义了 `pandoc` 状态(模型 + cleanup SQL 都覆盖),但 task 实际只写到 `rendering_mermaid` 就直接调 export_docx,pandoc 状态从未被写入 → cleanup 永远扫不到真正卡 pandoc 的 job(因为它们仍是 rendering_mermaid),partial unique index 的语义也对不上。回调让生命周期和字段定义对齐,且 `_export_docx_inner` 内部 mermaid → pandoc 切换点是唯一精确锚点 |
+| **D-BE** | `services/llm.py` 主代码直接在 `call_llm_stream` 的重试 catch 块调 `_write_llm_error(project_id, ...)`,落 errors.log;§19.2 不再重复实现,只留对照说明 | v3.8 主代码 §11.1 只写 `log.warning`,errors.log 写入散在 §19.2 的"调用点"附录里,落地时极易漏写;FR-3.9 明确要求"重试日志记录到 errors.log"。合并到主代码避免实现分裂,保持需求 ↔ 实现一一可追溯 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -1897,32 +1903,29 @@ async def cleanup_stale_chapters(ctx) -> None:
     reviewing → awaiting_review(用户可重新提交审核)
     retrying  → failed(用户可重新点 retry)
 
-    ⚠️ D-AV 修正:**先取 ACTIVE_SET 排除有 alive reservation 的 project**。
+    ⚠️ D-AV 修正:**先取真 alive ids 排除有 alive reservation 的 project**。
     原因:API try_acquire 设的 RESERVE_TTL=300s,远大于 cleanup 的 60s 阈值。
     若 worker 启动延迟(arq 排队 / 重启)在 60s~300s 之间,章节会被本 cron 误回滚,
     但 Redis 里 slot 仍被持有 → cron 与 reservation 冲突。
-    修复:Redis 中 SET 成员所属 project 的章节**全部跳过**,信任 RESERVE_TTL 内
-    worker 会接管;若真没接管,300s 后 reconcile 把 ACTIVE_SET 清掉,本 cron 下一轮
-    自然能扫到这些章节并回滚。
+    修复:用 `get_alive_project_ids()`(SET ∩ ALIVE_KEY 实存)排除,**比直接排除
+    SET 成员更精准**(D-BB:防 stale 自愈窗口期间的成员被错算成 alive)。
+
+    ⚠️ D-BB 修正:SQL 用 `CAST(:active_ids AS int[])` 显式 typed array,
+    避免 SQLAlchemy/asyncpg 对 Python list → Postgres array 类型推断踩坑。
     """
-    # ⭐ 先取活跃 project ids
-    r = _r()
-    try:
-        active_members = await r.smembers(ACTIVE_SET)
-    finally:
-        await r.aclose()
-    active_ids = [int(m) for m in active_members] if active_members else []
+    # ⭐ D-BB:取真 alive(SET ∩ ALIVE_KEY)而不是整个 SET
+    active_ids = await get_alive_project_ids()
 
     async with session_factory() as s:
-        # 用 NOT EXISTS 排除"章节所属 run 的 project_id ∈ active_ids"
+        # 显式 typed array,空列表也安全(<> ALL(ARRAY[]::int[]) 恒 true)
         result = await s.execute(sa.text(
             f"""
             WITH stale AS (
-                SELECT c.id, c.status, r.project_id FROM chapters c
+                SELECT c.id, c.status FROM chapters c
                 JOIN runs r ON r.id = c.run_id
                 WHERE c.status IN ('reviewing','retrying')
                   AND c.processing_started_at < NOW() - INTERVAL '{STALE_CHAPTER_TIMEOUT_SECONDS} seconds'
-                  AND ({"r.project_id <> ALL(:active_ids)" if active_ids else "TRUE"})
+                  AND r.project_id <> ALL(CAST(:active_ids AS int[]))
             )
             UPDATE chapters c SET
                 status = CASE WHEN s.status='reviewing' THEN 'awaiting_review'
@@ -1935,7 +1938,7 @@ async def cleanup_stale_chapters(ctx) -> None:
             WHERE c.id = s.id
             RETURNING c.id, s.status AS old_status, c.status AS new_status
             """
-        ), {"active_ids": active_ids} if active_ids else {})
+        ), {"active_ids": active_ids})
         rows = result.fetchall()
         await s.commit()
     if rows:
@@ -2024,6 +2027,24 @@ async def reconcile_active_projects() -> list[int]:
             await r.srem(ACTIVE_SET, *zombies)
             log.warning("reconciled_zombie_projects", project_ids=zombies)
         return zombies
+    finally:
+        await r.aclose()
+
+
+async def get_alive_project_ids() -> list[int]:
+    """⭐ D-BB:返回当前真"alive"(SET 成员 + ALIVE_KEY 仍存在)的 project ids。
+    cleanup_stale_chapters 用它精准排除"有 worker 接管中"的项目,而不是排除整个
+    ACTIVE_SET(后者可能含 stale 成员,虽然 D-AQ 会自愈但仍有时间窗口)。"""
+    r = _r()
+    try:
+        members = await r.smembers(ACTIVE_SET)
+        if not members:
+            return []
+        async with r.pipeline(transaction=False) as p:
+            for pid in members:
+                p.exists(ALIVE_KEY.format(pid))
+            results = await p.execute()
+        return [int(pid) for pid, alive in zip(members, results) if alive]
     finally:
         await r.aclose()
 
@@ -2227,7 +2248,7 @@ async def start_workflow_task(ctx, *, project_id: int, run_id: int, thread_id: s
         # 没 generating 章节(还在 extract/outline 阶段)说明工作流刚起步,
         # 这种情况让 reconcile 标 failed(已有 cron 兜底)。
         await _slot_lost_compensation(project_id, run_id, current_chapter_id=None,
-                                      action="start")
+                                      action="start", decision=None)
         log.warning("start_workflow_task_aborted_slot_lost", project_id=project_id)
     except ChapterGenerationFailed as e:
         # ⭐ D-AU:章节级失败,不是 task 崩溃 — chapter 已被 write_chapter 节点
@@ -2245,7 +2266,8 @@ async def start_workflow_task(ctx, *, project_id: int, run_id: int, thread_id: s
                                run_id=run_id, thread_id=thread_id, traceback=tb)
         except Exception:
             log.exception("error_log_write_failed", project_id=project_id)
-        await _set_project_status(project_id, "failed")
+        # ⭐ D-BA:Run.status 与 Project.status 同步标 failed
+        await _fail_project_and_run(project_id, run_id, "start_workflow_task crashed")
         raise
     finally:
         await release_project_slot(project_id, token)
@@ -2268,24 +2290,28 @@ async def resume_review_task(ctx, *, project_id: int, run_id: int, thread_id: st
     if token is None:
         return
 
+    review_decision: str | None = None
     try:
-        # ⭐ D-AC:worker 入口写 ReviewEvent + 把章节状态从 'reviewing' 切到下游
+        # ⭐ D-AC + D-AZ:worker 入口写 ReviewEvent + 按 decision 切章节状态
         if reviewer_id is not None and chapter_id is not None:
             kind = (resume_payload or {}).get("kind")
             if kind == "chapter_review":
-                decision = resume_payload.get("decision")
+                review_decision = resume_payload.get("decision")
                 async with session_factory() as s:
                     s.add(ReviewEvent(
                         chapter_id=chapter_id, reviewer_id=reviewer_id,
-                        decision=decision,
+                        decision=review_decision,
                         feedback_text=resume_payload.get("feedback") or None,
                     ))
-                    # 章节状态从 'reviewing'(API 端切的中间态)→ 'generating'
-                    # update_state 节点会再切到最终的 approved/skipped/generating
-                    await s.execute(sa.text(
-                        "UPDATE chapters SET status='generating' "
-                        "WHERE id=:c AND status='reviewing'"
-                    ), {"c": chapter_id})
+                    # ⭐ D-AZ:approve/skip **不切 generating**,保持 reviewing 直到
+                    # update_state 节点切到最终的 approved/skipped(generating 语义是
+                    # "正在写章节",approve/skip 不写所以不该用这个状态);
+                    # 仅 revise 切 generating(下游 write_chapter 真的要重写)
+                    if review_decision == "revise":
+                        await s.execute(sa.text(
+                            "UPDATE chapters SET status='generating' "
+                            "WHERE id=:c AND status='reviewing'"
+                        ), {"c": chapter_id})
                     await s.commit()
 
         async with project_heartbeat(project_id, token) as lost_event:
@@ -2294,14 +2320,13 @@ async def resume_review_task(ctx, *, project_id: int, run_id: int, thread_id: st
                 if lost_event.is_set() or not await ensure_project_slot(project_id, token):
                     raise SlotLost(f"slot lost during resume, project_id={project_id}")
     except SlotLost:
-        # ⭐ D-AT + D-AW 补偿:SlotLost 时章节可能停在 reviewing(worker 还没切 generating)
-        # 也可能停在 generating(worker 已切但被打断);本 task 还可能跑过下一章
-        # write_chapter 也被打断,该下一章卡 generating。统一处理:
-        # 1. chapter_id(本次 review 触发的)若仍在 reviewing/generating → failed
-        # 2. run 下任何 generating 章节 → failed(覆盖 1 中的下一章场景)
-        # 3. project 切 awaiting_review(让用户能从 P5 retry)
+        # ⭐ D-AT + D-AW + D-AZ 补偿:把 decision 一起传入,让补偿区分语义
+        # - approve/skip:章节回 awaiting_review(决策有效但 update_state 还没跑完;
+        #                  让用户重提交一次,反正是同样的决策,语义安全);
+        # - revise / 其它(retry / start):章节标 failed(确实可能已开始重写)
+        # run 下所有 generating 章节统一标 failed(下一章场景)
         await _slot_lost_compensation(project_id, run_id, current_chapter_id=chapter_id,
-                                      action="resume")
+                                      action="resume", decision=review_decision)
         log.warning("resume_review_task_aborted_slot_lost", project_id=project_id)
     except ChapterGenerationFailed as e:
         # ⭐ D-AU:resume 期间生成下一章失败 — project 切 awaiting_review,
@@ -2317,7 +2342,8 @@ async def resume_review_task(ctx, *, project_id: int, run_id: int, thread_id: st
                                run_id=run_id, payload=resume_payload, traceback=tb)
         except Exception:
             log.exception("error_log_write_failed", project_id=project_id)
-        await _set_project_status(project_id, "failed")
+        # ⭐ D-BA:Run.status 同步,与 Project.status 一致
+        await _fail_project_and_run(project_id, run_id, "resume_review_task crashed")
         raise
     finally:
         await release_project_slot(project_id, token)
@@ -2361,11 +2387,9 @@ async def retry_failed_chapter_task(ctx, *, project_id: int, run_id: int, thread
                     raise SlotLost(f"slot lost during retry, project_id={project_id}")
     except SlotLost:
         # ⭐ D-AT + D-AW 补偿:retry 已把章节 reset 到 pending,graph.astream 期间
-        # 又切 generating;SlotLost 后任意一种状态都需要回滚到 failed,用户从 P5 看到
-        # failed 章节 + last_error,可再次 /retry。同样也要标 run 下任意 generating 章节,
-        # project 切 awaiting_review(让用户能继续操作而不是看到 silent failed)。
+        # 又切 generating;retry 语义就是"重写",SlotLost 时章节标 failed 让用户再 /retry。
         await _slot_lost_compensation(project_id, run_id, current_chapter_id=chapter_id,
-                                      action="retry")
+                                      action="retry", decision=None)
         log.warning("retry_failed_chapter_task_aborted_slot_lost", project_id=project_id)
     except ChapterGenerationFailed as e:
         # ⭐ D-AU:retry 期间再次失败 — 章节仍 failed,project 切 awaiting_review;不 raise
@@ -2380,7 +2404,8 @@ async def retry_failed_chapter_task(ctx, *, project_id: int, run_id: int, thread
                                run_id=run_id, chapter_index=chapter_index, traceback=tb)
         except Exception:
             log.exception("error_log_write_failed", project_id=project_id)
-        await _set_project_status(project_id, "failed")
+        # ⭐ D-BA:Run.status 与 Project.status 同步标 failed
+        await _fail_project_and_run(project_id, run_id, "retry_failed_chapter_task crashed")
         raise
     finally:
         await release_project_slot(project_id, token)
@@ -2439,35 +2464,49 @@ async def _project_dir(project_id: int) -> Path:
 
 async def _slot_lost_compensation(project_id: int, run_id: int,
                                   current_chapter_id: int | None,
-                                  action: str) -> None:
-    """⭐ D-AW:SlotLost 路径的统一补偿。
-    1. current_chapter_id(API 端切到 reviewing/retrying 的)幂等回滚到 failed
+                                  action: str,
+                                  decision: str | None = None) -> None:
+    """⭐ D-AW + D-AZ:SlotLost 路径的统一补偿。
+    1. current_chapter_id 按 decision 决定回滚到哪:
+       - approve / skip(D-AZ):决策已经下,只是 update_state 节点没跑完;
+         **回到 awaiting_review**(让用户重新提交一次,语义安全)
+       - revise / retry / start(无 decision 或 'revise'):**标 failed**
+         (可能已开始重写,内容半成品,标 failed 让用户能再 /retry)
     2. run 下任意 generating 章节也标 failed(覆盖"resume 期间生成下一章被打断"
        与"retry 跑起来后 graph 切到 generating 又被打断"两种场景)
     3. project 状态:
-       - 已进入章节循环(步 1 / 步 2 至少回滚了一行)→ 切 awaiting_review
-         (用户从 P5 看到 failed 章节并 /retry)
-       - 仍在 extract/outline 阶段(start action 且无任何回滚)→ 不动 project,
+       - 已进入章节循环(步 1 / 步 2 至少改动了一行)→ 切 awaiting_review
+       - 仍在 extract/outline 阶段(start action 且无任何改动)→ 不动 project,
          让 cron `reconcile_periodic` 标 failed(那是真项目级失败)
     """
     rolled_back = 0
     try:
         async with session_factory() as s:
             if current_chapter_id is not None:
-                # reviewing(resume 用)/ retrying(retry 用)/ pending(retry 已 reset
-                # 但被打断)/ generating(graph 已切到 write_chapter)→ 统一 failed
-                r1 = await s.execute(sa.text(
-                    "UPDATE chapters SET status='failed', "
-                    "processing_started_at=NULL, "
-                    "last_error=COALESCE(NULLIF(last_error,''),'') || "
-                    "  CASE WHEN COALESCE(last_error,'')='' THEN '' ELSE ' | ' END || "
-                    "  'slot lost during ' || :a "
-                    "WHERE id=:c "
-                    "AND status IN ('reviewing','retrying','pending','generating') "
-                    "RETURNING id"
-                ), {"c": current_chapter_id, "a": action})
+                if decision in ("approve", "skip"):
+                    # ⭐ D-AZ:approve/skip 不写,SlotLost 时回 awaiting_review
+                    # (let user re-submit;状态语义保持"待审核")
+                    r1 = await s.execute(sa.text(
+                        "UPDATE chapters SET status='awaiting_review', "
+                        "processing_started_at=NULL "
+                        "WHERE id=:c AND status='reviewing' "
+                        "RETURNING id"
+                    ), {"c": current_chapter_id})
+                else:
+                    # revise / retry / start:reviewing(还没切)/ retrying / pending
+                    # / generating(已切下游或重写中)→ 统一 failed
+                    r1 = await s.execute(sa.text(
+                        "UPDATE chapters SET status='failed', "
+                        "processing_started_at=NULL, "
+                        "last_error=COALESCE(NULLIF(last_error,''),'') || "
+                        "  CASE WHEN COALESCE(last_error,'')='' THEN '' ELSE ' | ' END || "
+                        "  'slot lost during ' || :a "
+                        "WHERE id=:c "
+                        "AND status IN ('reviewing','retrying','pending','generating') "
+                        "RETURNING id"
+                    ), {"c": current_chapter_id, "a": action})
                 rolled_back += len(r1.fetchall())
-            # 兜底:run 下其它正在生成中的章节(下一章场景)
+            # 兜底:run 下其它正在生成中的章节(下一章场景),不论 decision
             r2 = await s.execute(sa.text(
                 "UPDATE chapters SET status='failed', "
                 "processing_started_at=NULL, "
@@ -2480,7 +2519,7 @@ async def _slot_lost_compensation(project_id: int, run_id: int,
         log.exception("slot_lost_chapter_rollback_failed",
                       project_id=project_id, run_id=run_id)
 
-    # 决策 project 状态:有章节被回滚 → 已在 loop,切 awaiting_review;
+    # 决策 project 状态:有改动 → 已在 loop,切 awaiting_review;
     # 否则保持原样让 reconcile 标 failed(start 阶段卡 extract/outline)
     if rolled_back > 0:
         try:
@@ -2491,6 +2530,27 @@ async def _slot_lost_compensation(project_id: int, run_id: int,
         log.warning("slot_lost_no_chapter_rolled_back",
                     project_id=project_id, action=action,
                     hint="left for reconcile to mark failed")
+
+
+async def _fail_project_and_run(project_id: int, run_id: int, error: str) -> None:
+    """⭐ D-BA:task 顶层 generic exception 时,Project 与 Run 一起标 failed。
+    Run.error 字段最长 4000,截断保护;finished_at=NOW()。
+    幂等:Run 已经是 done/failed/aborted 时不动(WHERE status='running')。
+    """
+    try:
+        async with session_factory() as s:
+            await s.execute(sa.text(
+                "UPDATE projects SET status='failed' WHERE id=:p"
+            ), {"p": project_id})
+            await s.execute(sa.text(
+                "UPDATE runs SET status='failed', "
+                "finished_at=NOW(), error=:e "
+                "WHERE id=:r AND status='running'"
+            ), {"r": run_id, "e": error[:4000]})
+            await s.commit()
+    except Exception:
+        log.exception("fail_project_and_run_failed",
+                      project_id=project_id, run_id=run_id)
 ```
 
 > 注:模块顶部加 `import traceback`。`append_error` 在写日志失败时已自吞异常,但保险起见外层也包一层 try,确保异常路径不会因日志失败而二次崩溃。
@@ -2572,12 +2632,16 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 
 import litellm
+import sqlalchemy as sa
 import structlog
 from litellm.exceptions import RateLimitError, ServiceUnavailableError, APIConnectionError, Timeout
 
 from ..config import settings
+from ..core.error_log import append_error    # ⭐ D-BE:LLM 重试日志直接写 errors.log
+from ..db import session_factory
 from ..events.bus import event_bus
 from .token_usage import record_token_usage
 
@@ -2647,15 +2711,42 @@ async def call_llm_stream(
             except (RateLimitError, ServiceUnavailableError, APIConnectionError, Timeout) as e:
                 last_err = e
                 log.warning("llm_retry", model=model, attempt=attempt, error=str(e))
+                # ⭐ D-BE:把每次重试也写到 errors.log(FR-3.9 要求"重试日志记到 errors.log")
+                await _write_llm_error(project_id, f"LLM retry attempt={attempt}",
+                                       model=model,
+                                       error_type=type(e).__name__, error=str(e))
                 if attempt < settings.llm_retry_max:
                     await asyncio.sleep(backoffs[attempt])
                     continue
+                # 重试用尽,落"LLM exhausted"再抛
+                await _write_llm_error(project_id, "LLM exhausted",
+                                       model=model, total_attempts=attempt + 1,
+                                       last_error=str(e))
                 raise LLMRetryFailed(str(e)) from e
             except Exception:
                 # 4xx 等不重试
                 raise
 
     raise LLMRetryFailed(str(last_err))
+
+
+async def _llm_project_dir(project_id: int) -> Path:
+    """D-BE:取项目目录给 errors.log 用;查询失败返回 None,调用方需保护。"""
+    async with session_factory() as s:
+        row = await s.execute(
+            sa.text("SELECT dir_path FROM projects WHERE id=:p"), {"p": project_id},
+        )
+        return Path(row.scalar_one())
+
+
+async def _write_llm_error(project_id: int, message: str, **fields) -> None:
+    """⭐ D-BE:LLM 错误日志写入项目级 errors.log,失败永不传播。"""
+    try:
+        pdir = await _llm_project_dir(project_id)
+        await append_error(pdir, message, **fields)
+    except Exception:
+        log.exception("llm_error_log_write_failed",
+                      project_id=project_id, message=message)
 
 
 async def _do_stream(model, messages, api_key, user_id, project_id,
@@ -3097,11 +3188,17 @@ MERMAID_RE = re.compile(
 async def export_docx(
     *, markdown: str, project_dir: Path, project_name: str,
     reference_doc: Path, redis_url: str,
+    on_stage=None,   # ⭐ D-BD:可选回调,签名 async def on_stage(stage: str) -> None
 ) -> Path:
-    """串行化包装。返回最终 docx 路径(固定为 {project_dir}/proposal.docx)。"""
+    """串行化包装。返回最终 docx 路径(固定为 {project_dir}/proposal.docx)。
+
+    ⭐ D-BD:`on_stage` 回调让上层 task 在 mermaid 完成、进入 pandoc 阶段时
+    update DocxJob.status='pandoc',与 §8 status 字段定义对齐
+    (cleanup_stale_docx_jobs 也按这套状态扫)。"""
     async with _module_lock:  # 进程内,即时排队
         async with _redis_lock(redis_url):  # 跨进程(未来扩容)
-            return await _export_docx_inner(markdown, project_dir, reference_doc)
+            return await _export_docx_inner(markdown, project_dir, reference_doc,
+                                            on_stage=on_stage)
 
 
 @asynccontextmanager
@@ -3130,7 +3227,7 @@ async def _redis_lock(redis_url: str):
 
 
 async def _export_docx_inner(markdown: str, project_dir: Path,
-                             reference_doc: Path) -> Path:
+                             reference_doc: Path, *, on_stage=None) -> Path:
     work = project_dir / "docx-build"
     work.mkdir(parents=True, exist_ok=True)
 
@@ -3141,6 +3238,13 @@ async def _export_docx_inner(markdown: str, project_dir: Path,
     md_path.write_text(inlined, encoding="utf-8")
 
     out_path = project_dir / "proposal.docx"   # ⭐ D-L 固定缓存名
+
+    # ⭐ D-BD:mermaid 完毕,通知上层切 status='pandoc'
+    if on_stage is not None:
+        try:
+            await on_stage("pandoc")
+        except Exception:
+            log.exception("on_stage_pandoc_failed")
 
     # 2. pandoc 直转
     args = [
@@ -3320,6 +3424,15 @@ async def generate_docx_task(ctx, *, project_id: int, docx_job_id: int) -> dict:
         )
         await s.commit()
 
+    # ⭐ D-BD:回调让 export_docx 在 mermaid → pandoc 切换时通知本 task 更新 DB
+    async def _update_stage(stage: str) -> None:
+        async with session_factory() as s:
+            await s.execute(
+                sa.text("UPDATE docx_jobs SET status=:s WHERE id=:i"),
+                {"s": stage, "i": docx_job_id},
+            )
+            await s.commit()
+
     # 3. 真正执行(锁在 export_docx 内)
     try:
         out_path = await export_docx(
@@ -3328,6 +3441,7 @@ async def generate_docx_task(ctx, *, project_id: int, docx_job_id: int) -> dict:
             project_name=project_name,
             reference_doc=Path(settings.templates_dir) / "reference.docx",
             redis_url=settings.redis_url,
+            on_stage=_update_stage,
         )
     except Exception as e:
         async with session_factory() as s:
@@ -4988,7 +5102,7 @@ tests/integration/
 │   └── test_docx_export_caches_after_first_run
 └── test_worker_config.py             # ⭐ D-AJ 启动期断言
     ├── test_workflow_tasks_have_max_tries_1   # 三类 workflow task max_tries==1
-    ├── test_docx_task_has_max_tries_2          # generate_docx_task max_tries==2
+    ├── test_docx_task_has_max_tries_1         # generate_docx_task max_tries==1(D-AY)
     └── test_worker_functions_are_decorated     # WorkerSettings.functions 都是
                                                 # arq decorated 对象
 ```
@@ -5007,11 +5121,12 @@ def test_workflow_tasks_have_max_tries_1():
         assert mt == 1, f"{fn.__name__} max_tries should be 1, got {mt}"
 
 
-def test_docx_task_has_max_tries_2():
+def test_docx_task_has_max_tries_1():
+    """⭐ D-AY:DOCX 与其他 task 一致 max_tries=1"""
     from bid_app.worker.tasks import generate_docx_task
     mt = getattr(generate_docx_task, "max_tries", None) or \
          getattr(getattr(generate_docx_task, "__arq_function__", None), "max_tries", None)
-    assert mt == 2, f"generate_docx_task max_tries should be 2, got {mt}"
+    assert mt == 1, f"generate_docx_task max_tries should be 1, got {mt}"
 ```
 
 ### 18.4 状态机 e2e 测试模板
@@ -5149,35 +5264,10 @@ async def append_error(project_dir: Path, message: str, **fields) -> None:
 | `worker/tasks.py` 顶层 except | task 整体 crash | `task crashed`, task_name=..., trace=... |
 | `services/docx_export.py` | pandoc/mermaid 异常 | `docx export failed`, stage=..., stderr=... |
 
-LLM service 里的整合(对应 §11.1):
-
-```python
-# services/llm.py 内,在 catch 块加:
-from ..core.error_log import append_error
-from ..db import session_factory
-
-async def _project_dir(project_id: int) -> Path:
-    async with session_factory() as s:
-        row = await s.execute(
-            sa.text("SELECT dir_path FROM projects WHERE id=:p"), {"p": project_id},
-        )
-        return Path(row.scalar_one())
-
-# 在 call_llm_stream 的 except 中:
-except (RateLimitError, ServiceUnavailableError, APIConnectionError, Timeout) as e:
-    last_err = e
-    log.warning("llm_retry", model=model, attempt=attempt, error=str(e))
-    await append_error(await _project_dir(project_id),
-                       f"LLM retry attempt={attempt}",
-                       model=model, error_type=type(e).__name__, error=str(e))
-    if attempt < settings.llm_retry_max:
-        await asyncio.sleep(backoffs[attempt])
-        continue
-    await append_error(await _project_dir(project_id),
-                       "LLM exhausted",
-                       model=model, total_attempts=attempt + 1, last_error=str(e))
-    raise LLMRetryFailed(str(e)) from e
-```
+> ⭐ **D-BE**:`services/llm.py` 主代码已经直接在 `call_llm_stream` 的重试 catch 块里调
+> `_write_llm_error(...)`(见 §11.1),无需再单独整合 — 那是 v3.7 设计分裂的遗留,v3.9 已合并。
+> `worker/tasks.py` 顶层 `except Exception` 仍保留 `append_error(...)` 调用,职责区分:
+> LLM 服务层负责 `LLM retry` / `LLM exhausted`;worker 层负责 `task crashed` 整体堆栈。
 
 ### 19.3 Trace ID 注入
 
