@@ -96,15 +96,32 @@ export function DataExportPanel({
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" size="sm" onClick={handleCopyMarkdown}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleCopyMarkdown}
+            disabled={!markdown}
+          >
             <FileText className="mr-1.5 h-4 w-4" />
             复制 Markdown
           </Button>
-          <Button asChild variant="outline" size="sm">
-            <a href={downloadMarkdownUrl(projectId)} download>
-              <Download className="mr-1.5 h-4 w-4" />
-              下载 .md
-            </a>
+          <Button
+            asChild={!!markdown}
+            variant="outline"
+            size="sm"
+            disabled={!markdown}
+          >
+            {markdown ? (
+              <a href={downloadMarkdownUrl(projectId)} download>
+                <Download className="mr-1.5 h-4 w-4" />
+                下载 .md
+              </a>
+            ) : (
+              <span>
+                <Download className="mr-1.5 h-4 w-4" />
+                下载 .md
+              </span>
+            )}
           </Button>
           <Button
             size="sm"

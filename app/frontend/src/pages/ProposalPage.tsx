@@ -5,6 +5,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { MarkdownRenderer } from '@/lib/markdown'
 import { DataExportPanel } from '@/components/DataExportPanel'
 import { useProject, useProposalMarkdown } from '@/api/projects'
+import { ApiError } from '@/lib/apiFetch'
 
 export function ProposalPage() {
   const { id } = useParams<{ id: string }>()
@@ -73,7 +74,11 @@ export function ProposalPage() {
             <MarkdownRenderer markdown={proposal.data.markdown} />
           )}
           {!proposal.isLoading && !proposal.data && (
-            <p className="text-sm text-muted-foreground">暂无内容。</p>
+            <p className="text-sm text-muted-foreground">
+              {proposal.error instanceof ApiError && proposal.error.status === 404
+                ? '全文尚未生成。等所有章节通过审核后,assemble 节点会写入 proposal.md。'
+                : '暂无内容。'}
+            </p>
           )}
         </CardContent>
       </Card>
