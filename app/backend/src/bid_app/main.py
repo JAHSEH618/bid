@@ -1,15 +1,11 @@
-"""FastAPI app 骨架。完整路由 / middleware 在 M1-M3 增量挂载。
+"""FastAPI app 装配(§15)。
 
-本文件 M0 时只暴露:
-  - /health(简易版,后续 §15.4 改写为查 db + redis)
-  - lifespan 启动横幅(M5-4):打印默认 admin 警告 + master_key sha256 前缀
+M0 骨架 → M1 增量挂:health(§15.4)/ stream(§12.3)/ projects / chapters
+路由,以及 lifespan 内 redis pool。
+M2 / M3 继续挂 auth / me / admin / docx router 与中间件。
 
-后续:
-  - M1 注册 stream / projects / chapters / health(完整) router;
-        lifespan 内 LangGraph AsyncPostgresSaver setup(§17.2)
-  - M2 注册 auth / me / admin router、SecurityHeaders / SlowAPI middleware
-  - M3 注册 docx router
-  - 末尾 SPA fallback(§15.6)
+⚠️ ``app.state.redis``(异步 redis client)在 lifespan 启动时实例化,
+``api/health.py`` 用 ``request.app.state.redis.ping()`` 检测连通。
 """
 from __future__ import annotations
 
@@ -18,8 +14,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from hashlib import sha256
 
+import redis.asyncio as redis_async
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 
 from bid_app.config import settings
 
@@ -62,18 +58,30 @@ def _print_startup_banner() -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期。
 
-    M0:仅启动横幅(M5-4)。
-    M1:在 yield 之前 append LangGraph checkpointer setup / db pool 初始化等。
-    M2/M3:可继续在 yield 前 / yield 后 append shutdown 逻辑(关 redis / db pool)。
-    后续扩展时,**保持启动横幅在最前**。
+    顺序:
+      1. 启动横幅(M5-4)— 必须在最前
+      2. redis async client 实例化挂 ``app.state.redis``(/health 用,M1)
+      3. (M1+) LangGraph AsyncPostgresSaver setup
+      4. (M2/M3) 继续 append
     """
     _print_startup_banner()
+
+    redis_client = redis_async.from_url(settings.redis_url, decode_responses=True)
+    app.state.redis = redis_client
+
     # M1+ 在此 append:
     # await checkpointer.setup()
     # ...
-    yield
-    # M1+ 在此 append shutdown:
-    # await checkpointer.close()
+
+    try:
+        yield
+    finally:
+        try:
+            await redis_client.aclose()
+        except Exception:
+            pass
+        # M1+ 在此 append shutdown:
+        # await checkpointer.close()
 
 
 app = FastAPI(
@@ -86,7 +94,12 @@ app = FastAPI(
 )
 
 
-@app.get("/health", include_in_schema=False)
-async def health_skeleton() -> JSONResponse:
-    """M0 占位 health。M1 §15.4 用 db + redis 真实查询版本覆盖。"""
-    return JSONResponse({"app": "ok", "port": settings.app_port})
+# === 路由挂载(M1) ===
+# 顺序无关紧要,但保持业务 API 集中,health 在最前。
+from bid_app.api import health as _health_router  # noqa: E402
+from bid_app.api import stream as _stream_router  # noqa: E402
+
+app.include_router(_health_router.router)
+app.include_router(_stream_router.router)
+# M1-7 / M1-9:projects / chapters router 在 #14 / #13 挂
+# M2 / M3:auth / me / admin / docx router 后续挂
