@@ -1,0 +1,80 @@
+# 生产用 compose:app + postgres + redis
+# 参考 IMPLEMENTATION_SPEC §17.3
+# 关键决策:
+#   - 单一 .env(D-R):由 scripts/gen-secrets.sh 从 .env.example seed 生成,
+#     compose 项目根读这一份 .env 做 ${VAR} 插值;不用 service env_file 列表
+#   - 宿主机 bind mount 而非 named volume:NFR-2 要求路径可见 / 备份直接 cp,
+#     运维 ls /var/lib/bid-app/projects/ 即能看到项目文件
+#   - 不引入 nginx:由 uvicorn 直接 serve 12123,前端 dist 由 main.py 静态挂
+#   - postgres-data 必须属于 uid=999(postgres 镜像 user);scripts/install.sh
+#     会处理 chown
+
+services:
+  app:
+    build:
+      context: .
+    image: bid-app:latest
+    container_name: bid-app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-12123}:12123"
+    env_file: .env       # 单一文件;由 scripts/gen-secrets.sh 生成最终版本(无占位符)
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    volumes:
+      - /var/lib/bid-app/projects:/var/lib/bid-app/projects
+      - /var/lib/bid-app/backups:/var/lib/bid-app/backups
+      - /etc/localtime:/etc/localtime:ro
+    networks: [bid-net]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:12123/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: bid-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: Asia/Shanghai
+    volumes:
+      - /var/lib/bid-app/postgres-data:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
+      # D-DS / D-EA:首启 init script 创建测试库 ${POSTGRES_DB}_test;
+      # postgres 镜像在 /docker-entrypoint-initdb.d/ 下的 *.sql / *.sh
+      # 仅在数据卷为空时执行(首次创建数据库),无重复创建风险。
+      # 已有数据卷的环境必须手动跑 ./scripts/create-test-db.sh(D-DV)
+      - ./docker/init-test-db.sh:/docker-entrypoint-initdb.d/10-init-test-db.sh:ro
+    networks: [bid-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      retries: 6
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=50"]
+
+  redis:
+    image: redis:7-alpine
+    container_name: bid-redis
+    restart: unless-stopped
+    # D-V:noeviction 而不是 allkeys-lru。Redis 同时承载 arq 队列 / 并发名额 SET /
+    # 登录锁 / SSE pub/sub / limiter 计数;LRU 会无声驱逐这些关键 key,导致 silent 故障。
+    # noeviction 在内存满时让写入失败,触发监控告警,问题暴露明确。
+    # appendonly=yes 让重启后队列与 SET 不丢。
+    command: redis-server --maxmemory 200mb --maxmemory-policy noeviction --appendonly yes
+    volumes:
+      - /var/lib/bid-app/redis-data:/data
+      - /etc/localtime:/etc/localtime:ro
+    networks: [bid-net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 6
+
+networks:
+  bid-net:
