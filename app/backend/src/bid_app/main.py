@@ -113,14 +113,18 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
-# === 路由挂载(M1) ===
+# === 路由挂载(M1 + M2) ===
+from bid_app.api import auth as _auth_router  # noqa: E402
 from bid_app.api import chapters as _chapters_router  # noqa: E402
 from bid_app.api import health as _health_router  # noqa: E402
+from bid_app.api import me as _me_router  # noqa: E402
 from bid_app.api import projects as _projects_router  # noqa: E402
 from bid_app.api import stream as _stream_router  # noqa: E402
 
 app.include_router(_health_router.router)
+app.include_router(_auth_router.router)
+app.include_router(_me_router.router)
 app.include_router(_stream_router.router)
 app.include_router(_projects_router.router)
 app.include_router(_chapters_router.router)
-# M2 / M3:auth / me / admin / docx router 后续挂
+# M3:docx router 后续挂
