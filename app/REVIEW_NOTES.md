@@ -378,12 +378,59 @@
 
 > 等任务 #27 完成。
 
-### REVIEW-4(待解锁)
+### REVIEW-4(M5 部署)— 2026-05-03
 
-> 等任务 #31 完成。最后写 `app/ACCEPTANCE_AUDIT.md`。
+审查范围:M5 commits `2b7e001` / `292e974` / `8e6adaa` / `c80441e`。**§23 整体走查推到任务 #37**(本轮只看 M5 部署交付物的代码 / 配置正确性)。
+
+#### 🔴 严重问题(已 SendMessage devops-lead)
+
+1. **uv.lock 缺失,`docker build` 立刻失败**(`Dockerfile:54` `COPY backend/uv.lock` + `:55` `uv sync --frozen`)
+   - **现状**:`app/backend/uv.lock` 不存在,`.gitignore` 也没有忽略它。
+   - **影响**:`docker compose build` 在 COPY 阶段直接抛"file not found";`scripts/install.sh` 跑到第 [4/6] 步退出。M5 验收"fresh Linux 30 分钟"无法成立。
+   - **修复**:`cd app/backend && uv lock` 生成并 commit `uv.lock`。
+   - **责任**:本身是 backend M0 的产物,但 Dockerfile 假设它存在 — devops-lead 与 backend-lead 协作。
+
+2. **`scripts/restore-backup.sh` 灾难恢复顺序错误,落到 alembic 迁移过的 DB → 冲突 / 数据腐蚀**(`scripts/restore-backup.sh:75-94`)
+   - **现状**:顺序是 stop app → drop db → create db → **start app(触发 entrypoint:pg_isready + alembic upgrade head + supervisord)** → exec app pg_restore。
+   - **问题**:`docker compose start app` 在第 89 行触发 entrypoint.sh 把空数据库做 `alembic upgrade head`,创建全部 schema;紧接着 pg_restore 在 91 行从 dump(custom format,含 `CREATE TABLE / CREATE INDEX / CREATE SEQUENCE` 等)恢复 — 与已存在 schema 全冲突。
+   - **影响**:不带 `--clean / --if-exists` 时 `pg_restore` 默认逐对象报错;不进事务时 `COPY` 偶尔成功 + DDL 全失败 = 半完整库 + `alembic_version` 行可能重叠;基本无法可靠恢复。spec §24.2 明确 "停 app → drop db → create db → pg_restore → 起 app"(restore 落空库,起 app 后 entrypoint 看到 alembic_version 已是头版,不再 migrate)。
+   - **修复方案 A(推荐)**:让 `postgres` 服务本身做 pg_restore(postgres:16-alpine 自带 `pg_restore`)。给 postgres service 加 `/var/lib/bid-app/backups:/backups:ro` 挂载,然后 `docker compose exec -T postgres pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" /backups/<dump>`。最后再 `start app`。
+   - **修复方案 B**:用 `docker compose run --rm --entrypoint /app/backend/.venv/bin/pg_restore app -h postgres ...` 一次性容器,绕过 entrypoint.sh 的 alembic;再 `start app`。
+
+#### ✅ 通过项
+
+- **Dockerfile**:多阶段(frontend-builder + runtime)结构正确;依赖装齐(pandoc / chromium / fonts-noto-cjk + extra / nodejs / npm / supervisor / cron / **postgresql-client-16**);mmdc 11.4.0;mermaid 三个配置文件 COPY 到 `/etc/`;cron 已写 `0 3 * * * root . /etc/bid-app.env && /usr/local/bin/pg-backup.sh`;ENTRYPOINT entrypoint.sh + CMD supervisord -n。
+- **entrypoint.sh**:顺序符合 D-O — 写 `/etc/bid-app.env`(给 cron) → 等 postgres 60 次 → `alembic upgrade head` 同步 → `exec "$@"` 起 supervisord;不再 `service cron start`(避免与 supervisord 双进程争 pidfile)。
+- **supervisord.conf**:`nodaemon=true`;[uvicorn] / [arq-worker] / [program:cron] 三程序;stopwaitsecs 合理(uvicorn 10s / arq-worker 30s);stdout/stderr → /dev/fd/1 配合 docker logs。
+- **docker-compose.yml**:bind mount `/var/lib/bid-app/{projects,backups,postgres-data,redis-data}`(NFR-2);`env_file: .env`(D-R 单一文件);postgres 16-alpine + healthcheck `pg_isready` + `init-test-db.sh` 挂到 `/docker-entrypoint-initdb.d/10-init-test-db.sh:ro`(D-DS / D-EA);redis 7-alpine + `--maxmemory-policy noeviction --appendonly yes`(D-V);depends_on `service_healthy`;app healthcheck `/health`。
+- **docker-compose.dev.yml**:仅 db + redis(后端 / 前端 / arq 在宿主机跑);本地数据卷 `./.dev-data/` 与生产 `/var/lib/bid-app/` 隔离;init-test-db.sh 同样挂载。
+- **init-test-db.sh**(D-DS)+ **scripts/create-test-db.sh**(D-DV):分流明确,init 脚本含"非幂等,空卷首启才执行,已有卷必须手动跑 create-test-db.sh"的注释;create-test-db.sh `SELECT 1 FROM pg_database` 显式幂等检查 + 自动从 `.env` 加载 + macOS / Ubuntu psql 安装提示。
+- **scripts/install.sh**:校验 docker / docker compose / python3;EUID!=0 时透明走 sudo;mkdir + chown(`postgres-data` 999:999 / `redis-data` 999:999 / `projects` `backups` 1000:1000);`.env` 已在则跳过;`docker compose build` + `up -d` + 等 healthcheck 5 分钟;末尾 R10 警告。
+- **scripts/gen-secrets.sh**:从 `.env.example` `cp` 到 `.env`;**拒绝覆盖已存在 .env**;Python `secrets.token_hex(32)` / `token_urlsafe(24)` 生成;sed 占位符替换 + `chmod 600` + 自检无残留 `__GENERATE_ME__ / __64_HEX_CHARS__`;输出 master_key 前 8 位 + R10 警告。
+- **scripts/restore-backup.sh**:二次确认(交互式 yes / `FORCE=1`);自动加载 `.env`;`pg_restore --list` 预校验 dump 可读;但**核心顺序有 ISSUE-3**(见上)。
+- **docker/pg-backup.sh**:从 `/etc/bid-app.env` 取环境;`pg_dump -F c` 写 `.partial → mv` 原子提交;7 天滚动 `find -mtime +7 -delete`。
+- **.env.example**:R10 警告醒目;包含所有 §6 字段(POSTGRES_* / REDIS_URL / BID_APP_MASTER_KEY / JWT_SECRET / 默认 admin / LLM 模型 / 业务参数 / 路径 / 日志);**不**写 `DATABASE_URL=postgresql+asyncpg://${VAR}/...`(D-W,DSN 由 config.py 拼)。
+- **README.md**:一键部署 / 本地开发 / 测试库初始化(D-EA / D-DV 分流表)/ 部署运维 / 备份恢复 / master_key 轮换 / 数据卷布局 / 健康检查 / 升级流程,链接全部 §章节;R10 警告完整 prominent。
+- **main.py 启动横幅**(M5-4):lifespan async context manager 调用 `_print_startup_banner()`,纯叠加 — 不修改其它逻辑。banner 含端口 / 默认 admin/admin123 警告 / `BID_APP_MASTER_KEY` sha256 前 16 字节 / R10 提醒;所有 print `flush=True file=sys.stdout`(supervisord stdout_logfile=/dev/fd/1 能转发到 docker logs)。
+- **mermaid configs**(`docker/mermaid-config.json` / `puppeteer-config.json` / `mermaid.css`):字体 `Noto Sans CJK SC`;chromium executablePath / `--no-sandbox` 等四个参数;CSS `* { font-family: ...; !important }`。三件套与 §13.2 一致。
+
+#### 🟡 非阻塞建议(留作 nitpick,不发 SendMessage)
+
+- `entrypoint.sh:10-13` 的 `for v in ... BACKUPS_DIR TZ`,`set -u` 下若 `.env` 未含 `BACKUPS_DIR` 则 entrypoint 直接 abort。`.env.example` 已含,正常路径无问题;但若用户精简 `.env` 删了该行,容器死循环。可考虑 `${var:-}` 默认值或 `set +u` 局部包裹。
+- `scripts/install.sh:73` 给 `redis-data` chown 999:999 — spec §17.3 line 5677 只说 postgres-data:999。redis:7-alpine 实际也是 uid 999,chown 不会出错;但与 spec 文字不严格一致。建议更新 spec 或保留为防御。
+- `docker-compose.yml` 假设 compose 项目根 = `app/`(因为 `.env` 在那里)。如果运维用 `docker compose -f app/docker-compose.yml` 从仓库根跑,compose 会读仓库根 `.env`,`${POSTGRES_PASSWORD}` 等不会被插值,postgres 容器起不来。README.md / install.sh 都已让用户 `cd app/`,正常路径 OK。但可在 README "升级流程"段加一句 `cd app/` 提醒。
+- `seed-admin-user.sh` / `seed-test-key.sh`:依赖 `bid_app.models.user.User` / `bid_app.core.crypto.encrypt_api_key`,这些是 M1 / M2 才落地的模块,M5 阶段直接跑会 ImportError。脚本里已有 except 提示,**不算 bug**(forward-compat 给 M1 用)。
+
+### ACCEPTANCE-AUDIT(任务 #37,待全 milestone 完成)
+
+> 等所有里程碑完成后,写 `app/ACCEPTANCE_AUDIT.md` 走查 §23 23 个 checkbox。
 
 ---
 
 ## Non-blocking review notes(累积)
 
 > 实际审查中发现的 nitpick 累积在此(不通过 SendMessage 发回);每条标注里程碑 + 文件路径 + 简述。
+
+- M5 / `docker/entrypoint.sh:10-13`:`set -u` 下 `BACKUPS_DIR` 未设会让 entrypoint abort。
+- M5 / `scripts/install.sh:73`:redis-data chown 999:999 是防御性的(spec 未要求,但与 redis:7-alpine 实际 uid 一致)。
+- M5 / `docker-compose.yml`:依赖 compose 项目根 = `app/`,跨目录调用会 break `${VAR}` 插值。
