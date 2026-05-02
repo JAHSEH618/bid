@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.21
+# 投标技术方案生成器 · 实施 Spec v3.22
 
 > **配套文档**:`REQUIREMENTS.md` v0.12(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.21 (2026-05-02)。基于 v3.20 修了 3 处测试可执行性 / 顺序不变量:**`project_factory` 默认创建 done Run**(`generate_docx_task` 入口 SELECT done Run 才往下跑,fixture 不带 Run 让所有 D-CH/D-CX 用例先撞 RuntimeError,D-DD) / **OSError 测试补 `proposal.md`**(否则 §13.3 missing 检查先 raise,根本走不到 unlink,D-DE) / **新增顺序不变量测试**(spy session.execute + Path.unlink,断 `UPDATE status='rendering_mermaid'` 在 `unlink(stale)` 之前,锁死 D-CU 与 D-BX 链路核心顺序,D-DF)。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.21 累计 116 处。
+> **版本**:v3.22 (2026-05-02)。基于 v3.21 修了 3 处测试可执行性细节:**conftest 加 `mock_redis_lock` fixture**(把 `_redis_lock` 替换成 no-op asynccontextmanager,让直接调 `generate_docx_task` 的四个用例无需真实 Redis,D-DG) / **`project_factory` 单事务 flush/commit**(原"commit → refresh → add Run → commit"在默认 `expire_on_commit=True` 下让 p 进 expired,async lazy-load 失败;改 `add → flush → 可选 add(Run) → 单次 commit → refresh`,D-DH) / **§18.5 标题同步**(加 D-DD/D-DE/D-DF/D-DG/D-DH 标签,D-DI)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.22 累计 119 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -227,6 +227,9 @@
 | **D-DD** | `project_factory` 加 `create_done_run: bool = True` 参数,默认创建一条 `Run(status='done', langgraph_thread_id=th_xxx, started_at=now, finished_at=now)`;conftest.py 顶部补 `from datetime import datetime, timezone` 与 `from bid_app.models import Run` | `generate_docx_task` 入口前置:`SELECT id FROM runs WHERE project_id=:p AND status='done'`,没 Run 就 RuntimeError("no completed run")。v3.20 fixture 只建 Project 不建 Run,所有直接调 task 的用例(test_on_stage_rowcount_zero / test_new_job_unlinks_stale / test_unlink_oserror_marks)在到达 unlink 之前就报错,D-CU 测试失效。让 fixture 默认产出"DOCX 可生成所必需的最小项目状态"是最贴近 P6 真实入口前置的写法 |
 | **D-DE** | `test_unlink_oserror_marks_job_failed_and_skips_render` 在 docx_job_factory 之后加一行 `(Path(project.dir_path) / "proposal.md").write_text("# t\\n", encoding="utf-8")` | 即便补了 D-DD 的 done Run,§13.3 还有第二道前置:`if not md_path.exists(): raise RuntimeError("proposal.md missing")`。这条 raise 早于 D-CU 的 unlink 触发,导致 OSError 路径根本没被验证。补 proposal.md 让 task 能走到 D-CU 那一步真触发 OSError |
 | **D-DF** | 新增 `test_unlink_happens_after_rendering_status_update`:① monkeypatch `bid_app.worker.tasks.session_factory` 用 `_SessionSpy` 包装,捕捉 `UPDATE ... rendering_mermaid` 那条 SQL;② monkeypatch `Path.unlink` 记录 stale 路径删除;③ 断 `call_log.index("update_rendering_mermaid") < call_log.index("unlink_stale")` | D-DA 已经断 `unlink_stale < mmdc < pandoc`,但还没直接验证 D-CU 的核心顺序保证 — UPDATE 状态切换必须在 unlink 之前。这个顺序是 D-CU + D-BX 链路的关键:状态前置(WHERE status='pending')保证只有当前 task 切到 rendering,切换之后再 unlink 才不会被 pending 阶段竞态的多个 task 误触发。直接 spy session.execute 锁死这一不变量,后续重构若调换两步顺序立刻被测试捕获 |
+| **D-DG** | conftest.py 加 `mock_redis_lock` fixture:`monkeypatch.setattr("bid_app.services.docx_export._redis_lock", _no_redis_lock)`,no-op asynccontextmanager;四个直接调 `generate_docx_task` 的 D-CX/D-DA/D-DB/D-DF 用例都 use 这个 fixture | `export_docx` 串行化包装在 `_module_lock`(asyncio.Lock,同进程 OK)之后还有 `_redis_lock`(`redis.asyncio.from_url + r.lock(...)`,需要真实 Redis)。直接调 task 的测试只 fake 了 subprocess,没 fake Redis lock,在没真实 Redis 的 CI 环境会卡在 `r.ping()` / `lock.acquire()` 上,根本走不到 mermaid / on_stage / pandoc / unlink 等核心断言。单独抽 fixture 让 use 它的用例语义清晰(任何不需要真 Redis 的 task 单测都加上)|
+| **D-DH** | `project_factory` 改成"单事务 add → flush → 可选 add(Run) → 单次 commit → refresh(p)";原"commit → refresh → add(Run) → commit"双 commit 路径在 SQLAlchemy 默认 `expire_on_commit=True` 下让 p 在第二次 commit 时进 expired 状态,返回后访问 `p.id` / `p.dir_path` 触发 async lazy-load 在已关闭 session 上失败 | session_factory 没显式配 `expire_on_commit=False` 时(spec 也没明确配),double commit 必出 detached/lazy-load 问题。flush 拿到 p.id 之后 add Run + 单次 commit,语义干净 + 无 expire 风险;refresh 在 commit 后单次拿全字段,后续返回的 p 在 detached 状态下也能直接读(因为已经 hydrated)|
+| **D-DI** | §18.5 标题在 v3.20 加完 D-DA/D-DB 后,v3.21/v3.22 的 D-DD/D-DE/D-DF/D-DG/D-DH 都没补;统一改成"汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH)";test_docx.py 头注释同步 | 标题与节内容长期错位会让人误以为某些决策没回归用例覆盖。一次性把 v3.20-v3.22 加的标签都同步进标题,后续维护只需在新增决策时同步即可 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -5853,7 +5856,7 @@ async def test_chapter_failed_after_3_retries(client, db_engine, monkeypatch):
     assert chapter.status == "approved"
 ```
 
-### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB)
+### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH)
 
 **conftest.py 必备 fixture**(D-CR:测试代码依赖,需在 conftest.py 落地):
 
@@ -5922,6 +5925,10 @@ async def project_factory(tmp_path, user_factory):
         if "created_by" not in overrides:
             owner = await user_factory()
             overrides["created_by"] = owner.id
+        # ⭐ D-DH:单事务 add → flush → 可选 add(Run) → 单次 commit → refresh。
+        # 原写法是"commit → refresh → add(Run) → commit",第二次 commit 在
+        # `expire_on_commit=True` 默认下会让 p 进 expired 状态,返回后访问
+        # p.id / p.dir_path 触发 async lazy-load 在 detached session 上失败。
         async with session_factory() as s:
             p = Project(
                 name=overrides.pop("name", "t"),
@@ -5930,18 +5937,17 @@ async def project_factory(tmp_path, user_factory):
                 **overrides,
             )
             s.add(p)
-            await s.commit()
-            await s.refresh(p)
+            await s.flush()         # 拿 p.id,行未 commit
             if create_done_run:
                 now = datetime.now(timezone.utc)
-                r = Run(
+                s.add(Run(
                     project_id=p.id,
                     langgraph_thread_id=f"th_{uuid.uuid4().hex[:16]}",
                     started_at=now, finished_at=now,
                     status="done",
-                )
-                s.add(r)
-                await s.commit()
+                ))
+            await s.commit()
+            await s.refresh(p)      # 一次 commit 后 refresh 拿全字段,无 expire 风险
             return p
     return _make
 
@@ -5961,6 +5967,25 @@ async def docx_job_factory():
     return _make
 
 
+@pytest.fixture
+def mock_redis_lock(monkeypatch):
+    """⭐ D-DG:把 services/docx_export.py 的 `_redis_lock` 替换成 no-op
+    asynccontextmanager;让直接调 `generate_docx_task` 的测试不需要真实 Redis。
+
+    `export_docx` 内部 `async with _module_lock` 用的是同进程 asyncio.Lock,
+    测试无需 fake;真正会卡测试的是 `_redis_lock` 内部 `redis.asyncio.from_url`。
+    用例只要 `mock_redis_lock` 作为 fixture 参数即可启用。
+    """
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _no_redis_lock(*a, **kw):
+        yield
+    monkeypatch.setattr(
+        "bid_app.services.docx_export._redis_lock", _no_redis_lock,
+    )
+
+
 @pytest_asyncio.fixture
 async def auth_client(user_factory):
     """⭐ D-CR + D-CW:override get_current_user 跳过鉴权;httpx >= 0.28
@@ -5976,7 +6001,7 @@ async def auth_client(user_factory):
 **回归用例**(`tests/integration/test_docx.py`):
 
 ```python
-# tests/integration/test_docx.py — D-CH/D-CL/D-CR/D-CS/D-CX/D-DA/D-DB 可执行用例
+# tests/integration/test_docx.py — D-CH/D-CL/D-CR/D-CS/D-CX/D-DA/D-DB/D-DF/D-DG 可执行用例
 import asyncio                            # ⭐ D-CR:create_subprocess_exec 用得到
 import uuid
 
@@ -5990,7 +6015,7 @@ from bid_app.models import DocxJob
 
 @pytest.mark.asyncio
 async def test_on_stage_rowcount_zero_raises_stale_and_skips_pandoc(
-    db, project_factory, docx_job_factory, monkeypatch, tmp_path,
+    db, project_factory, docx_job_factory, monkeypatch, tmp_path, mock_redis_lock,
 ):
     """⭐ D-BX + D-CB + D-CL:**测试触发点是 on_stage 切 pandoc 那一刻**,
     cleanup 在那个瞬间把 status 从 rendering_mermaid 抢标 failed → on_stage 抛
@@ -6184,7 +6209,7 @@ async def test_commit_done_skips_when_invalidated_and_unlinks_final(
 
 @pytest.mark.asyncio
 async def test_new_job_unlinks_stale_final_at_rendering(
-    db, project_factory, docx_job_factory, monkeypatch, tmp_path,
+    db, project_factory, docx_job_factory, monkeypatch, tmp_path, mock_redis_lock,
 ):
     """⭐ D-CX(D-DA 修正版):验证 D-CU 正常路径 —
     旧 proposal.docx 残留时,新 job 切到 rendering_mermaid 后必须立即 unlink,
@@ -6259,7 +6284,7 @@ async def test_new_job_unlinks_stale_final_at_rendering(
 
 @pytest.mark.asyncio
 async def test_unlink_oserror_marks_job_failed_and_skips_render(
-    db, project_factory, docx_job_factory, monkeypatch,
+    db, project_factory, docx_job_factory, monkeypatch, mock_redis_lock,
 ):
     """⭐ D-CX:验证 D-CU 失败路径 — unlink 抛 OSError(权限/挂载只读),
     job 必须被标 failed,mermaid/pandoc 都不再启动。"""
@@ -6302,7 +6327,7 @@ async def test_unlink_oserror_marks_job_failed_and_skips_render(
 
 @pytest.mark.asyncio
 async def test_unlink_happens_after_rendering_status_update(
-    db, project_factory, docx_job_factory, monkeypatch,
+    db, project_factory, docx_job_factory, monkeypatch, mock_redis_lock,
 ):
     """⭐ D-DF:锁死 D-CU 顺序不变量 — UPDATE status='rendering_mermaid' 必须
     在 Path.unlink(stale_final_path) 之前执行。
