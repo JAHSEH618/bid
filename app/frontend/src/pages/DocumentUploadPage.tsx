@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, FileText, Upload, Trash2, Play } from 'lucide-react'
+import { ArrowLeft, FileText, Upload, Play } from 'lucide-react'
 import {
   Card,
   CardContent,
@@ -11,7 +11,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
-  useProjectDetail,
+  useProject,
   useStartProject,
   useUploadDocument,
 } from '@/api/projects'
@@ -28,12 +28,12 @@ const KIND_META: Record<
     description: '招标方发布的技术需求文档(必传)',
     required: true,
   },
-  scoring_rules: {
+  scoring: {
     label: '评分细则',
     description: '评标办法 / 商务+技术分布(必传)',
     required: true,
   },
-  reference_doc: {
+  template: {
     label: '方案模板 / 历史方案',
     description: '本公司历史中标方案或参考模板(可选)',
     required: false,
@@ -50,26 +50,38 @@ export function DocumentUploadPage() {
   const projectId = Number(id)
   const navigate = useNavigate()
   const { toast } = useToast()
-  const detail = useProjectDetail(projectId)
-  const upload = useUploadDocument()
+  const project = useProject(projectId)
   const start = useStartProject()
 
-  const docs = detail.data?.documents ?? []
-  const project = detail.data?.project
+  // 后端 M1 阶段没有 GET /documents 列表;本页用本地 state 跟踪本会话的上传记录。
+  // 刷新会丢失,可接受(导航后已经走到下一页)。后端补 GET 端点后切真查询。
+  const [uploadedByKind, setUploadedByKind] = useState<
+    Partial<Record<DocumentKind, DocumentDTO>>
+  >({})
 
-  const techSpec = docs.find((d) => d.kind === 'tech_spec')
-  const scoring = docs.find((d) => d.kind === 'scoring_rules')
+  // 项目详情拉到后,如果状态已经过 init(说明之前已上传过且 /start 过)就跳走避免重复上传。
+  useEffect(() => {
+    if (project.data && project.data.status !== 'init') {
+      navigate(`/projects/${projectId}/outline`, { replace: true })
+    }
+  }, [project.data, navigate, projectId])
+
+  const techSpec = uploadedByKind.tech_spec
+  const scoring = uploadedByKind.scoring
 
   const canStart = Boolean(
-    techSpec && scoring && project && project.status === 'init',
+    techSpec && scoring && project.data && project.data.status === 'init',
   )
 
   const handleStart = async () => {
-    if (!projectId || !canStart) return
+    if (!projectId || !canStart || !project.data) return
     try {
       const res = await start.mutateAsync({
         projectId,
-        body: { pages_per_chapter: 3, max_retry_per_chapter: 3 },
+        body: {
+          pages_per_chapter: project.data.pages_per_chapter,
+          max_retry_per_chapter: project.data.max_retry_per_chapter,
+        },
       })
       if (res.queued) {
         toast({
@@ -82,22 +94,19 @@ export function DocumentUploadPage() {
       }
       navigate(`/projects/${projectId}/outline`)
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '启动失败')
-          : '启动失败'
+      const msg = readError(err, '启动失败')
       toast({ title: '启动失败', description: msg, variant: 'destructive' })
     }
   }
 
-  if (detail.isLoading) {
+  if (project.isLoading) {
     return (
       <div className="container py-12 text-sm text-muted-foreground">
         加载中…
       </div>
     )
   }
-  if (!project) {
+  if (!project.data) {
     return (
       <div className="container py-12 text-sm text-destructive">
         项目不存在或无访问权限
@@ -115,24 +124,25 @@ export function DocumentUploadPage() {
       </Button>
 
       <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">{project.name}</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {project.data.name}
+        </h1>
         <p className="text-sm text-muted-foreground">
-          上传招标文档。仅支持 .docx / .doc / .md / .txt,单文件 ≤ 50MB。PDF 不支持。
+          上传招标文档。仅支持 .docx / .doc / .md / .txt,单文件 ≤ 50MB。
         </p>
       </header>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {(['tech_spec', 'scoring_rules', 'reference_doc'] as DocumentKind[]).map(
+        {(['tech_spec', 'scoring', 'template'] as DocumentKind[]).map(
           (kind) => (
             <UploadSlot
               key={kind}
               kind={kind}
               projectId={projectId}
-              existing={docs.find((d) => d.kind === kind)}
-              onUploaded={() => {
-                upload.reset()
-                detail.refetch()
-              }}
+              existing={uploadedByKind[kind]}
+              onUploaded={(doc) =>
+                setUploadedByKind((prev) => ({ ...prev, [kind]: doc }))
+              }
             />
           ),
         )}
@@ -157,7 +167,7 @@ function UploadSlot({
   kind: DocumentKind
   projectId: number
   existing: DocumentDTO | undefined
-  onUploaded: () => void
+  onUploaded: (doc: DocumentDTO) => void
 }) {
   const meta = KIND_META[kind]
   const fileRef = useRef<HTMLInputElement>(null)
@@ -182,14 +192,18 @@ function UploadSlot({
     }
     setError(null)
     try {
-      await upload.mutateAsync({ projectId, kind, file })
+      const doc = await upload.mutateAsync({ projectId, kind, file })
       toast({ title: `${meta.label} 已上传`, variant: 'success' })
-      onUploaded()
+      if (doc.extract_error) {
+        toast({
+          title: '抽取失败',
+          description: `已落盘但 markitdown 提取失败:${doc.extract_error}`,
+          variant: 'warning',
+        })
+      }
+      onUploaded(doc)
     } catch (err) {
-      const msg =
-        err instanceof ApiError && typeof err.body === 'object' && err.body
-          ? ((err.body as { detail?: string }).detail ?? '上传失败')
-          : '上传失败'
+      const msg = readError(err, '上传失败')
       setError(msg)
       toast({ title: '上传失败', description: msg, variant: 'destructive' })
     }
@@ -219,27 +233,28 @@ function UploadSlot({
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-sm">
               <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <span className="line-clamp-1 flex-1">{existing.filename}</span>
+              <span className="line-clamp-1 flex-1">
+                {existing.original_filename}
+              </span>
             </div>
             <p className="text-xs text-muted-foreground">
-              {(existing.size_bytes / 1024).toFixed(1)} KB ·{' '}
-              {new Date(existing.uploaded_at).toLocaleString('zh-CN')}
+              {(existing.file_size / 1024).toFixed(1)} KB
+              {existing.extract_error && (
+                <span className="ml-2 text-destructive">
+                  · 抽取失败
+                </span>
+              )}
             </p>
-            <div className="flex gap-1.5">
-              <Button
-                variant="outline"
-                size="sm"
-                className="flex-1"
-                onClick={handlePick}
-                disabled={upload.isPending}
-              >
-                <Upload className="mr-1 h-3.5 w-3.5" />
-                替换
-              </Button>
-              <Button variant="ghost" size="sm" disabled>
-                <Trash2 className="h-3.5 w-3.5" />
-              </Button>
-            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={handlePick}
+              disabled={upload.isPending}
+            >
+              <Upload className="mr-1 h-3.5 w-3.5" />
+              替换
+            </Button>
           </div>
         ) : (
           <Button
@@ -263,4 +278,11 @@ function UploadSlot({
       </CardContent>
     </Card>
   )
+}
+
+function readError(err: unknown, fallback: string): string {
+  if (err instanceof ApiError && typeof err.body === 'object' && err.body) {
+    return (err.body as { detail?: string }).detail ?? fallback
+  }
+  return fallback
 }

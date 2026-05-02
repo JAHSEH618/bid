@@ -26,7 +26,12 @@ export function ReviewActions({
 
   const canReview = status === 'awaiting_review'
   const canRetry = status === 'failed'
-  const writing = status === 'writing' || status === 'pending'
+  // FR-4.7:reviewing / retrying / generating / pending 期间禁用三按钮
+  const writing =
+    status === 'generating' ||
+    status === 'pending' ||
+    status === 'reviewing' ||
+    status === 'retrying'
 
   const handle = async (decision: ReviewDecision) => {
     if (!onReview || !canReview || busy) return

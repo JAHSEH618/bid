@@ -1,25 +1,32 @@
-// 项目相关 API hooks。具体 body schema 等 #14 / #13 落地后回填。
+// 项目相关 API hooks。端点契约对齐 backend api/projects.py(M1-7 commit 2a189d1)+
+// chapters.py(M1-9 commit 44e974c)。
 //
-// 端点参考 IMPLEMENTATION_SPEC §15.1 + §15.2:
-//   - GET    /api/projects                列表
-//   - POST   /api/projects                新建
-//   - GET    /api/projects/{id}           详情(含 chapters / outline / documents)
-//   - DELETE /api/projects/{id}           删除(creator / admin)
-//   - POST   /api/projects/{id}/start     启动(快照 API Key)
-//   - POST   /api/projects/{id}/documents 上传文档(multipart/form-data)
-//   - PUT    /api/projects/{id}/outline   提纲确认
-//   - GET    /api/projects/{id}/proposal  完整 markdown(D-D / §15.2)
-//   - GET    /api/projects/{id}/proposal.md  下载 markdown
-import {
-  useQuery,
-  useMutation,
-  useQueryClient,
-} from '@tanstack/react-query'
+// 端点:
+//   - GET    /api/projects                       list[Project]
+//   - POST   /api/projects                       Project(201)
+//   - GET    /api/projects/{id}                  Project
+//   - DELETE /api/projects/{id}                  {ok: true}
+//   - POST   /api/projects/{id}/start            {run_id, queued}
+//   - POST   /api/projects/{id}/documents        Document(multipart kind=tech_spec/scoring/template + file)
+//   - GET    /api/projects/{id}/outline          OutlineResponse(含 chapters[] 完整状态)
+//   - PUT    /api/projects/{id}/outline          {ok: true}
+//   - GET    /api/projects/{id}/proposal         ProposalResponse
+//   - GET    /api/projects/{id}/proposal.md      file response
+//
+// 注意:
+//   - 后端无 GET /documents 列表;DocumentUploadPage 用 invalidate +
+//     当前内存中的上传响应组合显示。如未来后端加 GET 端点再切。
+//   - 后端无独立 GET /chapters 列表;chapter 列表来自 /outline.chapters。
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/apiFetch'
 import type {
+  DocumentDTO,
+  DocumentKind,
+  OutlineChapterIn,
+  OutlineResponseDTO,
   ProjectDTO,
-  ProjectDetailDTO,
-  OutlineChapter,
+  ProposalResponseDTO,
+  StartResponseDTO,
 } from '@/lib/types'
 
 const PROJECTS_KEY = ['projects'] as const
@@ -31,17 +38,28 @@ export function useProjects() {
   })
 }
 
-export function useProjectDetail(projectId: number | null) {
+export function useProject(projectId: number | null) {
   return useQuery({
-    queryKey: ['projects', projectId, 'detail'],
+    queryKey: ['projects', projectId],
+    queryFn: () => apiFetch<ProjectDTO>(`/api/projects/${projectId}`),
+    enabled: projectId != null,
+  })
+}
+
+export function useProjectOutline(projectId: number | null) {
+  return useQuery({
+    queryKey: ['projects', projectId, 'outline'],
     queryFn: () =>
-      apiFetch<ProjectDetailDTO>(`/api/projects/${projectId}`),
+      apiFetch<OutlineResponseDTO>(`/api/projects/${projectId}/outline`),
     enabled: projectId != null,
   })
 }
 
 export interface CreateProjectPayload {
   name: string
+  description?: string | null
+  pages_per_chapter?: number
+  max_retry_per_chapter?: number
 }
 
 export function useCreateProject() {
@@ -62,7 +80,9 @@ export function useDeleteProject() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (projectId: number) =>
-      apiFetch(`/api/projects/${projectId}`, { method: 'DELETE' }),
+      apiFetch<{ ok: boolean }>(`/api/projects/${projectId}`, {
+        method: 'DELETE',
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: PROJECTS_KEY })
     },
@@ -84,13 +104,13 @@ export function useStartProject() {
       projectId: number
       body: StartProjectPayload
     }) =>
-      apiFetch<{ run_id: number; queued: boolean }>(
-        `/api/projects/${projectId}/start`,
-        {
-          method: 'POST',
-          body: JSON.stringify(body),
-        },
-      ),
+      apiFetch<StartResponseDTO>(`/api/projects/${projectId}/start`, {
+        method: 'POST',
+        body: JSON.stringify({
+          pages_per_chapter: body.pages_per_chapter ?? 3,
+          max_retry_per_chapter: body.max_retry_per_chapter ?? 3,
+        }),
+      }),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })
     },
@@ -106,13 +126,13 @@ export function useUploadDocument() {
       file,
     }: {
       projectId: number
-      kind: 'tech_spec' | 'scoring_rules' | 'reference_doc'
+      kind: DocumentKind
       file: File
     }) => {
       const fd = new FormData()
       fd.append('kind', kind)
       fd.append('file', file)
-      return apiFetch(`/api/projects/${projectId}/documents`, {
+      return apiFetch<DocumentDTO>(`/api/projects/${projectId}/documents`, {
         method: 'POST',
         body: fd,
       })
@@ -124,7 +144,7 @@ export function useUploadDocument() {
 }
 
 export interface ConfirmOutlinePayload {
-  chapters: OutlineChapter[] | null
+  chapters: OutlineChapterIn[]
 }
 
 export function useConfirmOutline() {
@@ -135,9 +155,9 @@ export function useConfirmOutline() {
       chapters,
     }: {
       projectId: number
-      chapters: OutlineChapter[] | null
+      chapters: OutlineChapterIn[]
     }) =>
-      apiFetch(`/api/projects/${projectId}/outline`, {
+      apiFetch<{ ok: boolean }>(`/api/projects/${projectId}/outline`, {
         method: 'PUT',
         body: JSON.stringify({ chapters }),
       }),
@@ -151,7 +171,7 @@ export function useProposalMarkdown(projectId: number | null) {
   return useQuery({
     queryKey: ['projects', projectId, 'proposal'],
     queryFn: () =>
-      apiFetch<{ markdown: string }>(`/api/projects/${projectId}/proposal`),
+      apiFetch<ProposalResponseDTO>(`/api/projects/${projectId}/proposal`),
     enabled: projectId != null,
   })
 }

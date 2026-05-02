@@ -1,25 +1,30 @@
 import { useEffect, useRef } from 'react'
 import { isMockEnabled, MockProjectEventSource } from '@/lib/mock'
 
-// SSE 事件类型对齐 IMPLEMENTATION_SPEC §16.3 + REQUIREMENTS FR-3.5。
-// 字段细节(payload schema)在 #11 后端 stream 实现完成后再补,这里只锁顶层结构。
+// SSE 事件类型对齐 backend api/stream.py(M1-8 commit 7dca873)。
+// 服务端帧:
+//   · `event: ready` 紧跟订阅成功(订阅前用 addEventListener 才能听到,onmessage 不响应)
+//   · `data: {...}\n\n` 业务事件:type 字段 ∈ 下列枚举
+//   · `: ping\n\n` 每 20s 心跳,浏览器自动忽略
 export type ProjectEventType =
+  | 'outline_ready'
   | 'chapter_started'
+  | 'chapter_picked'
   | 'chapter_token'
-  | 'chapter_ready'
+  | 'chapter_visuals_ready'
   | 'awaiting_review'
   | 'chapter_failed'
   | 'chapter_approved'
   | 'chapter_skipped'
-  | 'outline_ready'
+  | 'chapter_max_retry_skip'
   | 'proposal_ready'
   | 'error'
-  | 'ping'
 
 export interface ProjectEvent {
   type: ProjectEventType
   chapter_index?: number
   delta?: string
+  chapter_text?: string
   payload?: unknown
 }
 

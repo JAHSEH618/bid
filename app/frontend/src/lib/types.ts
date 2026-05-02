@@ -1,4 +1,5 @@
-// 与 backend Pydantic schemas 对齐的 TypeScript 类型(IMPLEMENTATION_SPEC §15 / REQUIREMENTS §9)
+// 与 backend Pydantic schemas / SQLAlchemy 模型对齐的 TypeScript 类型。
+// 字段名与 IMPLEMENTATION_SPEC §15 + 后端 schemas/projects.py / schemas/chapters.py 一致。
 
 export type UserRole = 'admin' | 'user'
 
@@ -11,9 +12,9 @@ export interface UserDTO {
   created_at: string
 }
 
-// REQUIREMENTS FR-1.2:`init` → `extracting` → `outlining` → `outline_ready`
-// → `running` → `awaiting_review` → ... → `done` / `failed` / `aborted`;
-// 旁路 `queued`(FR-1.3 D-T 并发等位)。
+// REQUIREMENTS FR-1.2 + 后端 models/project.py:
+//   init → extracting → outlining → outline_ready → running → awaiting_review
+//   → ... → done / failed / aborted;旁路 queued(FR-1.3 D-T)。
 export type ProjectStatus =
   | 'init'
   | 'queued'
@@ -26,39 +27,92 @@ export type ProjectStatus =
   | 'failed'
   | 'aborted'
 
+// 与后端 ProjectResponse(schemas/projects.py)对齐。
+//   - 没有 current_index / total_chapters(由前端从 /outline 派生)
+//   - 没有 updated_at(只有 created_at)
 export interface ProjectDTO {
   id: number
   name: string
-  description?: string | null
+  description: string | null
   status: ProjectStatus
-  current_index: number
-  total_chapters: number
   created_by: number
-  created_by_username?: string
-  api_key_owner?: number | null
+  api_key_owner: number | null
+  dir_path: string
+  pages_per_chapter: number
+  max_retry_per_chapter: number
   created_at: string
-  updated_at: string
 }
 
+// 后端 models/chapter.py:
+//   pending | generating | awaiting_review | reviewing | approved | skipped | failed | retrying
+// reviewing / retrying 是中间态(FR-4.7),前端按钮按此禁用。
 export type ChapterStatus =
   | 'pending'
-  | 'writing'
+  | 'generating'
   | 'awaiting_review'
+  | 'reviewing'
   | 'approved'
   | 'skipped'
   | 'failed'
+  | 'retrying'
 
-export interface ChapterDTO {
-  id: number
-  project_id: number
-  index: number
+// /outline 返回的章节(陈述 ID 是字符串 'ch_01' 形式;index 是数字)。
+export interface OutlineChapterDTO {
+  id: string
   title: string
+  summary: string | null
+  key_points: string[]
+  target_pages: number
+  index: number
   status: ChapterStatus
-  retry_count: number
-  final_text: string | null
-  current_version_id: number | null
 }
 
+// /outline 整体响应。
+export interface OutlineResponseDTO {
+  project_id: number
+  run_id: number | null
+  status: ProjectStatus
+  chapters: OutlineChapterDTO[]
+}
+
+// /outline PUT body 中的章节(用户编辑后)。
+export interface OutlineChapterIn {
+  id?: string | null
+  title: string
+  summary?: string | null
+  key_points: string[]
+  target_pages: number
+  matched_scoring_items?: string[]
+}
+
+// 文档 kind 与后端 _VALID_DOC_KINDS 完全一致。
+export type DocumentKind = 'tech_spec' | 'scoring' | 'template'
+
+// 后端 DocumentUploadResponse;list 端点暂未提供(等 backend 补,见 ListDocs 注释)。
+export interface DocumentDTO {
+  id: number
+  project_id: number
+  kind: DocumentKind
+  original_filename: string
+  file_size: number
+  extract_error: string | null
+}
+
+// /proposal 返回。
+export interface ProposalResponseDTO {
+  project_id: number
+  status: ProjectStatus
+  markdown: string
+  chars: number
+}
+
+// /start 返回。
+export interface StartResponseDTO {
+  run_id: number
+  queued: boolean
+}
+
+// 章节版本(M2/REVIEW-2 暂未提供端点,前端在 mock 兼容,真 API 上线后再接)。
 export interface ChapterVersionDTO {
   id: number
   chapter_id: number
@@ -68,38 +122,8 @@ export interface ChapterVersionDTO {
   created_at: string
 }
 
-export type DocumentKind = 'tech_spec' | 'scoring_rules' | 'reference_doc'
-
-export interface DocumentDTO {
-  id: number
-  project_id: number
-  filename: string
-  kind: DocumentKind
-  size_bytes: number
-  uploaded_at: string
-}
-
-export interface OutlineChapter {
-  index: number
-  title: string
-  description?: string
-}
-
-export interface OutlineDTO {
-  chapters: OutlineChapter[]
-}
-
-export interface ProjectDetailDTO {
-  project: ProjectDTO
-  chapters: ChapterDTO[]
-  documents: DocumentDTO[]
-  outline: OutlineDTO | null
-  current_index: number
-}
-
-// 对外业务状态(D-CG / D-CN):in-flight 状态(pending / rendering_mermaid /
-// pandoc / finalizing)经后端映射为 `processing` 暴露;`invalidated` 显式终态,
-// 表示 markdown 重生后旧 DOCX 被作废。
+// DOCX 状态:in-flight 后端映射为 processing,invalidated 由 assemble 标记(D-CG)。
+// 端点未在 M3 上线前暂留前端类型不变。
 export type DocxJobStatus =
   | 'pending'
   | 'processing'

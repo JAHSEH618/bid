@@ -2,20 +2,12 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, History } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
 import { ChapterSidebar } from '@/components/ChapterSidebar'
 import { ChapterPreview } from '@/components/ChapterPreview'
 import { ReviewActions } from '@/components/ReviewActions'
-import { MarkdownRenderer } from '@/lib/markdown'
-import { useProjectDetail } from '@/api/projects'
-import { useChapterVersions, useReviewChapter, useRetryChapter } from '@/api/chapters'
+import { useProject, useProjectOutline } from '@/api/projects'
+import { useReviewChapter, useRetryChapter } from '@/api/chapters'
 import { useProjectStream, type ProjectEvent } from '@/hooks/useSSE'
 import { useToast } from '@/hooks/useToast'
 import { ApiError } from '@/lib/apiFetch'
@@ -24,58 +16,80 @@ import type { ReviewDecision } from '@/lib/types'
 export function ChapterReviewPage() {
   const { id } = useParams<{ id: string }>()
   const projectId = Number(id)
-  const detail = useProjectDetail(projectId)
+  const project = useProject(projectId)
+  const outline = useProjectOutline(projectId)
   const review = useReviewChapter()
   const retry = useRetryChapter()
   const { toast } = useToast()
 
-  const project = detail.data?.project
-  const chapters = detail.data?.chapters ?? []
+  const chapters = outline.data?.chapters ?? []
 
-  // 当前章节:优先看后端 current_index;允许用户在侧栏点击切换。
+  // 当前章节:首选第一个 awaiting_review;否则首个非 approved/skipped;否则 0。
   const [activeIndex, setActiveIndex] = useState<number>(0)
   useEffect(() => {
-    if (detail.data) {
-      setActiveIndex(detail.data.current_index)
+    if (!outline.data) return
+    const awaiting = chapters.find((c) => c.status === 'awaiting_review')
+    if (awaiting) {
+      setActiveIndex(awaiting.index)
+      return
     }
-  }, [detail.data])
+    const inflight = chapters.find(
+      (c) =>
+        c.status !== 'approved' && c.status !== 'skipped' && c.status !== 'failed',
+    )
+    if (inflight) setActiveIndex(inflight.index)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outline.data?.run_id])
 
   // 流式 token 缓冲。chapter_index !== activeIndex 时不显示。
+  // awaiting_review 事件携带 chapter_text(完整正文),用作落地 markdown。
   const [streaming, setStreaming] = useState<{ index: number; text: string }>({
     index: -1,
     text: '',
   })
+  const [readyText, setReadyText] = useState<Record<number, string>>({})
 
   useProjectStream(projectId, (e: ProjectEvent) => {
-    if (e.type === 'chapter_started') {
+    if (e.type === 'chapter_started' || e.type === 'chapter_picked') {
       setStreaming({ index: e.chapter_index ?? -1, text: '' })
-      detail.refetch()
+      project.refetch()
+      outline.refetch()
     } else if (e.type === 'chapter_token' && e.chapter_index === activeIndex) {
       setStreaming((prev) =>
         prev.index === e.chapter_index
           ? { ...prev, text: prev.text + (e.delta ?? '') }
           : { index: e.chapter_index ?? -1, text: e.delta ?? '' },
       )
+    } else if (e.type === 'awaiting_review') {
+      // backend 在 awaiting_review payload 里附 chapter_text(M1-8 spec)
+      const idx = e.chapter_index ?? -1
+      if (e.chapter_text) {
+        setReadyText((prev) => ({ ...prev, [idx]: e.chapter_text! }))
+      }
+      setStreaming({ index: -1, text: '' })
+      outline.refetch()
+      toast({
+        title: `第 ${idx + 1} 章待审核`,
+        variant: 'info',
+      })
     } else if (
-      e.type === 'chapter_ready' ||
-      e.type === 'awaiting_review' ||
       e.type === 'chapter_approved' ||
       e.type === 'chapter_skipped' ||
-      e.type === 'chapter_failed'
+      e.type === 'chapter_max_retry_skip'
     ) {
       setStreaming({ index: -1, text: '' })
-      detail.refetch()
-      if (e.type === 'awaiting_review') {
-        toast({ title: `第 ${(e.chapter_index ?? 0) + 1} 章待审核`, variant: 'info' })
-      }
-      if (e.type === 'chapter_failed') {
-        toast({
-          title: `第 ${(e.chapter_index ?? 0) + 1} 章生成失败`,
-          variant: 'destructive',
-        })
-      }
+      outline.refetch()
+    } else if (e.type === 'chapter_failed') {
+      setStreaming({ index: -1, text: '' })
+      outline.refetch()
+      toast({
+        title: `第 ${(e.chapter_index ?? 0) + 1} 章生成失败`,
+        variant: 'destructive',
+      })
+    } else if (e.type === 'chapter_visuals_ready') {
+      // 可视化建议已就绪,这里不做特殊处理(章节正文流仍由 awaiting_review 触发)
     } else if (e.type === 'proposal_ready') {
-      detail.refetch()
+      project.refetch()
       toast({ title: '全文已生成', variant: 'success' })
     } else if (e.type === 'error') {
       toast({ title: '工作流错误', variant: 'destructive' })
@@ -83,11 +97,12 @@ export function ChapterReviewPage() {
   })
 
   const activeChapter = chapters.find((c) => c.index === activeIndex)
-  const isStreaming = streaming.index === activeIndex && streaming.text.length > 0
+  const isStreaming =
+    streaming.index === activeIndex && streaming.text.length > 0
   const previewMarkdown =
     isStreaming && streaming.index === activeIndex
       ? streaming.text
-      : (activeChapter?.final_text ?? '')
+      : (readyText[activeIndex] ?? '')
 
   const submitReview = async (
     decision: ReviewDecision,
@@ -135,14 +150,14 @@ export function ChapterReviewPage() {
     }
   }
 
-  if (detail.isLoading) {
+  if (project.isLoading || outline.isLoading) {
     return (
       <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
         加载中…
       </div>
     )
   }
-  if (!project) {
+  if (!project.data) {
     return (
       <div className="container py-12 text-sm text-destructive">
         项目不存在或无访问权限
@@ -168,7 +183,7 @@ export function ChapterReviewPage() {
             </Button>
             <div>
               <h1 className="text-base font-semibold leading-tight">
-                {project.name}
+                {project.data.name}
               </h1>
               <p className="text-xs text-muted-foreground">
                 第 {activeIndex + 1} 章 / {chapters.length}
@@ -181,7 +196,7 @@ export function ChapterReviewPage() {
               </p>
             </div>
           </div>
-          {project.status === 'done' && (
+          {project.data.status === 'done' && (
             <Button asChild size="sm">
               <Link to={`/projects/${projectId}/proposal`}>查看全文</Link>
             </Button>
@@ -205,10 +220,9 @@ export function ChapterReviewPage() {
                 />
               </TabsContent>
               <TabsContent value="versions">
-                <VersionList
-                  projectId={projectId}
-                  chapterIndex={activeChapter.index}
-                />
+                <p className="text-sm text-muted-foreground">
+                  本期后端尚未提供历史版本端点。重写后请等待新内容自然涌入。
+                </p>
               </TabsContent>
             </Tabs>
           ) : (
@@ -222,50 +236,6 @@ export function ChapterReviewPage() {
           onRetry={submitRetry}
         />
       </main>
-    </div>
-  )
-}
-
-function VersionList({
-  projectId,
-  chapterIndex,
-}: {
-  projectId: number
-  chapterIndex: number
-}) {
-  const versions = useChapterVersions(projectId, chapterIndex)
-
-  if (versions.isLoading) {
-    return (
-      <p className="text-sm text-muted-foreground">加载历史版本…</p>
-    )
-  }
-  if (!versions.data || versions.data.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground">暂无历史版本。</p>
-    )
-  }
-  return (
-    <div className="space-y-3">
-      {versions.data.map((v) => (
-        <Card key={v.id}>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm">第 {v.version} 版</CardTitle>
-            <Badge variant="outline" className="text-[10px]">
-              {new Date(v.created_at).toLocaleString('zh-CN')}
-            </Badge>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {v.feedback && (
-              <p className="rounded-md bg-amber-50 p-3 text-xs text-amber-900">
-                <strong className="mr-2">审核反馈:</strong>
-                {v.feedback}
-              </p>
-            )}
-            <MarkdownRenderer markdown={v.text} className="text-sm" />
-          </CardContent>
-        </Card>
-      ))}
     </div>
   )
 }

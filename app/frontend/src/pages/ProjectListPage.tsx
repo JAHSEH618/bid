@@ -106,10 +106,6 @@ export function ProjectListPage() {
         {projects.data?.map((p) => {
           const canDelete =
             me?.role === 'admin' || me?.id === p.created_by
-          const progress =
-            p.total_chapters > 0
-              ? Math.round((p.current_index / p.total_chapters) * 100)
-              : 0
           return (
             <Card
               key={p.id}
@@ -133,30 +129,11 @@ export function ProjectListPage() {
               </CardHeader>
               <CardContent className="space-y-3 text-xs text-muted-foreground">
                 <div className="flex items-center justify-between">
+                  <span>创建者 #{p.created_by}</span>
                   <span>
-                    创建者:
-                    {p.created_by_username ?? `#${p.created_by}`}
-                  </span>
-                  <span>
-                    {new Date(p.updated_at).toLocaleDateString('zh-CN')}
+                    {new Date(p.created_at).toLocaleDateString('zh-CN')}
                   </span>
                 </div>
-                {p.total_chapters > 0 && (
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span>
-                        进度 {p.current_index}/{p.total_chapters}
-                      </span>
-                      <span>{progress}%</span>
-                    </div>
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                      <div
-                        className="h-full bg-primary transition-all"
-                        style={{ width: `${progress}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
                 <div
                   className="flex items-center justify-end gap-1"
                   onClick={(e) => e.stopPropagation()}

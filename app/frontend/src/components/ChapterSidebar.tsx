@@ -1,14 +1,16 @@
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
-import type { ChapterDTO, ChapterStatus } from '@/lib/types'
+import type { ChapterStatus, OutlineChapterDTO } from '@/lib/types'
 
 const STATUS_LABEL: Record<ChapterStatus, string> = {
   pending: '待生成',
-  writing: '生成中',
+  generating: '生成中',
   awaiting_review: '待审核',
+  reviewing: '审核中',
   approved: '已通过',
   skipped: '已跳过',
   failed: '失败',
+  retrying: '重试中',
 }
 
 const STATUS_VARIANT: Record<
@@ -16,15 +18,23 @@ const STATUS_VARIANT: Record<
   'secondary' | 'info' | 'warning' | 'success' | 'outline' | 'destructive'
 > = {
   pending: 'secondary',
-  writing: 'info',
+  generating: 'info',
   awaiting_review: 'warning',
+  reviewing: 'info',
   approved: 'success',
   skipped: 'outline',
   failed: 'destructive',
+  retrying: 'info',
+}
+
+// retry_count 不在 OutlineChapterDTO 中,通过 derivedRetry 可选透传(M1 后端
+// /outline 不返回 retry_count;前端只在 mock 或 future schema 拿到时显示)。
+export interface ChapterSidebarItem extends OutlineChapterDTO {
+  retry_count?: number
 }
 
 export interface ChapterSidebarProps {
-  chapters: ChapterDTO[]
+  chapters: ChapterSidebarItem[]
   currentIndex: number
   onSelect?: (index: number) => void
 }
@@ -78,7 +88,7 @@ export function ChapterSidebar({
                     >
                       {STATUS_LABEL[ch.status]}
                     </Badge>
-                    {ch.retry_count > 0 && (
+                    {ch.retry_count != null && ch.retry_count > 0 && (
                       <span className="text-[10px] text-muted-foreground">
                         × {ch.retry_count} 次
                       </span>
