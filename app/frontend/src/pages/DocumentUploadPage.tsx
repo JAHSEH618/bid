@@ -106,10 +106,13 @@ export function DocumentUploadPage() {
       </div>
     )
   }
-  if (!project.data) {
+  if (project.isError || !project.data) {
     return (
-      <div className="container py-12 text-sm text-destructive">
-        项目不存在或无访问权限
+      <div className="container py-12 space-y-3 text-sm text-destructive">
+        <p>项目不存在或无访问权限</p>
+        <Button asChild variant="outline" size="sm">
+          <Link to="/">返回项目列表</Link>
+        </Button>
       </div>
     )
   }
@@ -129,6 +132,7 @@ export function DocumentUploadPage() {
         </h1>
         <p className="text-sm text-muted-foreground">
           上传招标文档。仅支持 .docx / .doc / .md / .txt,单文件 ≤ 50MB。
+          请在上传完成后立即点击「启动工作流」——刷新页面会丢失上传记录(已落库,但本页不再展示)。
         </p>
       </header>
 
@@ -148,7 +152,12 @@ export function DocumentUploadPage() {
         )}
       </div>
 
-      <div className="flex items-center justify-end">
+      <div className="flex items-center justify-end gap-3">
+        {!canStart && project.data.status === 'init' && (
+          <p className="text-xs text-muted-foreground">
+            上传「技术需求书」与「评分细则」后可启动
+          </p>
+        )}
         <Button onClick={handleStart} disabled={!canStart || start.isPending}>
           <Play className="mr-1 h-4 w-4" />
           {start.isPending ? '启动中…' : '启动工作流'}

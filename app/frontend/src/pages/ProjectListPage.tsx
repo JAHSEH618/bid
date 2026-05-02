@@ -66,8 +66,20 @@ export function ProjectListPage() {
   }
 
   const goToProject = (p: ProjectDTO) => {
+    // FR-1.2 状态机:
+    //   init → 还没上传 → /upload
+    //   queued / extracting / outlining → 后台跑 → /outline 等就绪
+    //   outline_ready → /outline 让用户确认
+    //   running / awaiting_review → /review
+    //   done → /proposal
+    //   failed / aborted → /review 看哪个章节失败 / 重试入口
     if (p.status === 'init') navigate(`/projects/${p.id}/upload`)
-    else if (p.status === 'outline_ready')
+    else if (
+      p.status === 'queued' ||
+      p.status === 'extracting' ||
+      p.status === 'outlining' ||
+      p.status === 'outline_ready'
+    )
       navigate(`/projects/${p.id}/outline`)
     else if (p.status === 'done') navigate(`/projects/${p.id}/proposal`)
     else navigate(`/projects/${p.id}/review`)
