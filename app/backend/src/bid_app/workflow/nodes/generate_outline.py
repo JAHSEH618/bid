@@ -10,7 +10,6 @@ import structlog
 from sqlalchemy import select
 
 from ...config import settings
-from ...core.crypto import decrypt_api_key  # type: ignore[attr-defined]
 from ...db import session_factory
 from ...services.llm import call_llm_json
 from ..prompts.outline_prompt import build_messages
@@ -21,29 +20,48 @@ log = structlog.get_logger()
 
 
 async def _resolve_api_key(project_id: int) -> str:
-    """⭐ D-C 真快照:从 ``Project.encrypted_api_key_snapshot`` 读后解密。"""
-    from ...models import Project  # type: ignore[attr-defined]
+    """⭐ D-C 真快照:从 ``Project.encrypted_api_key_snapshot`` 读后解密。
+    CLI fallback:回退 ``$BID_APP_CLI_API_KEY``。
+    """
+    import os
 
-    async with session_factory() as s:
-        row = await s.execute(
-            select(Project.encrypted_api_key_snapshot).where(Project.id == project_id)
-        )
-        encrypted = row.scalar_one_or_none()
-    if encrypted is None:
-        raise RuntimeError(
-            f"project {project_id} has no api_key snapshot; did /start succeed?"
-        )
-    return decrypt_api_key(encrypted)
+    try:
+        from ...core.crypto import decrypt_api_key  # type: ignore[attr-defined]
+        from ...models import Project  # type: ignore[attr-defined]
+
+        async with session_factory() as s:
+            row = await s.execute(
+                select(Project.encrypted_api_key_snapshot).where(
+                    Project.id == project_id
+                )
+            )
+            encrypted = row.scalar_one_or_none()
+        if encrypted is not None:
+            return decrypt_api_key(encrypted)
+    except Exception:
+        pass
+
+    cli_key = os.environ.get("BID_APP_CLI_API_KEY")
+    if cli_key:
+        return cli_key
+    raise RuntimeError(
+        f"project {project_id} has no api_key snapshot; did /start succeed? "
+        "(or set BID_APP_CLI_API_KEY for CLI mode)"
+    )
 
 
 async def _resolve_user_id(project_id: int) -> int:
-    from ...models import Project  # type: ignore[attr-defined]
+    """CLI fallback:DB 不可用返回 0。"""
+    try:
+        from ...models import Project  # type: ignore[attr-defined]
 
-    async with session_factory() as s:
-        row = await s.execute(
-            select(Project.api_key_owner).where(Project.id == project_id)
-        )
-        return row.scalar_one()
+        async with session_factory() as s:
+            row = await s.execute(
+                select(Project.api_key_owner).where(Project.id == project_id)
+            )
+            return row.scalar_one()
+    except Exception:
+        return 0
 
 
 async def run(state: WorkflowState) -> dict[str, str]:

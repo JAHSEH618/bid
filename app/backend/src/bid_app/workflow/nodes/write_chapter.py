@@ -32,33 +32,52 @@ from ..sync import publish_event, sync_chapter_to_db
 async def _resolve_api_key(project_id: int) -> str:
     """⭐ D-C 真快照:直接从 ``Project.encrypted_api_key_snapshot`` 读,
     与用户当前的 ApiKey 表完全解耦。
-    """
-    from ...core.crypto import decrypt_api_key  # type: ignore[attr-defined]
-    from ...models import Project  # type: ignore[attr-defined]
 
-    async with session_factory() as s:
-        row = await s.execute(
-            select(Project.encrypted_api_key_snapshot).where(
-                Project.id == project_id
+    ⭐ CLI fallback:DB / models / crypto 任何一层不可用时,回退到
+    ``$BID_APP_CLI_API_KEY``(M0 ``run_local`` 走此路径)。
+    """
+    import os
+
+    try:
+        from ...core.crypto import decrypt_api_key  # type: ignore[attr-defined]
+        from ...models import Project  # type: ignore[attr-defined]
+
+        async with session_factory() as s:
+            row = await s.execute(
+                select(Project.encrypted_api_key_snapshot).where(
+                    Project.id == project_id
+                )
             )
-        )
-        encrypted = row.scalar_one_or_none()
-    if encrypted is None:
-        raise RuntimeError(
-            f"project {project_id} has no api_key snapshot; did /start succeed?"
-        )
-    return decrypt_api_key(encrypted)
+            encrypted = row.scalar_one_or_none()
+        if encrypted is not None:
+            return decrypt_api_key(encrypted)
+    except Exception:
+        pass
+
+    cli_key = os.environ.get("BID_APP_CLI_API_KEY")
+    if cli_key:
+        return cli_key
+    raise RuntimeError(
+        f"project {project_id} has no api_key snapshot; did /start succeed? "
+        "(or set BID_APP_CLI_API_KEY for CLI mode)"
+    )
 
 
 async def _resolve_user_id(project_id: int) -> int:
-    """token_usage 记账要 user_id,用 ``api_key_owner``(快照时锁定的启动者)。"""
-    from ...models import Project  # type: ignore[attr-defined]
+    """token_usage 记账要 user_id,用 ``api_key_owner``(快照时锁定的启动者)。
 
-    async with session_factory() as s:
-        row = await s.execute(
-            select(Project.api_key_owner).where(Project.id == project_id)
-        )
-        return row.scalar_one()
+    CLI fallback:DB 不可用时返回 0(``record_token_usage`` 是 stub,值随便)。
+    """
+    try:
+        from ...models import Project  # type: ignore[attr-defined]
+
+        async with session_factory() as s:
+            row = await s.execute(
+                select(Project.api_key_owner).where(Project.id == project_id)
+            )
+            return row.scalar_one()
+    except Exception:
+        return 0
 
 
 async def _resolve_chapter_id(run_id: int, index: int) -> int | None:
