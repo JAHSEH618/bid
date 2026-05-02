@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.25
+# 投标技术方案生成器 · 实施 Spec v3.26
 
 > **配套文档**:`REQUIREMENTS.md` v0.12(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.25 (2026-05-02)。基于 v3.24 修了 4 处测试隔离落地细节:**删 test_docx.py 顶层 `from bid_app.db import session_factory`**(顶层 import 在 monkeypatch 之前求值会绑定旧全局对象,绕过 `_use_test_session_factory`;改注入 fixture,D-DP) / **monkeypatch 列表补全 `write_chapter` / `api.health` + `client` fixture 改依赖 `_use_test_session_factory`**(e2e 测试也走 get_db override,D-DQ) / **`db_engine` 校验改用 `make_url(url).database.endswith("_test")`**(精准解析 + 错误信息删除环境变量误导,D-DR) / **测试库创建策略**(docker compose 加 `init-test-db.sh` 首启创建 `${POSTGRES_DB}_test`;本地非 docker 走 `./scripts/create-test-db.sh`,D-DS)。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.25 累计 129 处。
+> **版本**:v3.26 (2026-05-02)。基于 v3.25 修了 4 处测试隔离收尾细节:**修 `test_commit_done_skips_when_invalidated_and_unlinks_final` 内残留的 `session_factory()`**(顶层已删 import,会 NameError;改用注入的 `_use_test_session_factory()`,D-DT) / **conftest.py 删无用顶层 `from bid_app.db import session_factory`**(D-DN 用字符串路径 monkeypatch,不需 import 对象;留着会让 `rg` 维护命令报假阳性,D-DU) / **D-DS 文案精修 + 显式幂等 `scripts/create-test-db.sh`**(说清 docker initdb 只在空数据卷首启执行一次、脚本本身不幂等,显式幂等版用 `pg_database` SELECT 检查覆盖"已有数据卷"路径,D-DV) / **`test_docx.py` 头注释去掉穷举决策标签**(改为指向 §18.5 标题作单一信源,避免新增决策时再次漂移,D-DW)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.26 累计 133 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -239,7 +239,11 @@
 | **D-DP** | `tests/integration/test_docx.py` 顶层 **删除** `from bid_app.db import session_factory`;`test_unlink_happens_after_rendering_status_update` 用例签名加 `_use_test_session_factory`,内部 `real_make_session = _use_test_session_factory`(原 `from bid_app.db import session_factory as real_session_factory` 删) | 顶层 import 在 conftest fixture monkeypatch **之前**求值,把名字 `session_factory` 绑定到旧全局对象;后续 `monkeypatch.setattr("bid_app.db.session_factory", ...)` 改的是 `bid_app.db` 模块属性,不影响测试模块本地名字 — 等于绕过 D-DN 让该测试打到默认数据库。删顶层 import + 改用 fixture 注入是唯一干净方案 |
 | **D-DQ** | `_use_test_session_factory` 的 `targets` 列表补 `bid_app.workflow.nodes.write_chapter`(_resolve_api_key 等用)和 `bid_app.api.health`(/health SELECT 1);`client` fixture 改依赖 `_use_test_session_factory` 而不是裸 `db_engine`;补维护提示:`rg "from .*db import session_factory"` 找漏的模块 | v3.24 D-DN 列了 6 个模块,但漏了 §11.2 (write_chapter) 与 §15.4 (health)。两者都 import 了 session_factory,实际写入会打到默认库。`client` fixture 依赖 `db_engine` 时 conftest 不会触发 `_use_test_session_factory` 的 setup → `app.dependency_overrides[get_db]` 没生效,e2e 测试经过 HTTP 路径打到默认库 |
 | **D-DR** | `db_engine` 校验改用 `sqlalchemy.engine.make_url(url).database.endswith("_test")`,不再用 `"_test" in url.rsplit("/", 1)[-1]`;错误信息删 `TEST_DATABASE_URL` 环境变量提法,改成"修改 `settings.test_database_url` property 让数据库名以 `_test` 结尾" | 字符串切片 `rsplit("/", 1)[-1]` 在 URL 含 query string 或末尾斜杠时会撞坑;`make_url(...).database` 是 SQLAlchemy 解析后的纯库名,精准。错误信息提 `TEST_DATABASE_URL` 与 D-DM"不读环境变量"自相矛盾 — 改成指向 property 名一致 |
-| **D-DS** | `docker/init-test-db.sh`:postgres 容器首启 `docker-entrypoint-initdb.d/` 自动 `CREATE DATABASE ${POSTGRES_DB}_test`;§17.5 加文档,本地非 docker 走 `./scripts/create-test-db.sh` 或手动 `psql -c CREATE DATABASE ...`;`Base.metadata.create_all` 只建表不建库,空 `_test` 库时 db_engine 直接 connect refused 是预期信号 | D-DM 拼出测试库 URL 但没说库怎么来。create_all 在不存在的 DB 上跑,只会拿到 connect refused,实施者会误以为是 fixture bug。在 docker init 时一次性建库最自然,本地非 docker 路径文档化,避免每次测试前忘记建库 |
+| **D-DS** ⚠️ 由 D-DV 精修 | `docker/init-test-db.sh`:postgres 容器首启 `docker-entrypoint-initdb.d/` 自动 `CREATE DATABASE ${POSTGRES_DB}_test`;§17.5 文档化本地非 docker 路径 | D-DM 拼出测试库 URL 但没说库怎么来。最终实现 D-DV 把"docker 首启脚本"和"显式幂等的 scripts/create-test-db.sh"分开 |
+| **D-DT** | `test_commit_done_skips_when_invalidated_and_unlinks_final` 签名加 `_use_test_session_factory`;内部 `async with session_factory() as s` 改 `async with _use_test_session_factory() as s` | D-DP 删了 test_docx.py 顶层 `from bid_app.db import session_factory`,但本用例内部还残留一处 `session_factory()` 调用 → 直接 `NameError`;若图省事再加回顶层 import,又会绕过 `_use_test_session_factory`(D-DP 已论证)。只能注入 fixture |
+| **D-DU** | conftest.py 顶层删除无用的 `from bid_app.db import session_factory` | D-DN 用 `monkeypatch.setattr("bid_app.db.session_factory", ...)`(字符串路径)替换模块属性,**不需要**把对象 import 进 conftest 命名空间。留着会让 `rg "from .*db import session_factory"` 维护 D-DQ 模块清单时报假阳性 |
+| **D-DV** | D-DS 文案精修:把"脚本天然幂等"改成"docker entrypoint 在数据卷为空时只执行一次,脚本本身不幂等";新增 `scripts/create-test-db.sh` 用 `SELECT 1 FROM pg_database WHERE datname=...` 显式幂等;明确"已有 postgres 数据卷的环境必须手动跑 `scripts/create-test-db.sh`,docker initdb 不会补跑";§17.5 改成"docker init + 本地脚本"双段落 | v3.25 D-DS 文案误导 — `CREATE DATABASE` 遇已存在库会报错,脚本本身不是幂等的;只是 postgres entrypoint 在 PGDATA 非空时**根本不执行** initdb 脚本,假装幂等。这种"靠环境特性的伪幂等"对线上已运行 postgres 的环境是陷阱 — 加了卷后 docker compose down/up 不会补建测试库,实施者会困惑;显式幂等脚本 + 文档说清"何时跑哪个"是闭环 |
+| **D-DW** | `test_docx.py` 头注释从穷举 `D-CH / D-CL / ... / D-DK` 改成"指向 §18.5 标题作单一信源";新增决策时不再要求改文件头标签 | v3.20 D-DC 同步过一次、v3.21 D-DL 又同步一次、v3.25 又漂移到 D-DK 停下 — 每次新增决策都要改文件头是高频 churn,而且漏改不影响测试运行只让文档不一致。把文件头降级为"测试集说明",`§18.5` 标题保留完整列表作为唯一权威清单,后续维护成本更低 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -5707,13 +5711,18 @@ echo "[$(TZ=Asia/Shanghai date +%F\ %T)] backup ok → ${OUT}"
 
 > 备份验证(M5 验收):`docker compose exec app pg_restore --list /var/lib/bid-app/backups/bid_xxx.dump | head` 应能列出表名;`./scripts/restore-backup.sh` 在测试服务器跑通一次。
 
-### 17.5 测试库初始化脚本 `docker/init-test-db.sh`(D-DS)
+### 17.5 测试库初始化脚本 `docker/init-test-db.sh` 与 `scripts/create-test-db.sh`(D-DS / D-DV)
+
+#### `docker/init-test-db.sh` — postgres 容器首启用
 
 ```bash
 #!/bin/bash
-# ⭐ D-DS:postgres 容器首启时创建 ${POSTGRES_DB}_test。
-# postgres 镜像在 /docker-entrypoint-initdb.d/ 下的 *.sh 仅在数据卷为空时执行;
-# 已存在的数据库不会被覆盖,所以本脚本天然幂等(从环境变量看到的目标库名)。
+# ⭐ D-DS + D-DV:**postgres 镜像首启时执行一次**(/docker-entrypoint-initdb.d/
+# 下的 *.sh 仅在 PGDATA 数据卷为空时跑)。
+# 注意:**脚本本身不是幂等的** — `CREATE DATABASE` 遇到已存在库会报错。
+# 仅依赖 docker entrypoint 的"空卷首启"机制保证只跑一次;
+# **已有 postgres 数据卷的环境**(线上 / 开发机已经跑过 docker compose up)
+# 必须手动跑下面的 `scripts/create-test-db.sh`(显式幂等版本)。
 set -e
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
     CREATE DATABASE "${POSTGRES_DB}_test";
@@ -5721,15 +5730,46 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
 EOSQL
 ```
 
-> 本地不用 docker 跑测试时,需先手动执行同等 SQL:
-> ```bash
-> psql -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
->   -c "CREATE DATABASE \"${POSTGRES_DB}_test\";"
-> ```
-> 也可以直接 `./scripts/create-test-db.sh` 封装这条命令(M1 验收清单可加)。
-> `Base.metadata.create_all` 只能创建表,不能创建数据库 — `db_engine` fixture
-> 在 `_test` 数据库不存在时会直接 connect refused,这是预期信号:实施者必须
-> 先按上述方式建库。
+#### `scripts/create-test-db.sh` — 显式幂等(D-DV)
+
+```bash
+#!/bin/bash
+# ⭐ D-DV:本地非 docker 路径 / 已有 postgres 数据卷时的幂等版本。
+# 用 `pg_database` 系统表 `SELECT WHERE NOT EXISTS` 模拟 IF NOT EXISTS
+# (postgres CREATE DATABASE 不支持 IF NOT EXISTS 子句),重复执行不报错。
+set -e
+: "${POSTGRES_USER:?missing}"
+: "${POSTGRES_PASSWORD:?missing}"
+: "${POSTGRES_DB:?missing}"
+: "${POSTGRES_HOST:=localhost}"
+: "${POSTGRES_PORT:=5432}"
+TEST_DB="${POSTGRES_DB}_test"
+
+export PGPASSWORD="$POSTGRES_PASSWORD"
+exists=$(psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" \
+              -d "$POSTGRES_DB" -tAc \
+              "SELECT 1 FROM pg_database WHERE datname='${TEST_DB}'")
+if [ "$exists" = "1" ]; then
+    echo "[create-test-db] ${TEST_DB} 已存在,跳过创建"
+    exit 0
+fi
+psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" \
+     -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+     -c "CREATE DATABASE \"${TEST_DB}\""
+psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" \
+     -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 \
+     -c "GRANT ALL PRIVILEGES ON DATABASE \"${TEST_DB}\" TO \"${POSTGRES_USER}\""
+echo "[create-test-db] ${TEST_DB} 创建完成"
+```
+
+> 何时跑哪个脚本:
+> - **首次** `docker compose up`(空数据卷):`init-test-db.sh` 自动执行,无需手动操作;
+> - **已有数据卷的环境**(线上 / 已跑过 compose 的开发机):docker entrypoint
+>   不会再补跑 init 脚本,必须 `./scripts/create-test-db.sh` 手动建库;
+> - **本地不用 docker 跑测试**:同样跑 `./scripts/create-test-db.sh`。
+>
+> `Base.metadata.create_all` 只能创建表不能创建数据库;`_test` 库不存在时
+> `db_engine` fixture 直接 connect refused,这是预期信号 — 按上面任一方式建库即可。
 
 ---
 
@@ -5929,7 +5969,7 @@ async def test_chapter_failed_after_3_retries(client, db_engine, monkeypatch):
     assert chapter.status == "approved"
 ```
 
-### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH / D-DJ / D-DK / D-DL / D-DM / D-DN / D-DO / D-DP / D-DQ / D-DR / D-DS)
+### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH / D-DJ / D-DK / D-DL / D-DM / D-DN / D-DO / D-DP / D-DQ / D-DR / D-DS / D-DT / D-DU / D-DV / D-DW)
 
 **conftest.py 必备 fixture**(D-CR:测试代码依赖,需在 conftest.py 落地):
 
@@ -5945,7 +5985,10 @@ from httpx import ASGITransport, AsyncClient   # ⭐ D-CW:httpx >= 0.28 用 ASGI
 from datetime import datetime, timezone
 
 from bid_app.core.security import hash_password
-from bid_app.db import session_factory
+# ⭐ D-DU:**不**在 conftest 顶层 `from bid_app.db import session_factory`。
+# D-DN 用 `monkeypatch.setattr("bid_app.db.session_factory", ...)`(字符串路径)
+# 替换模块属性,不需要把对象 import 进来;留着会在用 `rg "from .*db import
+# session_factory"` 维护 D-DQ 模块清单时报假阳性。
 from bid_app.deps import get_current_user
 from bid_app.main import app
 from bid_app.models import DocxJob, Project, Run, User
@@ -6125,8 +6168,11 @@ async def auth_client(user_factory, _use_test_session_factory):
 **回归用例**(`tests/integration/test_docx.py`):
 
 ```python
-# tests/integration/test_docx.py — 完整覆盖
-# D-CH / D-CL / D-CR / D-CS / D-CX / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH / D-DJ / D-DK
+# tests/integration/test_docx.py
+# ⭐ D-DW:**不**在头注释穷举决策标签 — 历次新增决策时这里总落后于 §18.5 标题
+# (D-DA/D-DB/D-DD…→ D-DS),与文档里"对照决策表跑测试"的导航口径漂移。
+# 每个用例的 docstring 已写明对应决策项;§18.5 标题保留完整列表,以那里为准。
+# 本文件:DOCX 状态机回归测试集
 import asyncio                            # ⭐ D-CR:create_subprocess_exec 用得到
 import uuid
 
@@ -6319,7 +6365,7 @@ async def test_assemble_invalidates_inflight_jobs(
 
 @pytest.mark.asyncio
 async def test_commit_done_skips_when_invalidated_and_unlinks_final(
-    db, project_factory, docx_job_factory,
+    db, project_factory, docx_job_factory, _use_test_session_factory,
 ):
     """⭐ D-CM + D-CQ:finalizing 被 assemble 抢标 invalidated 后,_commit_done
     检查 rowcount=0 → SELECT 看到 invalidated → unlink final_path,**不**写 done。
@@ -6328,8 +6374,9 @@ async def test_commit_done_skips_when_invalidated_and_unlinks_final(
     final_path = Path(project.dir_path) / "proposal.docx"
     final_path.write_bytes(b"already renamed")    # 模拟 task 已 rename
     job = await docx_job_factory(project_id=project.id, status="finalizing")
-    # assemble 抢标 invalidated
-    async with session_factory() as s:
+    # assemble 抢标 invalidated — ⭐ D-DT:用注入的 _use_test_session_factory,
+    # 顶层不再 import session_factory(D-DP)
+    async with _use_test_session_factory() as s:
         await s.execute(sa.text(
             "UPDATE docx_jobs SET status='invalidated', "
             "output_path=NULL, updated_at=NOW() WHERE id=:i"
