@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.22
+# 投标技术方案生成器 · 实施 Spec v3.23
 
 > **配套文档**:`REQUIREMENTS.md` v0.12(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.22 (2026-05-02)。基于 v3.21 修了 3 处测试可执行性细节:**conftest 加 `mock_redis_lock` fixture**(把 `_redis_lock` 替换成 no-op asynccontextmanager,让直接调 `generate_docx_task` 的四个用例无需真实 Redis,D-DG) / **`project_factory` 单事务 flush/commit**(原"commit → refresh → add Run → commit"在默认 `expire_on_commit=True` 下让 p 进 expired,async lazy-load 失败;改 `add → flush → 可选 add(Run) → 单次 commit → refresh`,D-DH) / **§18.5 标题同步**(加 D-DD/D-DE/D-DF/D-DG/D-DH 标签,D-DI)。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.22 累计 119 处。
+> **版本**:v3.23 (2026-05-02)。基于 v3.22 修了 3 处测试链路细节:**`db` / `user_factory` / `project_factory` / `docx_job_factory` / `auth_client` 全部显式依赖 `db_engine`**(触发 schema create_all/drop_all,避免打到默认数据库或撞 "relation does not exist",D-DJ) / **assemble 测试用真实 `run_id`**(从 DB 查 project 当前 Run id,不再写死 `1`,防 fixture 顺序变动后误更新,D-DK) / **`test_docx.py` 头注释补全**(补 D-DD/D-DE/D-DH/D-DJ/D-DK 标签,与 §18.5 标题对齐,D-DL)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.23 累计 122 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -230,6 +230,9 @@
 | **D-DG** | conftest.py 加 `mock_redis_lock` fixture:`monkeypatch.setattr("bid_app.services.docx_export._redis_lock", _no_redis_lock)`,no-op asynccontextmanager;四个直接调 `generate_docx_task` 的 D-CX/D-DA/D-DB/D-DF 用例都 use 这个 fixture | `export_docx` 串行化包装在 `_module_lock`(asyncio.Lock,同进程 OK)之后还有 `_redis_lock`(`redis.asyncio.from_url + r.lock(...)`,需要真实 Redis)。直接调 task 的测试只 fake 了 subprocess,没 fake Redis lock,在没真实 Redis 的 CI 环境会卡在 `r.ping()` / `lock.acquire()` 上,根本走不到 mermaid / on_stage / pandoc / unlink 等核心断言。单独抽 fixture 让 use 它的用例语义清晰(任何不需要真 Redis 的 task 单测都加上)|
 | **D-DH** | `project_factory` 改成"单事务 add → flush → 可选 add(Run) → 单次 commit → refresh(p)";原"commit → refresh → add(Run) → commit"双 commit 路径在 SQLAlchemy 默认 `expire_on_commit=True` 下让 p 在第二次 commit 时进 expired 状态,返回后访问 `p.id` / `p.dir_path` 触发 async lazy-load 在已关闭 session 上失败 | session_factory 没显式配 `expire_on_commit=False` 时(spec 也没明确配),double commit 必出 detached/lazy-load 问题。flush 拿到 p.id 之后 add Run + 单次 commit,语义干净 + 无 expire 风险;refresh 在 commit 后单次拿全字段,后续返回的 p 在 detached 状态下也能直接读(因为已经 hydrated)|
 | **D-DI** | §18.5 标题在 v3.20 加完 D-DA/D-DB 后,v3.21/v3.22 的 D-DD/D-DE/D-DF/D-DG/D-DH 都没补;统一改成"汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH)";test_docx.py 头注释同步 | 标题与节内容长期错位会让人误以为某些决策没回归用例覆盖。一次性把 v3.20-v3.22 加的标签都同步进标题,后续维护只需在新增决策时同步即可 |
+| **D-DJ** | conftest.py 的 `db` / `user_factory` / `project_factory` / `docx_job_factory` / `auth_client` 都加 `db_engine` 形参,显式依赖 §18.1 的 schema fixture | v3.22 之前 `db` 等 fixture 直接用全局 `session_factory`,**不**依赖 `db_engine`,导致 DOCX 测试不会触发 `Base.metadata.create_all`。后果分两种:① 没建表 → "relation does not exist";② 测试 `database_url` 指到默认开发库 → 污染开发数据。显式依赖 `db_engine` 让 schema 在每次测试运行时被正确创建/销毁。注:若 `db_engine` 是独立测试 engine,实施时还要在 conftest 顶部 monkeypatch 各模块已 import 的 `session_factory` + override `get_db`(本决策不展开,§18.1 是 yield-style fixture 默认能跑) |
+| **D-DK** | 两处 assemble 测试(`test_assemble_invalidates_existing_done_docx` / `test_assemble_invalidates_inflight_jobs`)的 `state["run_id"]` 从写死 `1` 改成从 DB `SELECT id FROM runs WHERE project_id=:p ORDER BY started_at DESC LIMIT 1` | `project_factory(create_done_run=True)` 默认建 Run,但 fixture 隔离 / 测试顺序变化时该 Run 的 id 不一定是 1(可能是 2、3、N)。写死会让"更新错 Run"或"不更新任何 Run"的 bug 静默通过。查真实 id 让测试与 fixture 行为耦合,后续 Run 模型改字段也不影响 |
+| **D-DL** | `tests/integration/test_docx.py` 头注释补全 D-DD/D-DE/D-DH/D-DJ/D-DK 标签,与 §18.5 标题对齐(D-DI 只同步了标题,文件头还停在 v3.20 状态) | D-DI 的承诺包含"test_docx.py 头注释同步",但 v3.22 落地时只改了标题。文件头是工程师按 grep 标签找用例的入口,标题与注释口径一致才能让"决策 ↔ 用例"双向可追溯 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -5856,7 +5859,7 @@ async def test_chapter_failed_after_3_retries(client, db_engine, monkeypatch):
     assert chapter.status == "approved"
 ```
 
-### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH)
+### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH / D-DJ / D-DK / D-DL)
 
 **conftest.py 必备 fixture**(D-CR:测试代码依赖,需在 conftest.py 落地):
 
@@ -5884,14 +5887,20 @@ from bid_app.models import DocxJob, Project, Run, User
 # `asyncio_mode = "auto"` 让 @pytest.fixture 自动识别,但不如显式装饰器明确
 
 @pytest_asyncio.fixture
-async def db():
-    """裸 session,测试中直接 INSERT/UPDATE/SELECT。"""
+async def db(db_engine):
+    """裸 session,测试中直接 INSERT/UPDATE/SELECT。
+
+    ⭐ D-DJ:**显式依赖 `db_engine`**(§18.1)以触发 schema create_all/drop_all。
+    没有这个依赖,只用 `session_factory()` 会打到默认数据库且没建表 → 测试要么
+    撞 "relation does not exist",要么污染开发库。`db_engine` 是 yield-style
+    fixture,session-scope 共享 schema,test-scope 包在事务外回滚也行。
+    """
     async with session_factory() as s:
         yield s
 
 
 @pytest_asyncio.fixture
-async def user_factory():
+async def user_factory(db_engine):
     """⭐ D-CW:Project.created_by 是非空 FK,project_factory 不能写死 1;
     测试需要先建 User,project_factory 默认引用本 fixture 创建的 user.id。"""
     async def _make(**overrides):
@@ -5912,7 +5921,7 @@ async def user_factory():
 
 
 @pytest_asyncio.fixture
-async def project_factory(tmp_path, user_factory):
+async def project_factory(tmp_path, user_factory, db_engine):
     """创建 status='done' 的 Project + 真磁盘目录;created_by 引用真 User。
 
     ⭐ D-DD:默认 `create_done_run=True` 同时插一条 `Run(status='done')`。
@@ -5953,7 +5962,7 @@ async def project_factory(tmp_path, user_factory):
 
 
 @pytest_asyncio.fixture
-async def docx_job_factory():
+async def docx_job_factory(db_engine):
     async def _make(*, project_id, status="pending", arq_job_id=None,
                     output_path=None, error=None):
         async with session_factory() as s:
@@ -5987,7 +5996,7 @@ def mock_redis_lock(monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def auth_client(user_factory):
+async def auth_client(user_factory, db_engine):
     """⭐ D-CR + D-CW:override get_current_user 跳过鉴权;httpx >= 0.28
     要求用 ASGITransport(app=...) 而不是 AsyncClient(app=...)(后者已弃用)。"""
     fake_user = await user_factory()
@@ -6001,7 +6010,8 @@ async def auth_client(user_factory):
 **回归用例**(`tests/integration/test_docx.py`):
 
 ```python
-# tests/integration/test_docx.py — D-CH/D-CL/D-CR/D-CS/D-CX/D-DA/D-DB/D-DF/D-DG 可执行用例
+# tests/integration/test_docx.py — 完整覆盖
+# D-CH / D-CL / D-CR / D-CS / D-CX / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH / D-DJ / D-DK
 import asyncio                            # ⭐ D-CR:create_subprocess_exec 用得到
 import uuid
 
@@ -6138,11 +6148,16 @@ async def test_assemble_invalidates_existing_done_docx(
     old_job = await docx_job_factory(project_id=project.id, status="done",
                                      output_path=str(docx_path))
 
+    # ⭐ D-DK:用 project_factory 真实创建的 Run id,不写死 1
+    run_id = (await db.execute(sa.text(
+        "SELECT id FROM runs WHERE project_id=:p ORDER BY started_at DESC LIMIT 1"
+    ), {"p": project.id})).scalar_one()
+
     # 直接调 assemble 节点的 run() 函数(state 仅含 assemble 实际用到的字段)
     from bid_app.workflow.nodes.assemble import run as assemble_run
     state = {
         "project_id": project.id,
-        "run_id": 1,                   # 测试创建 Run 的 fixture 略;此处可任意
+        "run_id": run_id,
         "chapters": [], "finalized_chapters": [],
     }
     await assemble_run(state)
@@ -6164,10 +6179,15 @@ async def test_assemble_invalidates_inflight_jobs(
     project = await project_factory()
     job = await docx_job_factory(project_id=project.id, status=inflight_status)
 
+    # ⭐ D-DK:用真实 run_id
+    run_id = (await db.execute(sa.text(
+        "SELECT id FROM runs WHERE project_id=:p ORDER BY started_at DESC LIMIT 1"
+    ), {"p": project.id})).scalar_one()
+
     from bid_app.workflow.nodes.assemble import run as assemble_run
     state = {
         "project_id": project.id,
-        "run_id": 1,
+        "run_id": run_id,
         "chapters": [], "finalized_chapters": [],
     }
     await assemble_run(state)
