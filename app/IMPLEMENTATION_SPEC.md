@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.9
+# 投标技术方案生成器 · 实施 Spec v3.10
 
 > **配套文档**:`REQUIREMENTS.md` v0.10(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.9 (2026-05-02)。基于 v3.8 修了 6 处剩余隐患:SlotLost **按 review decision 区分**(approve/skip 回 awaiting_review,只有 revise/retry 才标 failed,D-AZ) / Run.status **与 Project.status 同步**(新增 `_fail_project_and_run` helper,D-BA) / cleanup 用 **真 alive ids + typed array CAST**(精准排除 + 类型推断稳健性,D-BB) / 测试断言 DOCX `max_tries=1`(D-BC) / DOCX **pandoc 状态接到生命周期**(`on_stage` 回调,与 §8 status 字段对齐,D-BD) / LLM `errors.log` **直写主代码**(消除 §11.1 vs §19.2 分裂,D-BE)。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.9 累计 63 处。
+> **版本**:v3.10 (2026-05-02)。基于 v3.9 修了 5 处剩余隐患:**generating 章节 cleanup**(write_chapter 切 generating 时写 processing_started_at,cron 加 generating 分支 15min 超时,覆盖 worker SIGKILL/OOM 没进 SlotLost 的窗口,D-BF) / **LLM JSON + 总超时 errors.log**(call_llm_json 同步 _write_llm_error;两处 asyncio.timeout 外层捕 TimeoutError 写 "LLM total timeout" 后 raise LLMTimeoutExceeded,D-BG) / **DocxJob updated_at + 终态保护**(基于 updated_at 判超时;done/failed 写带 WHERE status IN(in-flight)防覆盖 cleanup 已标 failed 的行,D-BH) / **ReviewEvent aborted**(SlotLost 撤销 approve/skip 时标 aborted,前端"最近审核"过滤,D-BI) / **决策表 D-AV/D-AW 同步**(标"由 D-BB/D-BF/D-AZ/D-BI 取代",D-BJ)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.10 累计 68 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -164,8 +164,8 @@
 | **D-AS** ⚠️ 由 D-AY 扩展 | cron `cleanup_stale_docx_jobs` 每 5 分钟扫 `DocxJob.status` 在 **任意 in-flight 状态**(`pending` / `rendering_mermaid` / `pandoc`)超 30 分钟的标 failed | v3.7 只覆盖 pending,不够——pandoc / chromium 在 docker 里 OOM 死锁 / 进程崩溃时,job 卡在 rendering_mermaid 或 pandoc 阶段,partial unique index `uq_docx_jobs_project_inflight` 阻塞后续 DOCX 永远新建不了。覆盖全部 in-flight 状态才能真正自愈 |
 | **D-AT** ⚠️ 由 D-AW / D-AZ 扩展 | worker `SlotLost` 分支**幂等回滚章节状态**;最终形态由 D-AW(覆盖 reviewing/retrying/pending/generating)+ D-AZ(按 decision 区分:approve/skip 回 awaiting_review,revise 标 failed)定义 | v3.6 SlotLost 只 release slot,章节卡中间态;补偿与 D-AR cron 互补——cron 兜底 60s 阈值,SlotLost 立即触发 |
 | **D-AU** | LLM-2 章节生成失败语义化:`services/llm.py` 加 `ChapterGenerationFailed`,`write_chapter` 节点把 `LLMRetryFailed` / `Timeout` 包成它再 raise;worker 三类 task 加 `except ChapterGenerationFailed`:**不写 errors.log**(节点已写 chapter.last_error)/ **不 raise**(arq 不重试)/ project 切 `awaiting_review` | v3.7 章节 3 次失败后裸 raise,被 task 顶层 `except Exception` 捕获 → `_set_project_status(project, 'failed')`,违反 FR-3.9/FR-4.7 "工作流暂停在该章节,等用户手动 retry" 的语义。语义化异常让"章节级失败"和"task 真崩溃"在 except 链里精准分流;LLM-1 / 抽取阶段失败仍走 generic Exception → project failed(那才是真项目级失败)|
-| **D-AV** | `cleanup_stale_chapters` 先取 `ACTIVE_SET`,**排除有 alive reservation 的 project**(章节 NOT IN 这些 project 才回滚);`/review`/`/retry` 的异常补偿同时清 `processing_started_at` | v3.7 cleanup 阈值 60s 与 RESERVE_TTL=300s 冲突:worker 启动延迟 60~300s 时章节被误回滚但 slot 还被 reservation 持有。排除 active 项目后,信任 RESERVE_TTL 内 worker 接管;真没接管会被 reconcile 在 300s 后清 ACTIVE_SET,下一轮 cleanup 自然回滚。补偿清 processing_started_at 防 cron 看到旧时间戳重复触发 |
-| **D-AW** | SlotLost 补偿统一抽 `_slot_lost_compensation(project_id, run_id, current_chapter_id, action)`:① 当前 `chapter_id` 在 `reviewing/retrying/pending/generating` 全部回滚到 failed;② run 下任意 `generating` 章节(下一章场景)也标 failed;③ 至少回滚了一行 → project 切 `awaiting_review`;0 行(start 阶段卡 extract/outline)→ 不动 project,让 reconcile 标 failed | v3.7 D-AT 只回滚"参数指向的章节",但 resume 可能跑过几章后在生成下一章时 SlotLost,下一章 chapter_id 不在参数里,卡 generating 永久不可达;同样 retry 切到 pending 后 graph 切 generating 期间丢锁也漏。统一补偿覆盖所有可能的中间/下游态;是否切 awaiting_review 用 RETURNING 判定"有没有真发生章节回滚",避免 start 早期阶段被错判成 awaiting_review |
+| **D-AV** ⚠️ 由 D-BB / D-BF 取代 | `cleanup_stale_chapters` 先取活跃 project 排除;`/review`/`/retry` 异常补偿清 `processing_started_at`(基础动机) | v3.7 cleanup 阈值 60s 与 RESERVE_TTL=300s 冲突。**最终实现**:D-BB 用真 alive ids(SET ∩ ALIVE_KEY)+ typed array CAST;D-BF 把 generating 也加进 cleanup(超时 15min)|
+| **D-AW** ⚠️ 由 D-AZ / D-BI 收紧 | SlotLost 补偿统一抽 `_slot_lost_compensation(project_id, run_id, current_chapter_id, action[, decision])`:覆盖 `reviewing/retrying/pending/generating`,run 下任意 `generating` 也回滚,RETURNING 判定 → project 切 awaiting_review 或不动 | v3.7 D-AT 只回滚"参数指向的章节",resume 跑下一章 SlotLost 时下一章 chapter_id 不在参数里。**最终实现**:D-AZ 按 decision 区分(approve/skip 回 awaiting_review,其它 failed);D-BI 同步把对应 ReviewEvent 标 aborted 防前端误显示 |
 | **D-AX** | `wake_queued_projects` 中 `try_acquire` 返回 `already_active` / `stale_evicted` / 或 run 缺失 → **立即 UPDATE projects.status='failed'**(不再仅 `continue`);返回累计 woke_count 而非 0 | v3.7 异常 queued 项目 `continue` 后,`SELECT FOR UPDATE SKIP LOCKED` 是事务级行锁,事务 commit 后释放,**下一轮循环又取到同一个 project**,wake 死循环占着 WAKE_LOCK 30s。立即标 failed 让 SKIP LOCKED 跳过该行;woke_count 让调用方与监控能区分"队列空"与"全满" |
 | **D-AY** | DOCX task `max_tries=2 → 1`(与 D-Z 其他任务一致);`cleanup_stale_docx_jobs` 覆盖 **所有 in-flight 状态**(`pending` / `rendering_mermaid` / `pandoc`)而非仅 pending | `max_tries=2` 与现有"第一次失败立刻 UPDATE failed"实现冲突——arq 重试进来 SELECT 看到 failed 直接 return,等于无重试,徒增复杂度。统一为 1 次更简单;DOCX 失败本就让用户手动重新生成更符合产品行为(用户能看到错误再决定是否重试)。cleanup 范围扩展是 R12 的真正闭环 |
 | **D-AZ** | `_slot_lost_compensation` 接 `decision` 参数;**approve/skip → 章节回 awaiting_review**(决策有效但 update_state 没跑完,让用户重新提交一次);**revise / retry / start → 章节标 failed**(可能已开始重写);worker 入口对 approve/skip 也**不再切 generating**,只 revise 才切 | v3.8 worker 入口无条件把 reviewing → generating,但 approve/skip 实际不会"重写",`generating` 这个语义只对 revise 成立;同时 SlotLost 把 reviewing/retrying/pending/generating 全部标 failed 对 approve/skip 是过度补偿。按 decision 分流后语义对齐:状态机能讲清"approve/skip 走得是哪条路"|
@@ -173,7 +173,12 @@
 | **D-BB** | `cleanup_stale_chapters` 用 `get_alive_project_ids()`(SET ∩ ALIVE_KEY 实存)排除而不是裸 `SMEMBERS ACTIVE_SET`;SQL 改 `r.project_id <> ALL(CAST(:active_ids AS int[]))` 显式 typed array | v3.8 直接排除 SET 全体,但 stale 自愈(D-AQ)有时间窗口,SET 里可能短暂含失效成员 → 那些项目的章节也被"误信任"跳过。改用真 alive 列表更精准。SQL CAST 防 SQLAlchemy/asyncpg 把 Python `[]` 错推断成 `text[]` 之类;空列表也安全(`<> ALL(ARRAY[]::int[])` 恒 true)|
 | **D-BC** | `test_docx_task_has_max_tries_1` 替换 v3.7 留下的 `_2`;断言 `mt == 1` | D-AY 改了实现但忘改测试,启动期断言会假报失败;同步修正 |
 | **D-BD** | `export_docx(... on_stage=callable)` 回调,`_export_docx_inner` 在 mermaid 完成 / pandoc 开始时调 `await on_stage("pandoc")`;`generate_docx_task` 实现 `_update_stage` 写 DocxJob.status='pandoc' | v3.8 定义了 `pandoc` 状态(模型 + cleanup SQL 都覆盖),但 task 实际只写到 `rendering_mermaid` 就直接调 export_docx,pandoc 状态从未被写入 → cleanup 永远扫不到真正卡 pandoc 的 job(因为它们仍是 rendering_mermaid),partial unique index 的语义也对不上。回调让生命周期和字段定义对齐,且 `_export_docx_inner` 内部 mermaid → pandoc 切换点是唯一精确锚点 |
-| **D-BE** | `services/llm.py` 主代码直接在 `call_llm_stream` 的重试 catch 块调 `_write_llm_error(project_id, ...)`,落 errors.log;§19.2 不再重复实现,只留对照说明 | v3.8 主代码 §11.1 只写 `log.warning`,errors.log 写入散在 §19.2 的"调用点"附录里,落地时极易漏写;FR-3.9 明确要求"重试日志记录到 errors.log"。合并到主代码避免实现分裂,保持需求 ↔ 实现一一可追溯 |
+| **D-BE** ⚠️ 由 D-BG 扩展 | `services/llm.py` 主代码直接在 `call_llm_stream` 的重试 catch 块调 `_write_llm_error(project_id, ...)`,落 errors.log;§19.2 不再重复实现,只留对照说明 | v3.8 主代码 §11.1 只写 `log.warning`,errors.log 写入散在 §19.2 的"调用点"附录里,落地时极易漏写;FR-3.9 明确要求"重试日志记录到 errors.log"。合并到主代码避免实现分裂,保持需求 ↔ 实现一一可追溯 |
+| **D-BF** | `write_chapter` 节点切 generating 时一并 SET `processing_started_at=NOW()`;`cleanup_stale_chapters` 加 `generating` 分支(超时 = single_chapter_timeout + 5min margin = 15min);`ix_chapters_processing` 索引 partial WHERE 也覆盖 generating | v3.9 cleanup 只扫 reviewing/retrying。worker 进程被 SIGKILL/OOM 直接死时不会进 SlotLost 分支,generating 章节没有任何兜底自愈机制,会永久卡住。配合 D-BB 的 active_ids 排除,15 分钟阈值在"LLM 单章 600s + 调度容错"和"用户能合理等到回滚"之间取平衡 |
+| **D-BG** | `call_llm_stream` / `call_llm_json` 都在 `asyncio.timeout` 外层捕 `TimeoutError`,写 `LLM total timeout` errors.log 后 raise `LLMTimeoutExceeded`;`call_llm_json` 重试链也调 `_write_llm_error`(与 stream 等价对齐) | v3.9 errors.log 仅覆盖 stream 模型的网络/限流重试。① JSON 模型(LLM-1 提纲 / LLM-3 可视化)的重试只写 structlog 不进项目级日志;② 外层总超时(FR-3.10 600s 兜底 / JSON 120s)从 asyncio.timeout 抛 TimeoutError 不会进重试 catch,errors.log 直接漏。统一外层 catch + helper 调用,消除三个盲区 |
+| **D-BH** | `DocxJob` 加 `updated_at`(server_default + 显式 SQL SET);cleanup 用 `updated_at < NOW() - 30min` 而不是 `created_at`;`generate_docx_task` 终态 UPDATE 加 `WHERE status IN ('pending','rendering_mermaid','pandoc')` 防覆盖,`rowcount==0` warning 并丢弃产出 | v3.9 cleanup 用 `created_at` 判超时,但 task 进 rendering_mermaid 后会等 export_docx 内的串行锁(可能 > 30min);cron 标 failed 后 task 仍可能拿到锁继续跑并 `UPDATE done`,**覆盖** failed 状态导致数据腐烂。`updated_at` 让"无进展" vs "在跑"可区分;终态 WHERE 防止竞态覆盖;rowcount==0 时不返回 output_path,避免前端展示无效产物 |
+| **D-BI** | `ReviewEvent` 加 `aborted` Boolean 默认 false;`_slot_lost_compensation` 在 approve/skip 分支(章节回 awaiting_review 时)同步 `UPDATE ... SET aborted=true` 标记最近一条 pending ReviewEvent;前端"最近审核人/决策"查询加 `WHERE aborted=false` | v3.9 worker 入口写 ReviewEvent 后 graph 半路 SlotLost,approve/skip 章节回 awaiting_review 但 ReviewEvent 仍存,前端"上次审核人"按最近事件取会误显示一个**未真正生效**的决策(用户以为已审,实际还要重审)。aborted 字段保留审计原意("做过这个动作")同时区分"是否生效",前端过滤即可消除歧义 |
+| **D-BJ** | D-AV / D-AW 标 ⚠️ "由 ... 取代",描述压缩到核心动机 + 指向最终决策的指针 | 决策表里同名机制有多版迭代痕迹时,落地工程师可能照旧版描述实现。明示"最终口径见 D-XX"减少误读 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -899,10 +904,10 @@ class Chapter(Base, TimestampMixin):
     processing_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
-    # ⭐ D-AR:API 切到 reviewing/retrying 时写;cron `cleanup_stale_chapters`
-    # 扫描该字段超过 STALE_TIMEOUT(默认 60s)且仍在中间态的章节,回滚到上一态
-    # (reviewing → awaiting_review,retrying → failed),解决 API commit 后
-    # 进程崩溃导致章节卡中间态的窗口
+    # ⭐ D-AR + D-BF:API 切到 reviewing/retrying 时写、write_chapter 节点切
+    # generating 时也写;cron `cleanup_stale_chapters` 按状态分段超时回滚:
+    # reviewing/retrying 60s → awaiting_review / failed
+    # generating          15min → failed(覆盖 worker SIGKILL/OOM 没进 SlotLost 的窗口)
     last_error: Mapped[str | None] = mapped_column(String(4000), nullable=True)
 ```
 
@@ -932,7 +937,7 @@ class ChapterVersion(Base, TimestampMixin):
 `models/review_event.py`:
 
 ```python
-from sqlalchemy import String, ForeignKey
+from sqlalchemy import String, ForeignKey, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 from .base import Base, TimestampMixin
 
@@ -944,6 +949,10 @@ class ReviewEvent(Base, TimestampMixin):
     reviewer_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     decision: Mapped[str] = mapped_column(String(16))  # approve|revise|skip|retry_failed
     feedback_text: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+    # ⭐ D-BI:SlotLost 把 approve/skip 章节回滚到 awaiting_review 时,本事件
+    # **没真正生效**,标 aborted=true 避免前端"上次审核人/决策"误显示已撤销动作。
+    # 默认 false,正常审核流程不动这个字段;查询"最近一次有效审核"加 WHERE NOT aborted
+    aborted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 ```
 
 `models/token_usage.py`:
@@ -995,7 +1004,15 @@ class DocxJob(Base, TimestampMixin):
     error: Mapped[str | None] = mapped_column(String(4000), nullable=True)
     output_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ⭐ D-BH:每次 status 切换 SET updated_at=NOW();cron `cleanup_stale_docx_jobs`
+    # 用 updated_at 而不是 created_at 判超时,避免误杀"等串行锁/真在跑 pandoc"的 job
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=sa_func.now(), onupdate=sa_func.now(), nullable=False,
+    )
 ```
+
+> 注:`DocxJob` 模块顶部除已有 `from datetime import datetime`,还需 `from sqlalchemy import func as sa_func`(`onupdate=sa_func.now()` 让 SQLAlchemy 在 ORM 写入时自动填,但**纯 SQL `UPDATE` 不会触发**,故 task 显式 SET `updated_at=NOW()` 见下面 cleanup 与 task 实现)。
 
 > 注:`DocxJob` 模块顶部需 `from datetime import datetime`。其他模型(User/ApiKey/Run)同样。
 
@@ -1161,7 +1178,8 @@ def upgrade() -> None:
     op.create_index(
         "ix_chapters_processing", "chapters",
         ["status", "processing_started_at"],
-        postgresql_where=sa.text("status IN ('reviewing','retrying')"),
+        # D-BF:索引同时覆盖 generating,让 cleanup 扫得到 worker 直接死的章节
+        postgresql_where=sa.text("status IN ('reviewing','retrying','generating')"),
     )
 
     # chapter_versions
@@ -1186,6 +1204,8 @@ def upgrade() -> None:
         sa.Column("reviewer_id", sa.Integer, sa.ForeignKey("users.id", ondelete="RESTRICT"), nullable=False),
         sa.Column("decision", sa.String(16), nullable=False),
         sa.Column("feedback_text", sa.String(4000)),
+        # ⭐ D-BI:SlotLost 撤销 approve/skip 时标 true,前端"最近审核"过滤
+        sa.Column("aborted", sa.Boolean, nullable=False, server_default=sa.text("false")),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
@@ -1215,6 +1235,9 @@ def upgrade() -> None:
         sa.Column("output_path", sa.String(512)),
         sa.Column("finished_at", sa.DateTime(timezone=True)),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+        # ⭐ D-BH:每次 status 切换 task 显式 SET;cleanup 基于这个判超时
+        sa.Column("updated_at", sa.DateTime(timezone=True),
+                  server_default=sa.func.now(), nullable=False),
     )
     op.create_index(
         "uq_docx_jobs_arq_job_id", "docx_jobs", ["arq_job_id"],
@@ -1892,8 +1915,11 @@ async def reconcile_periodic(ctx) -> None:
             await s.commit()
 
 
-# ⭐ D-AR / D-AS 中间态超时清理
+# ⭐ D-AR / D-AS / D-BF 中间态超时清理
 STALE_CHAPTER_TIMEOUT_SECONDS = 60       # reviewing/retrying 超 60s 没被 worker 接管 → 回滚
+# ⭐ D-BF:generating 卡住的兜底,worker 被 SIGKILL/OOM 时 SlotLost 分支跑不到,
+# 这个超时要 > LLM 单章总时长(FR-3.10 = 600s)+ 心跳/调度余量
+STALE_GENERATING_TIMEOUT_SECONDS = 60 * 15   # 15 分钟 = 600s + 5 min margin
 STALE_DOCX_TIMEOUT_SECONDS = 30 * 60     # DocxJob pending 超 30 分钟 → failed
 
 
@@ -1918,22 +1944,33 @@ async def cleanup_stale_chapters(ctx) -> None:
 
     async with session_factory() as s:
         # 显式 typed array,空列表也安全(<> ALL(ARRAY[]::int[]) 恒 true)
+        # ⭐ D-BF:三段超时分支(reviewing/retrying 60s,generating 900s),
+        # 用 CASE 在 SQL 内同时处理,一次 cron 跑完
         result = await s.execute(sa.text(
             f"""
             WITH stale AS (
                 SELECT c.id, c.status FROM chapters c
                 JOIN runs r ON r.id = c.run_id
-                WHERE c.status IN ('reviewing','retrying')
-                  AND c.processing_started_at < NOW() - INTERVAL '{STALE_CHAPTER_TIMEOUT_SECONDS} seconds'
-                  AND r.project_id <> ALL(CAST(:active_ids AS int[]))
+                WHERE r.project_id <> ALL(CAST(:active_ids AS int[]))
+                  AND (
+                    (c.status IN ('reviewing','retrying')
+                     AND c.processing_started_at <
+                         NOW() - INTERVAL '{STALE_CHAPTER_TIMEOUT_SECONDS} seconds')
+                    OR
+                    (c.status = 'generating'
+                     AND c.processing_started_at <
+                         NOW() - INTERVAL '{STALE_GENERATING_TIMEOUT_SECONDS} seconds')
+                  )
             )
             UPDATE chapters c SET
-                status = CASE WHEN s.status='reviewing' THEN 'awaiting_review'
-                              WHEN s.status='retrying' THEN 'failed'
-                         END,
+                status = CASE
+                    WHEN s.status='reviewing'  THEN 'awaiting_review'
+                    WHEN s.status='retrying'   THEN 'failed'
+                    WHEN s.status='generating' THEN 'failed'
+                END,
                 processing_started_at = NULL,
                 last_error = COALESCE(c.last_error, '') ||
-                             ' [auto-rollback from ' || s.status || ' at ' || NOW()::text || ']'
+                    ' [auto-rollback from ' || s.status || ' at ' || NOW()::text || ']'
             FROM stale s
             WHERE c.id = s.id
             RETURNING c.id, s.status AS old_status, c.status AS new_status
@@ -1948,22 +1985,27 @@ async def cleanup_stale_chapters(ctx) -> None:
 
 
 async def cleanup_stale_docx_jobs(ctx) -> None:
-    """arq cron 每 5 分钟跑(D-AS / D-AY):**所有 in-flight 状态**超时都标 failed。
-    R12 风险项的明确实现:catch worker 死在 pending / rendering_mermaid / pandoc 阶段
-    导致 DocxJob 一直被 partial unique index `uq_docx_jobs_project_inflight` 阻塞,
-    后续 DOCX 一直无法新建。原 v3.7 只覆盖 pending 是不够的——pandoc / chromium 在
-    docker 里 OOM 死锁时,job 卡在 rendering_mermaid 或 pandoc。
+    """arq cron 每 5 分钟跑(D-AS / D-AY / D-BH):**所有 in-flight 状态**超时都标 failed。
+    R12 风险项的明确实现。
 
-    阈值 30 分钟覆盖最长合理执行时间(单 DOCX < 5min,留 6× 余量)。"""
+    ⚠️ D-BH 修正:用 `updated_at` 判超时而不是 `created_at`。原因:
+    - DOCX task 进入 rendering_mermaid 后会等 export_docx 内的串行锁
+      (Redis lock blocking_timeout=120s + module-level asyncio.Lock)
+    - 若多个项目并发 DOCX,后到的 task 在锁上等到 30 分钟后被 cron 误标 failed,
+      但 task 后面会拿到锁继续跑并写 done,**覆盖** failed 状态(数据腐烂)
+    - 改用 updated_at:task 在每次 status 切换时显式 SET updated_at=NOW(),
+      cron 仅清"长时间无进展"的 job;终态 UPDATE 也加 WHERE status 防覆盖
+    """
     async with session_factory() as s:
         result = await s.execute(sa.text(
             f"""
             UPDATE docx_jobs
             SET status='failed',
                 error='auto-rollback: ' || status || ' > {STALE_DOCX_TIMEOUT_SECONDS}s',
-                finished_at=NOW()
+                finished_at=NOW(),
+                updated_at=NOW()
             WHERE status IN ('pending','rendering_mermaid','pandoc')
-              AND created_at < NOW() - INTERVAL '{STALE_DOCX_TIMEOUT_SECONDS} seconds'
+              AND updated_at < NOW() - INTERVAL '{STALE_DOCX_TIMEOUT_SECONDS} seconds'
             RETURNING id, project_id, status
             """
         ))
@@ -2492,6 +2534,17 @@ async def _slot_lost_compensation(project_id: int, run_id: int,
                         "WHERE id=:c AND status='reviewing' "
                         "RETURNING id"
                     ), {"c": current_chapter_id})
+                    # ⭐ D-BI:同步把"未真正生效的 ReviewEvent"标 aborted,
+                    # 前端 P5"上次审核人"过滤 NOT aborted,避免误显示;
+                    # 只标本章本次还没被后续 review 覆盖的最新一条 pending 事件
+                    await s.execute(sa.text(
+                        "UPDATE review_events SET aborted=true "
+                        "WHERE id = ("
+                        "  SELECT id FROM review_events "
+                        "  WHERE chapter_id=:c AND aborted=false "
+                        "  ORDER BY created_at DESC LIMIT 1"
+                        ")"
+                    ), {"c": current_chapter_id})
                 else:
                     # revise / retry / start:reviewing(还没切)/ retrying / pending
                     # / generating(已切下游或重写中)→ 统一 failed
@@ -2702,30 +2755,41 @@ async def call_llm_stream(
 
     backoffs = [int(s) for s in settings.llm_retry_backoff_s.split(",")]
     last_err: Exception | None = None
+    timeout_s = settings.single_chapter_timeout_seconds
 
-    async with asyncio.timeout(settings.single_chapter_timeout_seconds):
-        for attempt in range(settings.llm_retry_max + 1):
-            try:
-                return await _do_stream(model, messages, api_key, user_id, project_id,
-                                        run_id, chapter_index, **kw)
-            except (RateLimitError, ServiceUnavailableError, APIConnectionError, Timeout) as e:
-                last_err = e
-                log.warning("llm_retry", model=model, attempt=attempt, error=str(e))
-                # ⭐ D-BE:把每次重试也写到 errors.log(FR-3.9 要求"重试日志记到 errors.log")
-                await _write_llm_error(project_id, f"LLM retry attempt={attempt}",
-                                       model=model,
-                                       error_type=type(e).__name__, error=str(e))
-                if attempt < settings.llm_retry_max:
-                    await asyncio.sleep(backoffs[attempt])
-                    continue
-                # 重试用尽,落"LLM exhausted"再抛
-                await _write_llm_error(project_id, "LLM exhausted",
-                                       model=model, total_attempts=attempt + 1,
-                                       last_error=str(e))
-                raise LLMRetryFailed(str(e)) from e
-            except Exception:
-                # 4xx 等不重试
-                raise
+    # ⭐ D-BG:总超时也要落 errors.log,**包在 try 外**捕 TimeoutError
+    try:
+        async with asyncio.timeout(timeout_s):
+            for attempt in range(settings.llm_retry_max + 1):
+                try:
+                    return await _do_stream(model, messages, api_key, user_id, project_id,
+                                            run_id, chapter_index, **kw)
+                except (RateLimitError, ServiceUnavailableError, APIConnectionError, Timeout) as e:
+                    last_err = e
+                    log.warning("llm_retry", model=model, attempt=attempt, error=str(e))
+                    # ⭐ D-BE:把每次重试也写到 errors.log(FR-3.9 要求"重试日志记到 errors.log")
+                    await _write_llm_error(project_id, f"LLM retry attempt={attempt}",
+                                           model=model,
+                                           error_type=type(e).__name__, error=str(e))
+                    if attempt < settings.llm_retry_max:
+                        await asyncio.sleep(backoffs[attempt])
+                        continue
+                    # 重试用尽,落"LLM exhausted"再抛
+                    await _write_llm_error(project_id, "LLM exhausted",
+                                           model=model, total_attempts=attempt + 1,
+                                           last_error=str(e))
+                    raise LLMRetryFailed(str(e)) from e
+                except Exception:
+                    # 4xx 等不重试
+                    raise
+    except TimeoutError as te:
+        # ⭐ D-BG:外层 asyncio.timeout 触发的总超时(FR-3.10 = 600s 兜底)
+        await _write_llm_error(project_id, "LLM total timeout",
+                               model=model, timeout_seconds=timeout_s,
+                               last_error=str(last_err) if last_err else None)
+        raise LLMTimeoutExceeded(
+            f"LLM stream exceeded {timeout_s}s total timeout"
+        ) from te
 
     raise LLMRetryFailed(str(last_err))
 
@@ -2803,7 +2867,9 @@ async def call_llm_json(
     backoffs = [int(s) for s in settings.llm_retry_backoff_s.split(",")]
     timeout = timeout_seconds or 120
 
-    async with asyncio.timeout(timeout):
+    # ⭐ D-BG:JSON 模型也要 errors.log + 总超时分支
+    try:
+      async with asyncio.timeout(timeout):
         last_err: Exception | None = None
         for attempt in range(settings.llm_retry_max + 1):
             try:
@@ -2836,9 +2902,16 @@ async def call_llm_json(
             except (RateLimitError, ServiceUnavailableError, APIConnectionError, Timeout) as e:
                 last_err = e
                 log.warning("llm_retry", model=model, attempt=attempt, error=str(e))
+                # ⭐ D-BG:JSON 模型也写 errors.log
+                await _write_llm_error(project_id, f"LLM retry attempt={attempt}",
+                                       model=model, mode="json",
+                                       error_type=type(e).__name__, error=str(e))
                 if attempt < settings.llm_retry_max:
                     await asyncio.sleep(backoffs[attempt])
                     continue
+                await _write_llm_error(project_id, "LLM exhausted",
+                                       model=model, mode="json",
+                                       total_attempts=attempt + 1, last_error=str(e))
                 raise LLMRetryFailed(str(e)) from e
             except LLMRetryFailed:
                 # JSON 解析失败也走重试链(模型偶尔吐非 JSON)
@@ -2846,6 +2919,15 @@ async def call_llm_json(
                     await asyncio.sleep(backoffs[attempt])
                     continue
                 raise
+    except TimeoutError as te:
+        # ⭐ D-BG:JSON 模型外层总超时(默认 120s)也写 errors.log
+        await _write_llm_error(project_id, "LLM total timeout",
+                               model=model, mode="json",
+                               timeout_seconds=timeout,
+                               last_error=str(last_err) if last_err else None)
+        raise LLMTimeoutExceeded(
+            f"LLM JSON exceeded {timeout}s total timeout"
+        ) from te
 
     raise LLMRetryFailed(str(last_err))
 
@@ -2875,6 +2957,7 @@ async def _fake_json(model: str, messages, project_id: int):
 关键:api_key 不进 state,运行时从 DB 取(D-C)。"""
 
 import asyncio
+from datetime import datetime, timezone
 from sqlalchemy import select
 
 from ...config import settings
@@ -2897,7 +2980,11 @@ async def run(state: WorkflowState) -> dict:
     api_key = await _resolve_api_key(state["project_id"])
 
     # 通知前端章节开始
-    await sync_chapter_to_db(state["run_id"], current, status="generating")
+    # ⭐ D-BF:切 generating 同时写 processing_started_at,让 cron `cleanup_stale_chapters`
+    # 能在 worker 进程被 SIGKILL / OOM 直接死时(不会进 SlotLost 分支)兜底回滚
+    await sync_chapter_to_db(state["run_id"], current,
+                             status="generating",
+                             processing_started_at=datetime.now(timezone.utc))
     await publish_event(state["project_id"], "chapter_started", chapter_index=current)
 
     messages = build_messages(
@@ -2918,9 +3005,12 @@ async def run(state: WorkflowState) -> dict:
             chapter_index=current,
             temperature=0.6,
         )
-    except (LLMRetryFailed, asyncio.TimeoutError) as e:
+    except (LLMRetryFailed, LLMTimeoutExceeded, asyncio.TimeoutError) as e:
+        # D-BG:call_llm_stream 总超时已经被包成 LLMTimeoutExceeded,
+        # 这里同时 catch asyncio.TimeoutError 是兜底(防 _do_stream 内部别处冒泡)
         await sync_chapter_to_db(state["run_id"], current,
-                                 status="failed", last_error=str(e))
+                                 status="failed", last_error=str(e),
+                                 processing_started_at=None)
         await publish_event(state["project_id"], "chapter_failed",
                             chapter_index=current, reason=str(e))
         # ⭐ D-AU:用语义化异常,worker task 据此把 project 切 awaiting_review
@@ -3416,19 +3506,22 @@ async def generate_docx_task(ctx, *, project_id: int, docx_job_id: int) -> dict:
             raise RuntimeError(f"proposal.md missing at {md_path}")
         markdown = md_path.read_text(encoding="utf-8")
 
-    # 2. 标记进入 rendering 阶段
+    # 2. 标记进入 rendering 阶段(D-BH:同时刷 updated_at)
     async with session_factory() as s:
         await s.execute(
-            sa.text("UPDATE docx_jobs SET status='rendering_mermaid' WHERE id=:i"),
+            sa.text("UPDATE docx_jobs SET status='rendering_mermaid', "
+                    "updated_at=NOW() WHERE id=:i"),
             {"i": docx_job_id},
         )
         await s.commit()
 
-    # ⭐ D-BD:回调让 export_docx 在 mermaid → pandoc 切换时通知本 task 更新 DB
+    # ⭐ D-BD + D-BH:回调让 export_docx 在 mermaid → pandoc 切换时通知本 task,
+    # 同时刷 updated_at,让 cleanup 能区分"在跑"vs"卡住"
     async def _update_stage(stage: str) -> None:
         async with session_factory() as s:
             await s.execute(
-                sa.text("UPDATE docx_jobs SET status=:s WHERE id=:i"),
+                sa.text("UPDATE docx_jobs SET status=:s, updated_at=NOW() "
+                        "WHERE id=:i"),
                 {"s": stage, "i": docx_job_id},
             )
             await s.commit()
@@ -3444,23 +3537,34 @@ async def generate_docx_task(ctx, *, project_id: int, docx_job_id: int) -> dict:
             on_stage=_update_stage,
         )
     except Exception as e:
+        # ⭐ D-BH:终态写带 WHERE status IN(in-flight)防覆盖已被 cleanup 标 failed 的行
         async with session_factory() as s:
             await s.execute(
                 sa.text("UPDATE docx_jobs SET status='failed', error=:e, "
-                        "finished_at=NOW() WHERE id=:i"),
+                        "finished_at=NOW(), updated_at=NOW() "
+                        "WHERE id=:i AND status IN "
+                        "('pending','rendering_mermaid','pandoc')"),
                 {"i": docx_job_id, "e": str(e)[:4000]},
             )
             await s.commit()
         raise
 
-    # 4. 落 done(output_path 固定为 proposal.docx)
+    # 4. 落 done — D-BH:同样加 WHERE 防覆盖;rowcount==0 说明已被 cleanup 标 failed,
+    # 此时本次执行结果不应展示给用户(产物未必完整)
     async with session_factory() as s:
-        await s.execute(
+        result = await s.execute(
             sa.text("UPDATE docx_jobs SET status='done', output_path=:p, "
-                    "finished_at=NOW() WHERE id=:i"),
+                    "finished_at=NOW(), updated_at=NOW() "
+                    "WHERE id=:i AND status IN "
+                    "('pending','rendering_mermaid','pandoc')"),
             {"i": docx_job_id, "p": str(out_path)},
         )
         await s.commit()
+        if result.rowcount == 0:
+            log.warning("docx_done_overwrite_blocked",
+                        docx_job_id=docx_job_id,
+                        hint="cleanup 已把 job 标 failed;丢弃本次产出避免误展示")
+            return {"status": "stale", "output_path": str(out_path)}
 
     return {"output_path": str(out_path)}
 ```
