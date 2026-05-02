@@ -46,6 +46,11 @@ services:
     volumes:
       - /var/lib/bid-app/postgres-data:/var/lib/postgresql/data
       - /etc/localtime:/etc/localtime:ro
+      # 灾难恢复用:把 backups 目录以只读方式挂进 postgres 容器,
+      # restore-backup.sh 让 postgres 服务自己跑 pg_restore(自带 client),
+      # 落到空数据库后才 start app(避免 entrypoint alembic 先把 schema 建好,
+      # 撞 dump 里的 CREATE TABLE,半完整恢复)。挂 ro 防止 postgres 误改备份文件。
+      - /var/lib/bid-app/backups:/backups:ro
       # D-DS / D-EA:首启 init script 创建测试库 ${POSTGRES_DB}_test;
       # postgres 镜像在 /docker-entrypoint-initdb.d/ 下的 *.sql / *.sh
       # 仅在数据卷为空时执行(首次创建数据库),无重复创建风险。

@@ -149,7 +149,8 @@ ls -lh /var/lib/bid-app/backups/bid_*.dump
 **验证 dump 可读**:
 
 ```bash
-docker compose exec app pg_restore --list /var/lib/bid-app/backups/bid_xxx.dump | head
+# postgres 容器自带 pg_restore;dump 已挂到 /backups:ro
+docker compose exec postgres pg_restore --list /backups/bid_xxx.dump | head
 # 应能列出 10 张表 / index / 序列
 ```
 
@@ -158,7 +159,12 @@ docker compose exec app pg_restore --list /var/lib/bid-app/backups/bid_xxx.dump 
 ```bash
 # 危险!当前数据库会被覆盖。脚本会二次确认。
 ./scripts/restore-backup.sh /var/lib/bid-app/backups/bid_20260501_0300.dump
-# 内部:停 app -> drop db -> create db -> pg_restore -> 重启 app -> 等 healthy
+# 内部顺序(关键):
+#   1. 停 app(阻止 entrypoint alembic upgrade head 抢先建 schema)
+#   2. postgres 容器内 drop & create 空库
+#   3. postgres 容器内 pg_restore --clean --if-exists --exit-on-error(空库直恢复)
+#   4. 起 app(此时 alembic_version 已是 dump 时版本,upgrade head 是 no-op)
+#   5. 等 healthcheck 通过
 ```
 
 ### `BID_APP_MASTER_KEY` 轮换(§24.3)
