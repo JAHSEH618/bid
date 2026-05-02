@@ -1,8 +1,8 @@
-# 投标技术方案生成器 · 实施 Spec v3.24
+# 投标技术方案生成器 · 实施 Spec v3.25
 
 > **配套文档**:`REQUIREMENTS.md` v0.12(讲"做什么"),本文档讲"怎么做"。
-> **版本**:v3.24 (2026-05-02)。基于 v3.23 修了 3 处测试 DB 隔离细节:**`settings.test_database_url` + 名字 `_test` 强校验**(独立测试库,防 teardown 的 drop_all 误炸开发库,D-DM) / **`_use_test_session_factory` fixture monkeypatch 各模块 `session_factory` + override `get_db`**(应用所有路径走 test engine,不再依赖被忽视的全局单例,D-DN) / **`db_engine` 注释口径修正**(去掉"session-scope 共享"误导,明确默认 function scope,D-DO)。
-> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.24 累计 125 处。
+> **版本**:v3.25 (2026-05-02)。基于 v3.24 修了 4 处测试隔离落地细节:**删 test_docx.py 顶层 `from bid_app.db import session_factory`**(顶层 import 在 monkeypatch 之前求值会绑定旧全局对象,绕过 `_use_test_session_factory`;改注入 fixture,D-DP) / **monkeypatch 列表补全 `write_chapter` / `api.health` + `client` fixture 改依赖 `_use_test_session_factory`**(e2e 测试也走 get_db override,D-DQ) / **`db_engine` 校验改用 `make_url(url).database.endswith("_test")`**(精准解析 + 错误信息删除环境变量误导,D-DR) / **测试库创建策略**(docker compose 加 `init-test-db.sh` 首启创建 `${POSTGRES_DB}_test`;本地非 docker 走 `./scripts/create-test-db.sh`,D-DS)。
+> **历史**:v3 修 18 处;v3-pass2 修 9 处;v3.2-3.25 累计 129 处。
 > **文档定位**:**实施蓝图**(每段代码是基线,落地时按工程实践再加日志/异常/参数校验)。代码片段做了类型检查级别的正确性,但**不是 100% "复制即跑"**:连接池、错误码细节、Pydantic schema 字段需要在落地时按需补齐。
 > **目标读者**:实施工程师 / 后续 Claude Code 会话 / 审稿同事。
 > **使用方式**:从 §3 开始按顺序施工;每个里程碑章节(§22)对应明确的可验收输出。
@@ -236,6 +236,10 @@
 | **D-DM** | `Settings` 加 `test_database_url` property:在 `database_url` 基础上把 `database` 名追加 `_test` 后缀;`db_engine` fixture 用它,且启动校验"DB 名必须以 `_test` 结尾",不满足直接 `RuntimeError` 中止 | v3.23 `db_engine` 直接用 `settings.database_url`,teardown 的 `drop_all` 在本地 `.env` 指向开发库时会**直接清空开发数据**。独立测试库 + 名字强校验是双层防线:即使有人误改 `test_database_url` property 跑一个不带 `_test` 的库,fixture 也会抢在 create_all 之前 raise。后续若团队需要指向另一台 DB 服务器,可加 `test_postgres_*` 字段覆盖 property |
 | **D-DN** | conftest.py 加 `_use_test_session_factory` fixture:① `async_sessionmaker(db_engine, expire_on_commit=False)` 创建 TestSession;② 用 `monkeypatch.setattr` 替换 `bid_app.db.session_factory` 与 `bid_app.workflow.sync` / `bid_app.workflow.nodes.assemble` / `bid_app.worker.tasks` / `bid_app.services.concurrency` / `bid_app.services.llm` 等已 import 的引用;③ `app.dependency_overrides[get_db]` 让 HTTP 端点也走 test session;`db` / `user_factory` / `project_factory` / `docx_job_factory` / `auth_client` 都改成依赖 `_use_test_session_factory` 而不是裸 `db_engine` | v3.23 D-DJ 只让 fixture 依赖 `db_engine` 触发 schema create_all,但**应用代码**(worker tasks / assemble 节点 / API 端点)仍用模块顶部 import 的全局 `session_factory`,实际写入还是默认数据库。必须显式 monkeypatch 各模块已 import 的引用 + 替换 `get_db` 才能让"测试只打到 test engine"的承诺落地。`expire_on_commit=False` 同时缓解 D-DH 的 detached 风险扩散到 fixture 之外的代码路径 |
 | **D-DO** | `db_engine` fixture docstring 去掉"session-scope 共享 schema"误导;明确"默认 function scope,每次测试独立 create/drop";如需 session-scope 加速要显式 `scope="session"` 并自行处理事务回滚 | v3.23 注释里写"session-scope 共享 schema, test-scope 包在事务外回滚也行"是错的 — `@pytest_asyncio.fixture` 默认 function scope。注释和实际行为不一致会让实施者误判测试生命周期(以为只 create_all 一次,实际每个测试都做);要么改注释,要么显式 scope。当前选 function 维持"测试隔离强"的默认 |
+| **D-DP** | `tests/integration/test_docx.py` 顶层 **删除** `from bid_app.db import session_factory`;`test_unlink_happens_after_rendering_status_update` 用例签名加 `_use_test_session_factory`,内部 `real_make_session = _use_test_session_factory`(原 `from bid_app.db import session_factory as real_session_factory` 删) | 顶层 import 在 conftest fixture monkeypatch **之前**求值,把名字 `session_factory` 绑定到旧全局对象;后续 `monkeypatch.setattr("bid_app.db.session_factory", ...)` 改的是 `bid_app.db` 模块属性,不影响测试模块本地名字 — 等于绕过 D-DN 让该测试打到默认数据库。删顶层 import + 改用 fixture 注入是唯一干净方案 |
+| **D-DQ** | `_use_test_session_factory` 的 `targets` 列表补 `bid_app.workflow.nodes.write_chapter`(_resolve_api_key 等用)和 `bid_app.api.health`(/health SELECT 1);`client` fixture 改依赖 `_use_test_session_factory` 而不是裸 `db_engine`;补维护提示:`rg "from .*db import session_factory"` 找漏的模块 | v3.24 D-DN 列了 6 个模块,但漏了 §11.2 (write_chapter) 与 §15.4 (health)。两者都 import 了 session_factory,实际写入会打到默认库。`client` fixture 依赖 `db_engine` 时 conftest 不会触发 `_use_test_session_factory` 的 setup → `app.dependency_overrides[get_db]` 没生效,e2e 测试经过 HTTP 路径打到默认库 |
+| **D-DR** | `db_engine` 校验改用 `sqlalchemy.engine.make_url(url).database.endswith("_test")`,不再用 `"_test" in url.rsplit("/", 1)[-1]`;错误信息删 `TEST_DATABASE_URL` 环境变量提法,改成"修改 `settings.test_database_url` property 让数据库名以 `_test` 结尾" | 字符串切片 `rsplit("/", 1)[-1]` 在 URL 含 query string 或末尾斜杠时会撞坑;`make_url(...).database` 是 SQLAlchemy 解析后的纯库名,精准。错误信息提 `TEST_DATABASE_URL` 与 D-DM"不读环境变量"自相矛盾 — 改成指向 property 名一致 |
+| **D-DS** | `docker/init-test-db.sh`:postgres 容器首启 `docker-entrypoint-initdb.d/` 自动 `CREATE DATABASE ${POSTGRES_DB}_test`;§17.5 加文档,本地非 docker 走 `./scripts/create-test-db.sh` 或手动 `psql -c CREATE DATABASE ...`;`Base.metadata.create_all` 只建表不建库,空 `_test` 库时 db_engine 直接 connect refused 是预期信号 | D-DM 拼出测试库 URL 但没说库怎么来。create_all 在不存在的 DB 上跑,只会拿到 connect refused,实施者会误以为是 fixture bug。在 docker init 时一次性建库最自然,本地非 docker 路径文档化,避免每次测试前忘记建库 |
 
 ### 3.2 v2 → v3 修正项一览
 
@@ -5620,6 +5624,10 @@ services:
     volumes:
       - /var/lib/bid-app/postgres-data:/var/lib/postgresql/data
       - /etc/localtime:/etc/localtime:ro
+      # ⭐ D-DS:首启 init script 创建测试库 ${POSTGRES_DB}_test;
+      # postgres 镜像在 /docker-entrypoint-initdb.d/ 下的 *.sql / *.sh
+      # 仅在数据卷为空时执行(首次创建数据库时),无重复创建风险
+      - ./docker/init-test-db.sh:/docker-entrypoint-initdb.d/10-init-test-db.sh:ro
     networks: [bid-net]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
@@ -5699,6 +5707,30 @@ echo "[$(TZ=Asia/Shanghai date +%F\ %T)] backup ok → ${OUT}"
 
 > 备份验证(M5 验收):`docker compose exec app pg_restore --list /var/lib/bid-app/backups/bid_xxx.dump | head` 应能列出表名;`./scripts/restore-backup.sh` 在测试服务器跑通一次。
 
+### 17.5 测试库初始化脚本 `docker/init-test-db.sh`(D-DS)
+
+```bash
+#!/bin/bash
+# ⭐ D-DS:postgres 容器首启时创建 ${POSTGRES_DB}_test。
+# postgres 镜像在 /docker-entrypoint-initdb.d/ 下的 *.sh 仅在数据卷为空时执行;
+# 已存在的数据库不会被覆盖,所以本脚本天然幂等(从环境变量看到的目标库名)。
+set -e
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+    CREATE DATABASE "${POSTGRES_DB}_test";
+    GRANT ALL PRIVILEGES ON DATABASE "${POSTGRES_DB}_test" TO "$POSTGRES_USER";
+EOSQL
+```
+
+> 本地不用 docker 跑测试时,需先手动执行同等 SQL:
+> ```bash
+> psql -h "$POSTGRES_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+>   -c "CREATE DATABASE \"${POSTGRES_DB}_test\";"
+> ```
+> 也可以直接 `./scripts/create-test-db.sh` 封装这条命令(M1 验收清单可加)。
+> `Base.metadata.create_all` 只能创建表,不能创建数据库 — `db_engine` fixture
+> 在 `_test` 数据库不存在时会直接 connect refused,这是预期信号:实施者必须
+> 先按上述方式建库。
+
 ---
 
 ## 18. 测试策略
@@ -5730,11 +5762,16 @@ async def db_engine():
     显式加 `scope="session"`,但要确保事务边界不污染数据(各测试用 SAVEPOINT
     回滚或 truncate)。当前 function scope 隔离最强,慢但不留状态。
     """
+    # ⭐ D-DR:用 SQLAlchemy URL parser 解析数据库名,避免 query string / path
+    # 末尾斜杠等特殊形态绕过简单字符串匹配
+    from sqlalchemy.engine import make_url
     url = settings.test_database_url
-    if "_test" not in url.rsplit("/", 1)[-1]:
+    db_name = make_url(url).database or ""
+    if not db_name.endswith("_test"):
         raise RuntimeError(
-            f"refusing to drop_all on non-test DB: {url!r};"
-            " set TEST_DATABASE_URL to a database whose name ends with '_test'"
+            f"refusing to drop_all on non-test DB (database={db_name!r});"
+            " 修改 settings.test_database_url property 让数据库名以 '_test' 结尾,"
+            " 或加 test_postgres_* 字段覆盖该 property"
         )
     engine = create_async_engine(url, future=True)
     async with engine.begin() as conn:
@@ -5746,7 +5783,10 @@ async def db_engine():
 
 
 @pytest_asyncio.fixture
-async def client(db_engine):
+async def client(_use_test_session_factory):
+    """⭐ D-DQ:依赖 `_use_test_session_factory` 而不是裸 `db_engine`。
+    `_use_test_session_factory` 内部已 `app.dependency_overrides[get_db]`,
+    HTTP 端点都走 test session;e2e 测试不会再绕开 monkeypatch。"""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
@@ -5889,7 +5929,7 @@ async def test_chapter_failed_after_3_retries(client, db_engine, monkeypatch):
     assert chapter.status == "approved"
 ```
 
-### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH / D-DJ / D-DK / D-DL / D-DM / D-DN / D-DO)
+### 18.5 DOCX 状态机回归测试汇总(D-CH / D-CL / D-CR / D-CS / D-CW / D-CX / D-CY / D-DA / D-DB / D-DD / D-DE / D-DF / D-DG / D-DH / D-DJ / D-DK / D-DL / D-DM / D-DN / D-DO / D-DP / D-DQ / D-DR / D-DS)
 
 **conftest.py 必备 fixture**(D-CR:测试代码依赖,需在 conftest.py 落地):
 
@@ -5937,15 +5977,20 @@ async def _use_test_session_factory(db_engine, monkeypatch):
     test_session_factory = async_sessionmaker(
         db_engine, expire_on_commit=False, class_=bid_db.session_factory.class_,
     )
-    # 模块级单例替换 — 已 import `from bid_app.db import session_factory`
-    # 的模块都需要在这里加上
+    # ⭐ D-DQ:模块级单例替换 — 已 `from bid_app.db import session_factory`
+    # 的模块都需要在这里加上。维护方法:
+    #     rg --no-heading -t py "from .*db import session_factory" \
+    #        backend/src/bid_app | awk -F: '{print $1}' | sort -u
+    # 每次发现新模块用了 session_factory,把它加进 targets 列表。
     targets = [
         "bid_app.db",
         "bid_app.workflow.sync",
         "bid_app.workflow.nodes.assemble",
+        "bid_app.workflow.nodes.write_chapter",   # D-DQ:_resolve_api_key 等
         "bid_app.worker.tasks",
         "bid_app.services.concurrency",
-        "bid_app.services.llm",   # _llm_project_dir 用
+        "bid_app.services.llm",     # _llm_project_dir 用
+        "bid_app.api.health",       # D-DQ:/health 端点 SELECT 1
     ]
     for mod in targets:
         monkeypatch.setattr(f"{mod}.session_factory", test_session_factory)
@@ -6089,7 +6134,11 @@ import pytest
 import sqlalchemy as sa
 from pathlib import Path
 
-from bid_app.db import session_factory
+# ⭐ D-DP:**不**在顶层 `from bid_app.db import session_factory`。
+# 顶层 import 在 conftest fixture monkeypatch 之前求值,会让本模块名字
+# `session_factory` 始终指向旧的全局对象,绕过 `_use_test_session_factory`。
+# 所有需要原始 session 的测试用例改成依赖注入 `_use_test_session_factory` fixture,
+# 直接调 `_use_test_session_factory()` 拿 test session。
 from bid_app.models import DocxJob
 
 
@@ -6419,6 +6468,7 @@ async def test_unlink_oserror_marks_job_failed_and_skips_render(
 @pytest.mark.asyncio
 async def test_unlink_happens_after_rendering_status_update(
     db, project_factory, docx_job_factory, monkeypatch, mock_redis_lock,
+    _use_test_session_factory,
 ):
     """⭐ D-DF:锁死 D-CU 顺序不变量 — UPDATE status='rendering_mermaid' 必须
     在 Path.unlink(stale_final_path) 之前执行。
@@ -6435,9 +6485,11 @@ async def test_unlink_happens_after_rendering_status_update(
 
     call_log: list[str] = []
 
-    # ⭐ spy session.execute,捕捉 UPDATE rendering_mermaid 那条 SQL
-    from bid_app.db import session_factory as real_session_factory
-    real_make_session = real_session_factory
+    # ⭐ spy session.execute,捕捉 UPDATE rendering_mermaid 那条 SQL。
+    # ⭐ D-DP:从 _use_test_session_factory 拿"已切到 test engine"的 session 工厂,
+    # 而**不是**重新 `from bid_app.db import session_factory`(那会拿到原始全局对象,
+    # 绕过 D-DN 的 monkeypatch 让测试打到默认数据库)
+    real_make_session = _use_test_session_factory
 
     class _SessionSpy:
         def __init__(self, inner):
