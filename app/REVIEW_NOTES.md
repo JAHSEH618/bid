@@ -370,7 +370,7 @@
 
 审查范围:M0 commits `2be3028` / `d372d8d` / `26ba2a3` / `dd4dbcf` / `9071dde` + M1 commits `a14df32` / `63e9781` / `d54a8bd` / `e747fff` / `7dca873` / `84b9967` / `1208168` / `2a189d1` / `44e974c`。
 
-#### 🔴 严重问题
+#### 🔴 严重问题(已 SendMessage backend-lead)— **2026-05-03 已修复(commit `b80f4c0`)**
 
 1. **`extract_for_project()` 从未读取真实文档,所有 M1+ 项目工作流以空 markdown 起跑 → LLM-1 hallucinate**(`services/document_extractor.py:80-93`)
    - **现状**:`extract_for_project` 用 `getattr(doc, "stored_path", None) or getattr(doc, "path", None)` 取路径,但 `Document` 模型(`models/document.py`)**只有 `markdown_path` 字段**,没有 `stored_path` / `path`。
@@ -387,6 +387,7 @@
          log.exception("read_markdown_failed", path=md_path, kind=kind)
      ```
    - **责任**:backend-lead M0-5 / M1-5。需要立即修。
+   - ✅ **解决**(commit `b80f4c0`):改读 `markdown_path`(已 markitdown 抽取的 .md 文件);多份同 kind 时 ORDER BY id ASC 后写覆盖前写(取最新);失败 log 不抛(`Path.read_text(encoding='utf-8', errors='replace')`)。
 
 #### 🟡 中级问题(不立即阻塞,但建议尽快修)
 
@@ -402,6 +403,7 @@
      ```
      然后 worker 改成调用 helper,保持一致。
    - **责任**:backend-lead 后续小补丁即可。
+   - ✅ **解决**(commit `b80f4c0`):抽 `_mark_chapter_versions_abandoned_in_session(session, chapter_id)` 私有 helper(不开事务),公共入口 + worker 都复用,SQL 单一信源。worker `retry_failed_chapter_task` 把 abandon + ReviewEvent + chapter status 切换塞进同事务。
 
 2. **SPA fallback 端点缺失**(spec §15.6 / `main.py` 末尾)
    - **现状**:`main.py:117-133` 注册了 8 个 router 后没有 `@app.get("/{full_path:path}")` SPA fallback。
@@ -503,7 +505,7 @@
 
 team-lead 同步 backend-lead 三处遗留点已分别核查(见下"已知遗留核查"段)。
 
-#### 🔴 严重问题
+#### 🔴 严重问题(已 SendMessage backend-lead)— **2026-05-03 已修复(commit `97cc5bc`)**
 
 1. **`_resolve_api_key` CLI fallback 在生产路径**有 silent ApiKey 真快照绕过风险**(`workflow/nodes/{write_chapter,gen_visuals,generate_outline}.py` 三处)
    - **现状**(以 `write_chapter._resolve_api_key:32-63` 为代表):
@@ -567,6 +569,7 @@ team-lead 同步 backend-lead 三处遗留点已分别核查(见下"已知遗留
          )
      ```
    - **责任**:backend-lead — `write_chapter.py` / `gen_visuals.py` / `generate_outline.py` 三处一起修。生产路径调用方(`workflow/nodes/*` `run()`)已经知道 run_id,直接传过去即可。
+   - ✅ **解决**(commit `97cc5bc`):严格按推荐 pattern 修。`run_id > 0`(production)时 DB 异常 / snapshot=None / decrypt 失败均 raise(让 worker 顶层 `_fail_project_and_run` 标 failed),完全不走 fallback。`run_id is None / <= 0`(CLI)保留旧 fallback 给 `cli/run_local`。三处节点 caller 已传 `run_id=state.get("run_id")`。同 commit 还修了 🟡 #3 nullable scalar_one()。
 
 #### 🟡 中级问题
 
@@ -670,9 +673,112 @@ team-lead 同步 backend-lead 三处遗留点已分别核查(见下"已知遗留
 - M3 / `services/api_key_validator.py:22`:`_TEST_MODEL = settings.llm3_visuals_model`(模块导入时取值)。如果运维改 .env 后**不重启**,validator 仍用旧模型。settings 是单例,不影响。但配 hot-reload 时要注意。
 - M2 / `api/me.py:160` `/api-key/test` 返回 `last_validated_at` 是个 sa.func 表达式(line 189 SET 的是 `sa.func.now()`),返回时是 DateTime 还是 None?ORM 已 commit + 在 session 里 refresh 后能拿到值。当前没显式 `db.refresh(api_key)`,在 expire_on_commit=False 下 ORM 仍能读已设的属性 — **OK**,但拿到的是 server-side func 表达式还是真值取决于 SQLAlchemy 版本。建议显式 `await db.refresh(api_key)` after commit 拿真值。
 
-### REVIEW-3(待解锁)
+### REVIEW-3(M4 前端)— 2026-05-03
 
-> 等任务 #27 完成。中间已做 M4 骨架预审(team-lead brief 提到的 70% 已合代码),发现要补的细节会先记到本文件。
+审查范围:M4 commits `b64419f`(#26 vite scaffold)/ `8c891e1`(#28 auth pages)/ `cd8b00c`(#25 projects pages)/ `1426712`(#24 chapter review)/ `d6e0229`(#27 proposal+admin+banner)/ `33539fd`(#25 收尾 docs list)。frontend-lead 自验:`tsc -b` 0 错,`vite build` 5.4s,dev server 全 10 路由 200。
+
+#### 🔴 严重问题
+
+**无**。M4 前端整体质量很高,所有 spec §16 + REQUIREMENTS P1-P8 硬指标全部通过。
+
+#### 🟡 中级问题(留作 nit,不阻塞)
+
+1. **`useSSE.ts` ProjectEventType 联合缺 3 个后端事件**(`hooks/useSSE.ts:9-21`)
+   - **缺**:`extract_documents_passthrough`(`extract_documents.py:27`)、`extract_documents_done`(`:49`)、`outline_started`(`generate_outline.py:104`)
+   - **影响**:仅 TS 类型层面,运行时 JSON.parse 是 any,事件不会丢失;但前端 ProjectEventType 用作 exhaustive switch 时不全。当前消费者(ChapterReviewPage)用 if/else 链,fallthrough 分支什么都不做,**无功能影响**。
+   - **建议**:补全联合(3 个事件即使 UI 不响应,至少类型层面知道存在)。
+
+2. **`types.ts` ChapterVersionDTO.text 字段名与后端 `ChapterVersion.body_markdown` 不一致**(`lib/types.ts:123`)
+   - **现状**:后端 `models/chapter_version.py:30` 字段是 `body_markdown`,前端 DTO 写 `text`。
+   - **影响**:目前后端没有 `/chapter-versions` 端点,DTO 仅在 mock 中使用,**当前无运行时影响**。但未来如果加端点会撞 contract。注释 line 119 已标注"M2/REVIEW-2 暂未提供端点"。
+   - **建议**:重命名为 `body_markdown` 与后端对齐;mock 同步改。
+
+3. **`docker-compose.dev.yml` 通过 vite proxy 转发 SSE,默认配置可能不可靠**(`vite.config.ts:14-17`)
+   - **现状**:`'/api': 'http://127.0.0.1:12123'` 简写;http-proxy-middleware 默认对 chunked HTTP 响应是支持的,但有些版本/环境对 `text/event-stream` buffer 不可控。
+   - **影响**:dev 模式下 SSE 流式 token 可能延迟或被批量送达,生产部署直连 uvicorn 不受影响。frontend-lead 自验 dev 路由 200 但未验证 SSE 流式延迟。
+   - **建议**(可选):若开发期 token 延迟明显,改为完整对象配置:
+     ```ts
+     '/api': { target: 'http://127.0.0.1:12123', changeOrigin: true, ws: false }
+     ```
+     或显式禁用 buffering。生产环境无影响。
+
+4. **`mock.ts` 813 行 fixtures 在生产 build 中可能未完全 tree-shaken**(`lib/mock.ts`)
+   - **现状**:`isMockEnabled()` 在 prod 评估为 false(因 `import.meta.env.PROD` 内联),Vite/Rollup *应当* eliminate 不可达分支。但 `MockProjectEventSource` 类被 useSSE.ts 顶部 import,**始终留在 bundle**;它依赖大量 fixture 数据。
+   - **影响**:生产 bundle 体积可能多几十 KB minified。功能完全正确(运行时 mock 不被调用)。
+   - **建议**(可选):用动态 import 把 mock 数据加载延后到 `isMockEnabled()` 真时,或在 vite.config 加 `rollupOptions.external` 对 prod 排除 mock.ts。**当前不阻塞**;FE 团队验收时跑 `vite build && du -sh dist/` 看实际尺寸即可。
+
+5. **`AdminPage.tsx:74` 用 `window.prompt()` 收集重置密码,密码明文显示**
+   - **现状**:`const newPwd = window.prompt('为 ${username} 重置密码(≥ 8 位):')` — 浏览器原生 prompt 是可见输入。
+   - **影响**:仅内部 admin 操作,但 admin 旁边有人路过能看到密码。轻微 UX/安全问题。
+   - **建议**:改成 Dialog + Input type="password";不阻塞 MVP。
+
+6. **`SettingsPage.tsx` API Key delete 用 `window.confirm`**
+   - **现状**:同 5,简单但够用。**OK**,nit 而已。
+
+#### ✅ 通过项(完整列出 spec 硬指标)
+
+- **路由 + RequireAuth**(`router.tsx` + `components/RequireAuth.tsx`):
+  - 10 个路径全:`/login` `/change-password` `/` `/projects/new` `/projects/:id/upload` `/projects/:id/outline` `/projects/:id/review` `/projects/:id/proposal` `/settings` `/admin` + `*` fallback
+  - `RequireAuth` 检查 `must_change_password` → 跳 `/change-password`(`allowMustChange` 例外);`requireAdmin` 检查 role!=admin → 跳 `/`(D-F 兼容)
+  - `AppShell` 包装提供顶部导航 + DashScopeBanner;`/login` `/change-password` 不挂壳
+  - `Authed` helper 简化 RequireAuth + AppShell 嵌套;admin 路由独立 `RequireAuth requireAdmin`(经过 strict 层)
+- **`apiFetch.ts`**:
+  - 401 → /login 重定向 + `redirect()` 防止 location 已在目标时重复跳
+  - 428 → /change-password 重定向(对应 D-F)
+  - `PASSTHROUGH_PATHS = ['/api/auth/login', '/api/auth/refresh', '/api/auth/logout']` 防登录失败循环
+  - mock 层 `isMockEnabled()` 切换;mock 模式下 401/428 也走 redirect(passthrough 例外)
+  - `credentials: 'include'`(JWT cookie httpOnly);FormData 不强加 JSON content-type
+  - 204 → null;非 ok → throw ApiError;响应体 JSON parse fallback 到 text
+  - `readApiError` helper 处理 FastAPI 多种 detail shape(string / {detail: ...} / {detail: {error/message: ...}})
+- **`hooks/useSSE.ts`**:
+  - EventSource + `withCredentials: true`;mock 模式用 MockProjectEventSource
+  - 心跳兼容:后端 `: ping\n\n` 是注释行,浏览器不触发 onmessage(line 61 注释明确)
+  - `handlerRef` + `optionsRef` ref 模式防止 onEvent 引用变化重订阅
+  - `useEffect` 仅 deps `[projectId, options.enabled]`;cleanup `es.close()`
+  - JSON.parse try/catch + `console.warn`(不 crash)
+  - EventSource onerror 不主动 close(让浏览器自动重连 ~3s);只 callback 通知
+  - `onopen` / `onerror` 选项让消费者可挂 hook
+- **`hooks/useAuth.ts`**:`useCurrentUser` `retry: false` + `staleTime: 60s` 减少 401 风暴 + 服务器压力;`useLogout` `qc.clear()` 全量清缓存;`useChangePassword` invalidate `['auth', 'me']`
+- **`hooks/useToast.tsx`**:Provider + setTimeout 自动 dismiss(默认 4s);button 点击手动 dismiss;5 个 variant
+- **`lib/markdown.tsx` MarkdownRenderer**:
+  - mermaid 全局 `mermaid.initialize` 单例(`mermaidInitialised` flag,避免每次渲染重 init)
+  - `securityLevel: 'loose'` 兼容中文 token
+  - 中文字体 stack:`-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif`(Mac / Windows / Linux 全覆盖)
+  - `cancelled` flag 防止 unmount 后 setState
+  - 渲染失败 fallback 成 `<pre>` 代码块(降级容错,**不阻塞预览**)
+  - 唯一随机 `id` 防 SVG 命名冲突
+  - `remarkGfm` + `rehypeRaw` 支持 GFM 表格 + 嵌入 HTML
+  - code 组件 fence 检测 `language-mermaid`,其它语言原样 `<code className>`
+- **8 个用户页面**(LoginPage / ChangePasswordPage / ProjectListPage / NewProjectPage / DocumentUploadPage / OutlineConfirmPage / ChapterReviewPage / ProposalPage / SettingsPage / AdminPage,共 10):
+  - 全部用 zod / pydantic-mirror 客户端校验;错误回填到 form errors state
+  - 全部用 `readApiError` 提取后端错误 detail 显示在 toast
+  - destructive 操作(删项目 / 删用户 / 禁用 / 删 API Key)均 `window.confirm` 二次确认
+  - loading / error / empty 三态友好提示;`!project.data` 展示"项目不存在或无访问权限"
+  - **ChapterReviewPage**(M4 最难):
+    - SSE 状态机正确处理 `chapter_started/picked` → `chapter_token` 累积 → `awaiting_review` 落 readyText → `chapter_approved/skipped/failed/max_retry_skip` 重置 streaming + refetch outline
+    - `streaming.index !== activeIndex` 时不显示流式;切章节自动切到对应章节 readyText
+    - `chapter_failed` 红 toast + 转到 ReviewActions retry 流(对应 F14)
+    - `proposal_ready` toast + project.refetch()
+    - `ChapterEmptyHint` 8 个 status 都给文案(pending / generating / retrying / reviewing / approved / skipped / failed / 默认)
+    - 历史版本 Tab 显式提示"本期后端尚未提供历史版本端点"(诚实)
+- **`ChapterSidebar`**:8 个 status 各自 Badge variant(失败 → destructive 红);retry_count 可选透传(M1 后端不返回但 mock 兼容)
+- **`ReviewActions`**:三按钮 awaiting_review 启用,其他禁用;revise 必须有 feedback;failed → 单独 retry CTA destructive 风格;busy state 防重复提交
+- **`DataExportPanel`**:复制 markdown / 下载 .md / 触发 .docx / 进度 Badge / done 显示下载按钮 / **invalidated 状态有专门"请重新生成"hint**(对应 D-CG / D-CK)
+- **`DashScopeBanner`**:localStorage 一次性提示(D3);`role="status"` 无障碍
+- **API hooks**(`api/{auth,me,admin,projects,chapters,docx}.ts`):
+  - 每个 hook 文件头部注释明确对齐后端端点 contract,引用 spec / commit hash
+  - tanstack query 命名规范:queryKey 嵌套(`['projects', id, 'outline']` / `['admin', 'users']`)
+  - mutation 后正确 invalidate 相关 query
+  - 404 → null 优雅处理(`useApiKeyInfo`)
+  - polling refetchInterval 函数化:done/failed 停止(`useDocxJob`)
+  - 文件下载用 `apiUrl()` + `<a href download>` 而不是 fetch+Blob(让 Content-Disposition 文件名生效,带 cookie)
+- **`lib/types.ts`**:与后端 schemas 字段严格对齐(`UserDTO` / `ProjectDTO` / `OutlineChapterDTO` / `OutlineResponseDTO` / `OutlineChapterIn` / `DocxJobDTO` 等);ProjectStatus / ChapterStatus / DocxJobStatus 完整枚举;明确标注未上线端点(`ChapterVersionDTO`)
+- **`lib/mock.ts`**:
+  - `isMockEnabled()` 三层 gate:`typeof import.meta` / `PROD 必关` / `VITE_API_REAL=1 必关` — **生产 build 不夹带 mock 运行时**
+  - 字段名 / 状态枚举 / 路径与后端契约严格一致(注释引用 commit 7dca873 / 2a189d1 / 44e974c)
+- **`main.tsx`**:`QueryClient` `retry: 1 / refetchOnWindowFocus: false / staleTime: 30s`(合理默认);Provider 嵌套层次正确(QueryClient → ToastProvider → RouterProvider)
+- **shadcn 9 件套**:Badge / Button / Card / Dialog / Input / Label / Separator / Tabs / Textarea — 风格统一,导航 / 按钮 / 表单视觉协调;管理后台 Dialog + Tabs 用法标准
+- **App.tsx**:简单 `<Outlet />` 容器;`min-h-screen bg-background text-foreground` 全局背景
 
 ### REVIEW-4(M5 部署)— 2026-05-03
 
