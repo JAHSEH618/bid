@@ -17,8 +17,14 @@ from hashlib import sha256
 import redis.asyncio as redis_async
 from arq.connections import RedisSettings, create_pool
 from fastapi import FastAPI
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from bid_app.config import settings
+from bid_app.core.middleware import TraceIdMiddleware
+from bid_app.core.rate_limit import limiter
+from bid_app.core.security_headers import SecurityHeadersMiddleware
 
 
 def _print_startup_banner() -> None:
@@ -94,6 +100,17 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
+
+# === Middleware(M2-2,从外到内执行顺序:TraceId → SlowAPI → SecurityHeaders) ===
+# Starlette 中 add_middleware **后注册的先执行**(LIFO),所以这里反向写:
+# 1. SecurityHeaders 在最里(响应阶段最先 setdefault 头)
+# 2. SlowAPI 在中间(请求阶段触发限流)
+# 3. TraceId 在最外(请求阶段最先生成 trace_id 注入 contextvars)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(TraceIdMiddleware)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # === 路由挂载(M1) ===
