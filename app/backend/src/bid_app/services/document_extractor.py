@@ -54,16 +54,24 @@ def extract_file(path: str | Path) -> str:
 
 async def extract_for_project(project_id: int) -> dict[str, str]:
     """从 DB ``documents`` 表读 3 类文档(tech_spec / scoring / template)
-    并抽取成 markdown,返回 dict 直接喂给 WorkflowState。
+    返回 ``{tech_spec_md, scoring_md, template_md}``,直接喂给 WorkflowState。
 
-    M1 (#10) 落 Document 模型后才会真正跑。
+    数据来源:``Document.markdown_path`` 是 ``api/projects.py``
+    上传端点用 markitdown 抽取后落盘的 ``{project_dir}/uploads/{kind}.md`` 路径。
+    本函数直接读取该 .md 文本,不再二次跑 markitdown(避免重复抽取的 IO)。
+
+    多份同 kind:取 ``id`` 最大的(最新上传)一份。
     """
     from sqlalchemy import select
 
     from ..db import session_factory
     from ..models import Document  # type: ignore[attr-defined]
 
-    out: dict[str, str] = {"tech_spec_md": "", "scoring_md": "", "template_md": ""}
+    out: dict[str, str] = {
+        "tech_spec_md": "",
+        "scoring_md": "",
+        "template_md": "",
+    }
     kind_to_field = {
         "tech_spec": "tech_spec_md",
         "scoring": "scoring_md",
@@ -73,23 +81,36 @@ async def extract_for_project(project_id: int) -> dict[str, str]:
     async with session_factory() as s:
         rows = (
             await s.execute(
-                select(Document).where(Document.project_id == project_id)
+                select(Document)
+                .where(Document.project_id == project_id)
+                .order_by(Document.id.asc())
             )
         ).scalars().all()
 
+    # 用 id ASC 遍历,后写覆盖前写,等价于"取最新上传(最大 id)"
     for doc in rows:
         kind = getattr(doc, "kind", None)
-        path = getattr(doc, "stored_path", None) or getattr(doc, "path", None)
-        if not path or kind not in kind_to_field:
+        if kind not in kind_to_field:
             continue
-        try:
-            out[kind_to_field[kind]] = extract_file(path)
-        except Exception:
-            log.exception(
-                "extract_for_project_failed",
+        md_path = getattr(doc, "markdown_path", None)
+        if not md_path:
+            log.warning(
+                "doc_missing_markdown_path",
                 project_id=project_id,
                 kind=kind,
-                path=str(path),
+                doc_id=getattr(doc, "id", None),
+            )
+            continue
+        try:
+            out[kind_to_field[kind]] = Path(md_path).read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except Exception:
+            log.exception(
+                "read_markdown_failed",
+                project_id=project_id,
+                kind=kind,
+                path=md_path,
             )
     return out
 

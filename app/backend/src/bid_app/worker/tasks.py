@@ -482,7 +482,9 @@ async def retry_failed_chapter_task(
 
     try:
         # ⭐ D-AC + D-AD + FR-4.7:写 ReviewEvent + 把章节从 retrying → pending +
-        # 当前未审版本 abandoned=true
+        # 章节所有非 abandoned 版本标 abandoned=true(走 sync helper 单一信源)
+        from ..workflow.sync import _mark_chapter_versions_abandoned_in_session
+
         async with session_factory() as s:
             s.add(
                 ReviewEvent(
@@ -491,13 +493,7 @@ async def retry_failed_chapter_task(
                     decision="retry_failed",
                 )
             )
-            await s.execute(
-                sa.text(
-                    "UPDATE chapter_versions SET abandoned=true "
-                    "WHERE chapter_id=:c AND abandoned=false"
-                ),
-                {"c": chapter_id},
-            )
+            await _mark_chapter_versions_abandoned_in_session(s, chapter_id)
             # ⭐ D-BS:切 pending 同时写 processing_started_at
             await s.execute(
                 sa.text(

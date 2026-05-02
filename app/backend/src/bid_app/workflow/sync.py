@@ -23,6 +23,7 @@ from typing import Any
 import sqlalchemy as sa
 import structlog
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import session_factory
 from ..events.bus import event_bus
@@ -170,20 +171,37 @@ async def save_chapter_version(
         return cv.id
 
 
+# ⭐ FR-4.7:retry 等于整章重写,旧版本(不论是否已审)都不再代表最新可用产物。
+# 单一信源:本 SQL 同时被 ``mark_chapter_versions_abandoned``(独立 session)和
+# ``worker/tasks.py:retry_failed_chapter_task``(嵌入 ReviewEvent + chapter status
+# 同事务)使用,WHERE 子句保持一致以避免语义漂移。
+_MARK_VERSIONS_ABANDONED_SQL = (
+    "UPDATE chapter_versions SET abandoned=true "
+    "WHERE chapter_id=:c AND abandoned=false"
+)
+
+
+async def _mark_chapter_versions_abandoned_in_session(
+    session: AsyncSession, chapter_id: int
+) -> int:
+    """在调用方提供的 session 内执行 abandon SQL(不 commit,不开 transaction)。"""
+    result = await session.execute(
+        sa.text(_MARK_VERSIONS_ABANDONED_SQL), {"c": chapter_id}
+    )
+    return result.rowcount or 0
+
+
 async def mark_chapter_versions_abandoned(chapter_id: int) -> int:
-    """FR-4.7:章节 retry 时,把本轮所有未审版本(decision IS NULL)标
-    ``abandoned=true``。返回受影响行数。
+    """FR-4.7:把该章节**所有非 abandoned 版本**标 ``abandoned=true``。
+    返回受影响行数。
+
+    本入口走独立 session + commit;worker retry 路径直接走
+    ``_mark_chapter_versions_abandoned_in_session`` 复用单事务。
     """
     async with session_factory() as s:
-        result = await s.execute(
-            sa.text(
-                "UPDATE chapter_versions SET abandoned=true "
-                "WHERE chapter_id=:c AND decision IS NULL AND abandoned=false"
-            ),
-            {"c": chapter_id},
-        )
+        n = await _mark_chapter_versions_abandoned_in_session(s, chapter_id)
         await s.commit()
-        return result.rowcount or 0
+        return n
 
 
 async def record_review_event(
