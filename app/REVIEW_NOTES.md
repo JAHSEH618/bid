@@ -382,13 +382,14 @@
 
 审查范围:M5 commits `2b7e001` / `292e974` / `8e6adaa` / `c80441e`。**§23 整体走查推到任务 #37**(本轮只看 M5 部署交付物的代码 / 配置正确性)。
 
-#### 🔴 严重问题(已 SendMessage devops-lead)
+#### 🔴 严重问题(已 SendMessage devops-lead)— **2026-05-03 已全部修复(任务 #38)**
 
 1. **uv.lock 缺失,`docker build` 立刻失败**(`Dockerfile:54` `COPY backend/uv.lock` + `:55` `uv sync --frozen`)
    - **现状**:`app/backend/uv.lock` 不存在,`.gitignore` 也没有忽略它。
    - **影响**:`docker compose build` 在 COPY 阶段直接抛"file not found";`scripts/install.sh` 跑到第 [4/6] 步退出。M5 验收"fresh Linux 30 分钟"无法成立。
    - **修复**:`cd app/backend && uv lock` 生成并 commit `uv.lock`。
    - **责任**:本身是 backend M0 的产物,但 Dockerfile 假设它存在 — devops-lead 与 backend-lead 协作。
+   - ✅ **解决**(commit `70278aa`):305KB lockfile,158 packages,涵盖 langgraph / litellm / arq / fastapi / sqlalchemy 等 19 个 spec 关键依赖;requires-python 与 pyproject.toml 一致(`==3.12.*`)。
 
 2. **`scripts/restore-backup.sh` 灾难恢复顺序错误,落到 alembic 迁移过的 DB → 冲突 / 数据腐蚀**(`scripts/restore-backup.sh:75-94`)
    - **现状**:顺序是 stop app → drop db → create db → **start app(触发 entrypoint:pg_isready + alembic upgrade head + supervisord)** → exec app pg_restore。
@@ -396,6 +397,7 @@
    - **影响**:不带 `--clean / --if-exists` 时 `pg_restore` 默认逐对象报错;不进事务时 `COPY` 偶尔成功 + DDL 全失败 = 半完整库 + `alembic_version` 行可能重叠;基本无法可靠恢复。spec §24.2 明确 "停 app → drop db → create db → pg_restore → 起 app"(restore 落空库,起 app 后 entrypoint 看到 alembic_version 已是头版,不再 migrate)。
    - **修复方案 A(推荐)**:让 `postgres` 服务本身做 pg_restore(postgres:16-alpine 自带 `pg_restore`)。给 postgres service 加 `/var/lib/bid-app/backups:/backups:ro` 挂载,然后 `docker compose exec -T postgres pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" /backups/<dump>`。最后再 `start app`。
    - **修复方案 B**:用 `docker compose run --rm --entrypoint /app/backend/.venv/bin/pg_restore app -h postgres ...` 一次性容器,绕过 entrypoint.sh 的 alembic;再 `start app`。
+   - ✅ **解决**(commit `e6b1f49`,采用方案 A):`docker-compose.yml:53` 给 postgres service 加 `/var/lib/bid-app/backups:/backups:ro` 只读挂载;`scripts/restore-backup.sh` 完全重写,顺序变为 ① postgres exec pg_restore --list 校验 → ② stop app(阻 alembic)→ ③ postgres exec drop/create 空库 → ④ postgres exec pg_restore `--clean --if-exists --no-owner --no-privileges --exit-on-error` → ⑤ start app(alembic upgrade head 此时是 no-op)→ ⑥ 等 healthcheck;脚本头注释明确解释了为什么不让 app 容器跑 pg_restore;README.md "灾难恢复"章节同步更新为新流程。`--exit-on-error` 防 partial restore;`--clean --if-exists` 兜底残留对象。
 
 #### ✅ 通过项
 
@@ -407,7 +409,7 @@
 - **init-test-db.sh**(D-DS)+ **scripts/create-test-db.sh**(D-DV):分流明确,init 脚本含"非幂等,空卷首启才执行,已有卷必须手动跑 create-test-db.sh"的注释;create-test-db.sh `SELECT 1 FROM pg_database` 显式幂等检查 + 自动从 `.env` 加载 + macOS / Ubuntu psql 安装提示。
 - **scripts/install.sh**:校验 docker / docker compose / python3;EUID!=0 时透明走 sudo;mkdir + chown(`postgres-data` 999:999 / `redis-data` 999:999 / `projects` `backups` 1000:1000);`.env` 已在则跳过;`docker compose build` + `up -d` + 等 healthcheck 5 分钟;末尾 R10 警告。
 - **scripts/gen-secrets.sh**:从 `.env.example` `cp` 到 `.env`;**拒绝覆盖已存在 .env**;Python `secrets.token_hex(32)` / `token_urlsafe(24)` 生成;sed 占位符替换 + `chmod 600` + 自检无残留 `__GENERATE_ME__ / __64_HEX_CHARS__`;输出 master_key 前 8 位 + R10 警告。
-- **scripts/restore-backup.sh**:二次确认(交互式 yes / `FORCE=1`);自动加载 `.env`;`pg_restore --list` 预校验 dump 可读;但**核心顺序有 ISSUE-3**(见上)。
+- **scripts/restore-backup.sh**(M5-FIX `e6b1f49` 后):二次确认(交互式 yes / `FORCE=1`);自动加载 `.env`;`postgres exec pg_restore --list` 预校验;auto-start postgres if down;**正确顺序** stop app → drop/create empty DB → pg_restore (--clean / --if-exists / --exit-on-error) → start app → wait healthcheck;头注释解释为什么不让 app 跑 pg_restore;落地为方案 A。
 - **docker/pg-backup.sh**:从 `/etc/bid-app.env` 取环境;`pg_dump -F c` 写 `.partial → mv` 原子提交;7 天滚动 `find -mtime +7 -delete`。
 - **.env.example**:R10 警告醒目;包含所有 §6 字段(POSTGRES_* / REDIS_URL / BID_APP_MASTER_KEY / JWT_SECRET / 默认 admin / LLM 模型 / 业务参数 / 路径 / 日志);**不**写 `DATABASE_URL=postgresql+asyncpg://${VAR}/...`(D-W,DSN 由 config.py 拼)。
 - **README.md**:一键部署 / 本地开发 / 测试库初始化(D-EA / D-DV 分流表)/ 部署运维 / 备份恢复 / master_key 轮换 / 数据卷布局 / 健康检查 / 升级流程,链接全部 §章节;R10 警告完整 prominent。
