@@ -24,6 +24,10 @@ from ..core.crypto import decrypt_api_key, encrypt_api_key
 from ..core.security import hash_password, verify_password
 from ..deps import get_current_user, get_current_user_lax, get_db
 from ..models import ApiKey, User
+from ..services.api_key_validator import (
+    ApiKeyValidationFailed,
+    validate_dashscope,
+)
 from ..schemas.auth import (
     ApiKeyInfoResponse,
     ChangePasswordRequest,
@@ -114,13 +118,14 @@ async def set_api_key(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
-    """加密保存 ApiKey。
+    """加密保存 ApiKey。**先调 DashScope 验证连通才存**(§15.5)。"""
+    try:
+        await validate_dashscope(body.key)
+    except ApiKeyValidationFailed as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"API Key 验证失败:{e}"
+        ) from e
 
-    ⚠️ M2-4 不调 validator(避免 M2-5 未落时这里报循环 import);
-    M2-5 (#18) 在 set 前接 ``api_key_validator.validate_dashscope`` 并
-    在失败时 400。本 commit 先存,前端可手动调 ``GET /api-key/test``
-    (M2-5)验证。
-    """
     encrypted = encrypt_api_key(body.key)
     existing = (
         await db.execute(
@@ -129,19 +134,61 @@ async def set_api_key(
             )
         )
     ).scalar_one_or_none()
+    now = sa.func.now()
     if existing is not None:
         existing.encrypted_key = encrypted
-        existing.updated_at = sa.func.now()  # type: ignore[assignment]
+        existing.last_validated_at = now  # type: ignore[assignment]
+        existing.updated_at = now  # type: ignore[assignment]
     else:
         db.add(
             ApiKey(
                 user_id=user.id,
                 provider="dashscope",
                 encrypted_key=encrypted,
+                last_validated_at=now,  # type: ignore[arg-type]
             )
         )
     await db.commit()
     return {"ok": True}
+
+
+@router.get("/api-key/test")
+async def test_api_key(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, object]:
+    """⭐ §15.5 / D-G:用当前用户已保存的 Key 发最小请求验连通。
+
+    成功:返回 ``{ok: true, last_validated_at: <ts>}``,同时刷
+    ``ApiKey.last_validated_at``。
+    失败:返回 ``{ok: false, error: <msg>}``(**不抛 4xx**;让前端按需展示)。
+    """
+    api_key = (
+        await db.execute(
+            select(ApiKey).where(
+                ApiKey.user_id == user.id, ApiKey.provider == "dashscope"
+            )
+        )
+    ).scalar_one_or_none()
+    if api_key is None:
+        raise HTTPException(
+            status.HTTP_412_PRECONDITION_FAILED, "尚未配置 API Key"
+        )
+
+    try:
+        plaintext = decrypt_api_key(api_key.encrypted_key)
+    except Exception as e:
+        log.exception("api_key_test_decrypt_failed", user_id=user.id)
+        return {"ok": False, "error": f"解密失败: {e}"}
+
+    try:
+        await validate_dashscope(plaintext)
+    except ApiKeyValidationFailed as e:
+        return {"ok": False, "error": str(e)}
+
+    api_key.last_validated_at = sa.func.now()  # type: ignore[assignment]
+    await db.commit()
+    return {"ok": True, "last_validated_at": api_key.last_validated_at}
 
 
 @router.delete("/api-key")
