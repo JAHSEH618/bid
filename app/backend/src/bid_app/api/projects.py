@@ -40,6 +40,7 @@ from ..deps import get_current_user, get_db
 from ..models import ApiKey, Chapter, Document, Project, Run, User
 from ..schemas.projects import (
     DocumentUploadResponse,
+    OutlineChapterDTO,
     OutlineConfirmRequest,
     OutlineResponse,
     ProjectCreateRequest,
@@ -57,7 +58,11 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 log = structlog.get_logger()
 
 # 上传白名单 + 单文件大小上限(FR-1.4)
-_ALLOWED_UPLOAD_EXT = {".docx", ".doc", ".md", ".markdown", ".txt", ".pdf"}
+# ⚠️ 不含 .pdf:虽然 markitdown 名义支持 PDF,但加密 / 扫描型 PDF 抽不出文字,
+# 我们的 LibreOffice fallback 只转 .doc 不转 .pdf。前端
+# DocumentUploadPage 也只 accept docx/doc/md/txt — 后端列表与前端对齐,
+# 防止用户传上来后端默默存但抽取失败。如需 .pdf 支持是更大工作量(单独 task)。
+_ALLOWED_UPLOAD_EXT = {".docx", ".doc", ".md", ".markdown", ".txt"}
 _VALID_DOC_KINDS = {"tech_spec", "scoring", "template"}
 
 
@@ -446,7 +451,7 @@ async def get_outline(
         )
     ).scalar_one_or_none()
 
-    chapters: list[dict[str, Any]] = []
+    chapters: list[OutlineChapterDTO] = []
     if run is not None:
         rows = (
             await db.execute(
@@ -456,19 +461,19 @@ async def get_outline(
             )
         ).scalars().all()
         chapters = [
-            {
-                "id": f"ch_{c.index + 1:02d}",
-                "title": c.title,
-                "summary": c.summary,
-                "key_points": c.key_points or [],
-                "target_pages": c.target_pages,
-                "index": c.index,
-                "status": c.status,
+            OutlineChapterDTO(
+                id=f"ch_{c.index + 1:02d}",
+                title=c.title,
+                summary=c.summary,
+                key_points=c.key_points or [],
+                target_pages=c.target_pages,
+                index=c.index,
+                status=c.status,
                 # ⭐ R-15 配套:R-14 partial / 完整正文都让 outline 端点暴露,
                 # 前端 useProjectOutline 轮询拿到就 hydrate(单端点路径,
                 # 不强制额外调 GET /chapters/{idx})。
-                "final_text": c.final_text,
-            }
+                final_text=c.final_text,
+            )
             for c in rows
         ]
 
