@@ -47,13 +47,22 @@ class ProjectCreateRequest(BaseModel):
 
 
 class ProjectResponse(BaseModel):
+    """⭐ M1 任务 #4:**不**暴露 ``dir_path`` / ``api_key_owner`` 给前端。
+
+    - ``dir_path``:服务器端文件路径(``/data/projects/<id>`` 之类),纯
+      实现细节,前端拿了也用不上,反而泄露内部目录结构(让外部扫描者
+      推断容器内 layout)。需要内部用(下载 / DOCX 路径拼接)的代码继续
+      从 ORM ``Project.dir_path`` 取,**不**经过 schema。
+    - ``api_key_owner``:用户内部 ID。SSE 团队共享池设计下,其他成员
+      看见"项目正在跑"就够了,具体是谁的 API key 在掏配额是结算 / 后台
+      统计层面的事(/api/admin),不应在普通 P2 列表 / P3 详情 expose。
+    """
+
     id: int
     name: str
     description: str | None
     status: ProjectStatus
     created_by: int
-    api_key_owner: int | None
-    dir_path: str
     pages_per_chapter: int
     max_retry_per_chapter: int
     created_at: datetime

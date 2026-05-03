@@ -13,6 +13,10 @@ token / chapter_started / chapter_failed / awaiting_review / proposal_ready
 
 ⚠️ 鉴权:走 ``Depends(get_current_user)``,M1 阶段 stub 解析
 ``$BID_APP_DEV_USER_ID``;M2 接 JWT cookie 后透明替换。
+
+⭐ 订阅范围:**团队共享池**(产品定义)。任何登录用户都可订阅任何项目的
+SSE 流,理由是协作场景(团队成员共享 API key 配额、共看进度)。M2 **不**
+按 admin / creator 收紧 —— 这是设计意图,不是 TODO。
 """
 from __future__ import annotations
 
@@ -41,9 +45,14 @@ PING_INTERVAL = 20  # 秒。代理默认静默 30-60s 关连接,20s 心跳留容
 async def _project_visible_to_user(
     db: AsyncSession, project_id: int, user: User
 ) -> bool:
-    """团队共享池:任何 active user 都可订阅(M1 简化版)。
+    """⭐ 团队共享池设计(产品决定,REQUIREMENTS.md 写明):任何 active user
+    都可订阅项目流;**M2 不收紧**。
 
-    M2 收紧:仅 ``role='admin'`` 或 ``Project.created_by == user.id`` 才可订阅。
+    历史注释曾写"M2 收紧仅 admin / creator 可订阅",已废弃 — 团队成员需要
+    互相看到"现在谁的 key 在跑哪个项目",这是协作前提,**不是**漏洞。
+    项目本身的访问控制(创建 / 删除 / /start)走另一条路径。
+
+    本函数仅校验 project 存在,通过 get_current_user 已确保 user 是登录态。
     """
     row = await db.execute(
         sa.text("SELECT 1 FROM projects WHERE id=:p"), {"p": project_id}
