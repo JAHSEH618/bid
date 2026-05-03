@@ -12,18 +12,27 @@ function ensureMermaidInit() {
   if (mermaidInitialised) return
   mermaid.initialize({
     startOnLoad: false,
-    theme: 'default',
+    theme: 'base',
     securityLevel: 'loose',
     // PingFang SC / Microsoft YaHei:中文 label 优先字体;后端 mermaid-cli
     // 渲染 png 时也用同款字体(docker/mermaid-config.json 一致)。
     fontFamily:
       '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif',
-    // dark mode 兼容:让浏览器主题切换时自动用合适色板。
+    // 用户反馈:mermaid 图底色应该是白色(theme:base + 显式 background 白)。
     themeVariables: {
-      primaryColor: '#f1f5f9',
+      background: '#ffffff',
+      primaryColor: '#ffffff',
       primaryTextColor: '#0f172a',
-      lineColor: '#64748b',
-      secondaryColor: '#e2e8f0',
+      primaryBorderColor: '#1f2937',
+      lineColor: '#475569',
+      secondaryColor: '#f1f5f9',
+      tertiaryColor: '#e2e8f0',
+      edgeLabelBackground: '#ffffff',
+      clusterBkg: '#ffffff',
+      clusterBorder: '#cbd5e1',
+      noteBkgColor: '#fef9c3',
+      noteTextColor: '#0f172a',
+      noteBorderColor: '#facc15',
     },
   })
   mermaidInitialised = true
