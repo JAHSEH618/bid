@@ -2,8 +2,11 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <!-- 不锁 maximum-scale / user-scalable=no:防止视障用户无法放大(Vercel 必删 anti-pattern) -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0f172a" />
+    <!-- theme-color 与 globals.css --background 浅靛青同源,iOS Safari URL bar 跟随 -->
+    <meta name="theme-color" content="#f6f8fc" />
+    <meta name="color-scheme" content="light" />
     <title>投标技术方案生成器</title>
   </head>
   <body>

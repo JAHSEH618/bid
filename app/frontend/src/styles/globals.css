@@ -70,6 +70,9 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
+    /* 当前未实现 dark mode,显式声明亲 light scheme 让 native 控件
+       (<select>/scrollbar/form autofill 等)采用与设计一致的浅色调色板。 */
+    color-scheme: light;
   }
   body {
     @apply bg-background text-foreground;
@@ -224,4 +227,28 @@
 /* 整页加载渐入,避免突兀 */
 .page-enter {
   animation: fade-up 240ms ease-out both;
+}
+
+/* === 尊重 prefers-reduced-motion(Vercel 指南必备) ===
+   用户开启系统级减少动画时,把所有自定义关键帧动画 + 通用 transition
+   全部缩成 1ms,既保留状态切换语义、又不会触发眩晕/前庭功能不适。
+   注:具体组件用 motion-reduce: variant 已经处理了某些 hover transform,
+   这里负责兜底全局动画。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+  .animate-shake,
+  .animate-pulse-soft,
+  .animate-fade-up,
+  .skeleton,
+  .caret-blink,
+  .page-enter {
+    animation: none !important;
+  }
 }
