@@ -1,0 +1,11 @@
+flowchart LR
+  U[用户浏览器] -->|HTTPS| FE[前端 SPA]
+  FE -->|REST + SSE| API[FastAPI]
+  API <-->|enqueue| ARQ[arq worker]
+  ARQ -->|LangGraph| GRAPH["工作流图<br/>11 个节点"]
+  GRAPH -->|流式 token| LLM["百炼 DashScope<br/>qwen3.6-max / flash"]
+  GRAPH -->|checkpoint| PG[("PostgreSQL 16")]
+  ARQ -->|缓存 / 队列 / 锁| REDIS[("Redis 7")]
+  GRAPH -->|文件| FS["/var/lib/bid-app"]
+  ARQ -->|export| PANDOC["Pandoc + Mermaid CLI<br/>+ Chromium"]
+  PANDOC -->|.docx| FS

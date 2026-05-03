@@ -37,19 +37,9 @@
 
 ## 🏗️ 架构总览
 
-```mermaid
-flowchart LR
-  U[用户浏览器] -->|HTTPS| FE[前端 SPA]
-  FE -->|REST + SSE| API[FastAPI]
-  API <-->|enqueue| ARQ[arq worker]
-  ARQ -->|LangGraph| GRAPH[工作流图<br/>11 个节点]
-  GRAPH -->|流式 token| LLM[百炼 DashScope<br/>qwen3.6-max / flash]
-  GRAPH -->|checkpoint| PG[(PostgreSQL 16)]
-  ARQ -->|缓存 / 队列 / 锁| REDIS[(Redis 7)]
-  GRAPH -->|文件| FS[/var/lib/bid-app]
-  ARQ -->|export| PANDOC[Pandoc + Mermaid CLI<br/>+ Chromium]
-  PANDOC -->|.docx| FS
-```
+![bid-app 架构图](docs/architecture.png)
+
+> 源文件：[`docs/architecture.mmd`](docs/architecture.mmd)（Mermaid 源），用容器内 `mmdc` 渲染成 PNG（中文字体 Noto CJK + 透明底）。要改架构图，编辑 `.mmd` 后重新渲染即可。
 
 工作流的 11 个 LangGraph 节点（gen_visuals / merge_chapter / human_review 三节点拆分见 D-EE）：
 
