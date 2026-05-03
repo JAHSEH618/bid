@@ -2,15 +2,72 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
-import mermaid from 'mermaid'
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
+import DOMPurify, { type Config as DOMPurifyConfig } from 'isomorphic-dompurify'
 import { cn } from './utils'
 import { buildMermaidLiveUrl, normalizeMermaidSource } from './mermaid-utils'
 
-// mermaid 全局只 init 一次。'loose' 用于允许 D2 中文等 token,与后端导出保持口径一致。
-let mermaidInitialised = false
-function ensureMermaidInit() {
-  if (mermaidInitialised) return
-  mermaid.initialize({
+// ──────────────────────────────────────────────────────────────────────────
+// 安全:LLM 输出可能含恶意 HTML(<script>、<iframe>、on* 事件、javascript: URL),
+// 上传文档解析路径也可能引入未知 HTML。两道防线:
+//   1) react-markdown 链 rehype-raw → rehype-sanitize:解析 raw HTML 后做白名单清洗。
+//   2) mermaid 渲染产物的 svg 字符串再过一次 DOMPurify(SVG profile),
+//      去掉 <script>/<foreignObject>/on* 属性后才 innerHTML 注入。
+// 备注:mermaid securityLevel: 'loose' 仍保留(中文 label / click event 需要),
+// 但下游 svg 已经被 DOMPurify 清洗,等价于把"信任 mermaid 内部"换成"信任白名单清洗"。
+// ──────────────────────────────────────────────────────────────────────────
+
+// rehype-sanitize 默认 schema 太严:会丢掉 ```code``` 的 className(我们靠
+// className=language-mermaid 识别 mermaid block),也会丢 props/style 等。
+// 这里在 defaultSchema 之上扩展 code/pre/span 的 className 白名单。
+const sanitizeSchema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    code: [...(defaultSchema.attributes?.code ?? []), ['className']],
+    pre: [...(defaultSchema.attributes?.pre ?? []), ['className']],
+    span: [...(defaultSchema.attributes?.span ?? []), ['className']],
+    div: [...(defaultSchema.attributes?.div ?? []), ['className']],
+  },
+  // 显式禁止 raw HTML 里夹带的 script/iframe/object/embed/form 等(默认已禁,这里冗余表达意图)
+  tagNames: (defaultSchema.tagNames ?? []).filter(
+    (t) => !['script', 'iframe', 'object', 'embed', 'form'].includes(t)
+  ),
+}
+
+// DOMPurify 用 SVG profile 清洗 mermaid 渲染产物。FORBID 重点 vector:
+// - <script> / <foreignObject>(可塞 HTML / JS)
+// - on* 事件属性(SVG 也会触发)
+// - javascript: / data: URI(href / xlink:href)
+const SVG_PURIFY_CONFIG: DOMPurifyConfig = {
+  USE_PROFILES: { svg: true, svgFilters: true },
+  FORBID_TAGS: ['script', 'foreignObject'],
+  FORBID_ATTR: [
+    'onload',
+    'onerror',
+    'onclick',
+    'onmouseover',
+    'onmouseout',
+    'onfocus',
+    'onblur',
+  ],
+}
+
+function sanitizeMermaidSvg(svg: string): string {
+  // returnDOMFragment 默认 false,会返回字符串。USE_PROFILES.svg 已限定 SVG 白名单。
+  return DOMPurify.sanitize(svg, SVG_PURIFY_CONFIG) as unknown as string
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Mermaid 动态加载:mermaid 11.x ≈ 1MB+,顶层 import 把主 chunk 撑到 1.4MB。
+// 改为首次 Mermaid 组件 mount 时 dynamic import,vite 自动拆 lazy chunk。
+// ──────────────────────────────────────────────────────────────────────────
+type MermaidModule = typeof import('mermaid')['default']
+let _mermaidModule: MermaidModule | null = null
+let _mermaidPromise: Promise<MermaidModule> | null = null
+
+function ensureMermaidInit(m: MermaidModule) {
+  m.initialize({
     startOnLoad: false,
     theme: 'base',
     securityLevel: 'loose',
@@ -35,7 +92,18 @@ function ensureMermaidInit() {
       noteBorderColor: '#facc15',
     },
   })
-  mermaidInitialised = true
+}
+
+async function getMermaid(): Promise<MermaidModule> {
+  if (_mermaidModule) return _mermaidModule
+  if (!_mermaidPromise) {
+    _mermaidPromise = import('mermaid').then((mod) => {
+      _mermaidModule = mod.default
+      ensureMermaidInit(_mermaidModule)
+      return _mermaidModule
+    })
+  }
+  return _mermaidPromise
 }
 
 export interface MarkdownRendererProps {
@@ -43,14 +111,17 @@ export interface MarkdownRendererProps {
   className?: string
 }
 
-// react-markdown wrapper:GFM 表格 + 原始 HTML(rehype-raw) + mermaid 自渲。
+// react-markdown wrapper:GFM 表格 + 原始 HTML(rehype-raw,经 rehype-sanitize 白名单清洗) +
+// mermaid 自渲(svg 经 DOMPurify SVG profile 清洗)。
 // IMPLEMENTATION_SPEC §16.4。
 export function MarkdownRenderer({ markdown, className }: MarkdownRendererProps) {
   return (
     <div className={cn('prose prose-slate max-w-none', className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw]}
+        // 顺序关键:rehype-raw 先把 HTML string 解析成 hast,rehype-sanitize 再
+        // 按白名单 schema 清洗(去 <script>、<iframe>、on* 等)。倒过来无效。
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
         components={{
           code({ className: codeClassName, children, ...props }) {
             const match = /language-(\w+)/.exec(codeClassName ?? '')
@@ -80,9 +151,10 @@ interface MermaidProps {
 function Mermaid({ code }: MermaidProps) {
   const ref = useRef<HTMLDivElement>(null)
   const [error, setError] = useState<string | null>(null)
+  // 首次加载 mermaid 模块时 loading=true,显 skeleton(避免空白闪烁)
+  const [loading, setLoading] = useState<boolean>(_mermaidModule === null)
 
   useEffect(() => {
-    ensureMermaidInit()
     let cancelled = false
     const id = `mermaid-${Math.random().toString(36).slice(2, 10)}`
 
@@ -90,37 +162,64 @@ function Mermaid({ code }: MermaidProps) {
     // 失败时再退回原始 code 试一次(防 normalize 误改)。
     const { code: normalized } = normalizeMermaidSource(code)
 
-    const renderWith = (src: string) => mermaid.render(id, src)
-
-    renderWith(normalized)
-      .then(({ svg }) => {
-        if (cancelled || !ref.current) return
-        ref.current.innerHTML = svg
-        setError(null)
-      })
-      .catch(async (firstErr: unknown) => {
+    ;(async () => {
+      try {
+        const m = await getMermaid()
         if (cancelled) return
-        // 第二次:用原始 code(防 normalize 把本来 OK 的代码改坏)
-        if (normalized !== code) {
-          try {
-            const { svg } = await renderWith(code)
-            if (cancelled || !ref.current) return
-            ref.current.innerHTML = svg
-            setError(null)
-            return
-          } catch {
-            // 落到下面统一 fallback
+        setLoading(false)
+
+        const renderWith = (src: string) => m.render(id, src)
+
+        try {
+          const { svg } = await renderWith(normalized)
+          if (cancelled || !ref.current) return
+          ref.current.innerHTML = sanitizeMermaidSvg(svg)
+          setError(null)
+        } catch (firstErr: unknown) {
+          if (cancelled) return
+          // 第二次:用原始 code(防 normalize 把本来 OK 的代码改坏)
+          if (normalized !== code) {
+            try {
+              const { svg } = await renderWith(code)
+              if (cancelled || !ref.current) return
+              ref.current.innerHTML = sanitizeMermaidSvg(svg)
+              setError(null)
+              return
+            } catch {
+              // 落到下面统一 fallback
+            }
           }
+          const msg =
+            firstErr instanceof Error ? firstErr.message : String(firstErr)
+          setError(msg)
         }
+      } catch (loadErr: unknown) {
+        if (cancelled) return
+        setLoading(false)
         const msg =
-          firstErr instanceof Error ? firstErr.message : String(firstErr)
-        setError(msg)
-      })
+          loadErr instanceof Error ? loadErr.message : String(loadErr)
+        setError(`mermaid 模块加载失败: ${msg}`)
+      }
+    })()
 
     return () => {
       cancelled = true
     }
   }, [code])
+
+  if (loading) {
+    // 首次 mermaid lazy chunk 加载期间的 skeleton。同步 mount 时(已加载完)
+    // 直接进 useEffect 渲染,不会闪。
+    return (
+      <div
+        className="my-4 flex h-32 animate-pulse items-center justify-center rounded-md border border-slate-200 bg-slate-50 text-xs text-slate-400"
+        role="status"
+        aria-label="加载 mermaid 渲染器"
+      >
+        加载图表渲染器…
+      </div>
+    )
+  }
 
   if (error) {
     // R-16 fallback:不让一张图表的渲染失败导致整个章节空白。
