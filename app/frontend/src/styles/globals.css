@@ -92,6 +92,16 @@
   button {
     font-family: inherit;
   }
+  /* Vercel 排版指南:标题用 text-wrap: balance,长标题断行更均匀 */
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  /* 段落 / 正文用 pretty,避免最后一行只剩孤词 */
+  p {
+    text-wrap: pretty;
+  }
   /* 滚动条更精致(WebKit) */
   *::-webkit-scrollbar {
     width: 10px;

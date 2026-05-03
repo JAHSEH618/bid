@@ -168,11 +168,15 @@ export function DataExportPanel({
         </div>
 
         {job && (
-          <div className="flex flex-wrap items-center gap-2 rounded-md bg-muted/50 px-3 py-2 text-xs">
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex flex-wrap items-center gap-2 rounded-md bg-muted/50 px-3 py-2 text-xs"
+          >
             <Badge variant={STATUS_VARIANT[job.status]}>{job.stage}</Badge>
             {isWorking && (
               <span className="flex items-center gap-1 text-muted-foreground">
-                <Loader2 className="h-3 w-3 animate-spin" />
+                <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
                 正在打包…
               </span>
             )}

@@ -192,9 +192,13 @@ export function OutlineConfirmPage() {
       </header>
 
       {!isReady && (
-        <Card className="border-amber-200 bg-amber-50/70">
+        <Card
+          role="status"
+          aria-live="polite"
+          className="border-amber-200 bg-amber-50/70"
+        >
           <CardContent className="flex items-center gap-2 py-4 text-sm text-amber-900">
-            <Loader2 className="h-4 w-4 animate-spin" />
+            <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
             提纲尚未就绪(当前状态:{project.data.status})。请稍后刷新
           </CardContent>
         </Card>

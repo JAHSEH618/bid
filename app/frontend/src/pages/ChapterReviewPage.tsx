@@ -186,8 +186,12 @@ export function ChapterReviewPage() {
   if (project.isLoading || outline.isLoading) {
     return (
       <div className="flex h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-5 w-5 animate-spin" />
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex flex-col items-center gap-2 text-sm text-muted-foreground"
+        >
+          <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin" />
           加载中…
         </div>
       </div>
@@ -316,8 +320,8 @@ function ChapterEmptyHint({ status }: { status: ChapterStatus }) {
   }
   if (status === 'generating' || status === 'retrying') {
     return (
-      <div className={base}>
-        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+      <div role="status" aria-live="polite" className={base}>
+        <Loader2 aria-hidden="true" className="h-6 w-6 animate-spin text-primary" />
         <p className="text-sm font-medium text-foreground">
           {status === 'retrying' ? 'AI 正在重新生成…' : 'AI 正在生成本章…'}
         </p>
@@ -329,8 +333,8 @@ function ChapterEmptyHint({ status }: { status: ChapterStatus }) {
   }
   if (status === 'reviewing') {
     return (
-      <div className={base}>
-        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+      <div role="status" aria-live="polite" className={base}>
+        <Loader2 aria-hidden="true" className="h-6 w-6 animate-spin text-primary" />
         <p className="text-sm font-medium text-foreground">
           审核已提交,后端处理中…
         </p>

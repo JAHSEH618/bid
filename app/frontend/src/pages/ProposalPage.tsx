@@ -68,9 +68,13 @@ export function ProposalPage() {
       </header>
 
       {!isReady && (
-        <Card className="border-amber-200 bg-amber-50/70">
+        <Card
+          role="status"
+          aria-live="polite"
+          className="border-amber-200 bg-amber-50/70"
+        >
           <CardContent className="flex items-center gap-2 py-4 text-sm text-amber-900">
-            <Loader2 className="h-4 w-4 animate-spin" />
+            <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
             项目尚未完成生成(当前状态:{project.data.status})。下方仅展示已通过章节的占位拼接
           </CardContent>
         </Card>
@@ -85,8 +89,12 @@ export function ProposalPage() {
       <Card className="overflow-hidden border-border/70 shadow-sm">
         <CardContent className="px-8 py-8 sm:px-12 sm:py-10">
           {proposal.isLoading && (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex items-center gap-2 text-sm text-muted-foreground"
+            >
+              <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
               加载全文…
             </div>
           )}
