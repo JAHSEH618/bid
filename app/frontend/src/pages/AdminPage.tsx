@@ -221,19 +221,35 @@ export function AdminPage() {
                   </DialogHeader>
                   <form onSubmit={handleCreate} className="space-y-3">
                     <div className="space-y-1.5">
-                      <Label htmlFor="username">用户名(≥ 3 字符)</Label>
-                      <Input id="username" name="username" autoFocus />
+                      <Label htmlFor="new-user-username">
+                        用户名(≥ 3 字符)
+                      </Label>
+                      <Input
+                        id="new-user-username"
+                        name="username"
+                        autoComplete="off"
+                        spellCheck={false}
+                        autoFocus
+                      />
                     </div>
                     <div className="space-y-1.5">
-                      <Label htmlFor="password">初始密码(≥ 8 位)</Label>
-                      <Input id="password" name="password" type="password" />
+                      <Label htmlFor="new-user-password">
+                        初始密码(≥ 8 位)
+                      </Label>
+                      <Input
+                        id="new-user-password"
+                        name="password"
+                        type="password"
+                        autoComplete="new-password"
+                      />
                     </div>
                     <div className="space-y-1.5">
-                      <Label htmlFor="role">角色</Label>
+                      <Label htmlFor="new-user-role">角色</Label>
                       <select
-                        id="role"
+                        id="new-user-role"
                         name="role"
-                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm transition-colors focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                        style={{ colorScheme: 'light' }}
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm transition-colors focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
                         defaultValue="user"
                       >
                         <option value="user">普通用户</option>
@@ -308,9 +324,10 @@ export function AdminPage() {
                                 })
                               }
                               disabled={update.isPending}
+                              aria-label={`重置 ${u.username} 的密码`}
                               title="重置密码"
                             >
-                              <KeyRound className="h-3.5 w-3.5" />
+                              <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
                             </Button>
                             <Button
                               variant="ghost"
@@ -323,12 +340,23 @@ export function AdminPage() {
                                 )
                               }
                               disabled={update.isPending}
+                              aria-label={
+                                u.is_active
+                                  ? `禁用 ${u.username}`
+                                  : `启用 ${u.username}`
+                              }
                               title={u.is_active ? '禁用' : '启用'}
                             >
                               {u.is_active ? (
-                                <UserMinus className="h-3.5 w-3.5" />
+                                <UserMinus
+                                  className="h-3.5 w-3.5"
+                                  aria-hidden="true"
+                                />
                               ) : (
-                                <UserCheck className="h-3.5 w-3.5" />
+                                <UserCheck
+                                  className="h-3.5 w-3.5"
+                                  aria-hidden="true"
+                                />
                               )}
                             </Button>
                             <Button
@@ -336,10 +364,11 @@ export function AdminPage() {
                               size="iconSm"
                               onClick={() => handleDelete(u.id, u.username)}
                               disabled={remove.isPending}
+                              aria-label={`删除 ${u.username}`}
                               title="删除"
                               className="text-muted-foreground hover:text-destructive"
                             >
-                              <Trash2 className="h-3.5 w-3.5" />
+                              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                             </Button>
                           </div>
                         </td>

@@ -104,7 +104,10 @@ export function ReviewActions({
     >
       {/* 反馈输入框,审核态可用 */}
       <div className="space-y-1.5">
-        <label className="flex items-center justify-between text-xs">
+        <label
+          htmlFor="review-feedback"
+          className="flex items-center justify-between text-xs"
+        >
           <span className="font-medium text-foreground/80">
             修改建议 <span className="text-muted-foreground">(选「不通过」时必填)</span>
           </span>
@@ -113,6 +116,8 @@ export function ReviewActions({
           </span>
         </label>
         <Textarea
+          id="review-feedback"
+          name="review-feedback"
           placeholder="例:第三段技术架构描述过于宽泛,请补充具体技术栈与版本号…"
           value={feedback}
           onChange={(e) => setFeedback(e.target.value)}

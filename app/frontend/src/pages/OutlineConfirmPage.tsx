@@ -210,7 +210,10 @@ export function OutlineConfirmPage() {
               <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary">
                 {i + 1}
               </span>
-              <GripVertical className="h-4 w-4 cursor-grab text-muted-foreground/60" />
+              <GripVertical
+                aria-hidden="true"
+                className="h-4 w-4 cursor-grab text-muted-foreground/60"
+              />
               <span className="text-xs text-muted-foreground">
                 第 {i + 1} 章
               </span>
@@ -219,30 +222,37 @@ export function OutlineConfirmPage() {
                 size="iconSm"
                 className="ml-auto text-muted-foreground hover:text-destructive"
                 onClick={() => removeChapter(i)}
+                aria-label={`移除第 ${i + 1} 章`}
                 title="移除本章"
               >
-                <X className="h-4 w-4" />
+                <X className="h-4 w-4" aria-hidden="true" />
               </Button>
             </CardHeader>
             <CardContent className="space-y-3">
               <Input
                 value={c.title}
                 placeholder="章节标题"
+                aria-label={`第 ${i + 1} 章标题`}
                 className="text-[15px] font-medium"
                 onChange={(e) => updateChapter(i, { title: e.target.value })}
               />
               <Textarea
                 value={c.summary}
                 placeholder="章节简介(可选,会作为本章生成上下文)"
+                aria-label={`第 ${i + 1} 章简介`}
                 rows={2}
                 onChange={(e) => updateChapter(i, { summary: e.target.value })}
               />
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
                 <div className="flex-1">
-                  <label className="text-xs font-medium text-muted-foreground">
+                  <label
+                    htmlFor={`chapter-keypoints-${i}`}
+                    className="text-xs font-medium text-muted-foreground"
+                  >
                     关键要点 · 每行一条
                   </label>
                   <Textarea
+                    id={`chapter-keypoints-${i}`}
                     value={c.key_points.join('\n')}
                     placeholder="一行一条关键要点"
                     rows={3}
@@ -255,11 +265,16 @@ export function OutlineConfirmPage() {
                   />
                 </div>
                 <div className="sm:w-32">
-                  <label className="text-xs font-medium text-muted-foreground">
+                  <label
+                    htmlFor={`chapter-target-pages-${i}`}
+                    className="text-xs font-medium text-muted-foreground"
+                  >
                     目标页数
                   </label>
                   <Input
+                    id={`chapter-target-pages-${i}`}
                     type="number"
+                    inputMode="numeric"
                     min={1}
                     max={10}
                     value={c.target_pages}
