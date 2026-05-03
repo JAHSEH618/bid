@@ -124,6 +124,44 @@ async def sync_outline_to_db(
             await s.execute(stmt)
 
 
+async def flush_chapter_partial(
+    run_id: int,
+    index: int,
+    version_id: int | None,
+    partial_text: str,
+) -> None:
+    """⭐ R-14:章节流式生成中 periodic flush 累积 token 到 DB。
+
+    单事务同步两张表(chapter ↔ chapter_version 不能漂移):
+      · ``chapters.final_text = partial_text``(让前端 GET chapter 拿到快照)
+      · ``chapter_versions.body_markdown = partial_text``(给 P5 历史版本看)
+
+    ⚠️ ``Chapter.final_text`` 字段 R-14 之前语义是"章节最终通过的正文",
+    现在扩展成"generating 期间也存 partial 快照";``status='generating'``
+    + final_text != NULL 时表示"流式中,允许读"。``status='approved'`` /
+    ``'skipped'`` 时是终态完整正文。
+
+    ``version_id is None``(理论不会发生 — write_chapter 在流之前 already
+    调 save_chapter_version 拿到 id)→ 仅 UPDATE chapters,跳 chapter_versions。
+    """
+    from sqlalchemy import update
+
+    from ..models import Chapter, ChapterVersion
+
+    async with session_factory() as s, s.begin():
+        await s.execute(
+            update(Chapter)
+            .where(Chapter.run_id == run_id, Chapter.index == index)
+            .values(final_text=partial_text)
+        )
+        if version_id is not None:
+            await s.execute(
+                update(ChapterVersion)
+                .where(ChapterVersion.id == version_id)
+                .values(body_markdown=partial_text)
+            )
+
+
 async def save_chapter_version(
     run_id: int,
     index: int,

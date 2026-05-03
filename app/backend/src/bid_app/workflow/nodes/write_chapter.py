@@ -166,6 +166,29 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     )
     await publish_event(project_id, "chapter_started", chapter_index=current)
 
+    # ⭐ R-14:**预创建 ChapterVersion 占位**(空 body),拿到 version_id
+    # 给 periodic flush 用。流式生成期间 partial 写到这一行的 body_markdown,
+    # 流结束后同一行被 final UPDATE 成完整正文(idempotent)。
+    version_id: int | None = None
+    if _real_run(run_id):
+        try:
+            from ..sync import save_chapter_version
+
+            version_id = await save_chapter_version(
+                run_id,
+                current,
+                "",  # 空 body 占位,流式期间被 flush_chapter_partial 覆盖
+                feedback_in=state.get("revision_feedback") or None,
+            )
+        except Exception:
+            import structlog
+
+            structlog.get_logger().exception(
+                "write_chapter_version_pre_create_failed",
+                run_id=run_id,
+                index=current,
+            )
+
     messages = build_messages(
         chapter=chapter,
         tech_spec_md=state.get("tech_spec_md", ""),
@@ -173,6 +196,31 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         revision_feedback=state.get("revision_feedback", ""),
         retry_count=state.get("retry_count", 0),
     )
+
+    # ⭐ R-14:periodic flush 回调 —— call_llm_stream 内部每 100 chunks /
+    # ≥1s 触发一次,把累积 partial 写 chapters.final_text +
+    # chapter_versions.body_markdown(同事务防漂移)。回调内部异常 swallow
+    # 不打断 LLM 流,_real_run 守护让 CLI 路径自动跳过 DB 写。
+    async def _on_partial(partial_text: str) -> None:
+        if not _real_run(run_id):
+            return
+        try:
+            from ..sync import flush_chapter_partial
+
+            await flush_chapter_partial(
+                run_id,  # type: ignore[arg-type]
+                current,
+                version_id,
+                partial_text,
+            )
+        except Exception:
+            import structlog
+
+            structlog.get_logger().exception(
+                "write_chapter_partial_flush_failed",
+                run_id=run_id,
+                index=current,
+            )
 
     try:
         result = await call_llm_stream(
@@ -184,6 +232,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             run_id=run_id,
             chapter_index=current,
             temperature=0.6,
+            on_partial=_on_partial,  # ⭐ R-14
         )
     except (LLMRetryFailed, LLMTimeoutExceeded, asyncio.TimeoutError) as e:
         # D-BG:call_llm_stream 总超时已包成 LLMTimeoutExceeded,这里同时
@@ -205,23 +254,23 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             chapter_id=await _resolve_chapter_id(run_id, current),
         ) from e
 
-    # 把生成的章节正文保存为新版本(走 sync.save_chapter_version,自动取
-    # 下一个 version 号);CLI / 表缺失时 sync 内部已 log 容错
-    if _real_run(run_id):
+    # ⭐ R-14:final flush 完整正文到 DB(_on_partial 末尾触发的 flush 在
+    # 真实路径下已包含完整 text,本 UPDATE 是兜底/语义闭合)
+    if _real_run(run_id) and version_id is not None:
         try:
-            from ..sync import save_chapter_version
+            from ..sync import flush_chapter_partial
 
-            await save_chapter_version(
+            await flush_chapter_partial(
                 run_id,
                 current,
+                version_id,
                 result.text,
-                feedback_in=state.get("revision_feedback") or None,
             )
         except Exception:
             import structlog
 
             structlog.get_logger().exception(
-                "write_chapter_version_save_failed",
+                "write_chapter_final_flush_failed",
                 run_id=run_id,
                 index=current,
             )

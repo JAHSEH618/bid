@@ -87,12 +87,21 @@ async def call_llm_stream(
     project_id: int,
     run_id: int | None = None,
     chapter_index: int | None = None,
+    on_partial: Any = None,  # async callable[[str], Awaitable[None]] | None
     **kw: Any,
 ) -> StreamResult:
     """流式调用 + 重试 + 超时 + 推 SSE token + 记 token_usage。
-    返回完整 markdown 与 token 统计。"""
+    返回完整 markdown 与 token 统计。
+
+    ⭐ R-14:``on_partial(text)`` 是可选 async 回调,流式生成期间每累积
+    100 chunks **或** 距上次回调 ≥ 1s 触发一次,传入"截至此刻完整 partial
+    markdown"。write_chapter 用它 periodic flush DB(让用户刷新页面也
+    能看到流走的内容)。回调内部异常被 swallow,不打断流。
+    """
     if _FAKE:
-        return await _fake_stream(model, messages, project_id, chapter_index)
+        return await _fake_stream(
+            model, messages, project_id, chapter_index, on_partial
+        )
 
     backoffs = [int(s) for s in settings.llm_retry_backoff_s.split(",")]
     last_err: Exception | None = None
@@ -111,6 +120,7 @@ async def call_llm_stream(
                         project_id,
                         run_id,
                         chapter_index,
+                        on_partial,
                         **kw,
                     )
                 except (
@@ -180,6 +190,10 @@ async def _write_llm_error(project_id: int, message: str, **fields: Any) -> None
         )
 
 
+_PARTIAL_FLUSH_EVERY_CHUNKS = 100  # ⭐ R-14:每 100 chunk 触发 on_partial
+_PARTIAL_FLUSH_EVERY_SECONDS = 1.0  # 或距上次 ≥ 1s
+
+
 async def _do_stream(
     model: str,
     messages: list[dict[str, Any]],
@@ -188,8 +202,11 @@ async def _do_stream(
     project_id: int,
     run_id: int | None,
     chapter_index: int | None,
+    on_partial: Any = None,  # async callable[[str], Awaitable[None]] | None
     **kw: Any,
 ) -> StreamResult:
+    import time as _time
+
     response = await litellm.acompletion(
         model=model,
         messages=messages,
@@ -202,6 +219,27 @@ async def _do_stream(
     chunks: list[str] = []
     prompt_tokens = 0
     completion_tokens = 0
+
+    # ⭐ R-14:periodic flush 状态(only 流式有 chapter_index 时启用)
+    chunks_since_flush = 0
+    last_flush_at = _time.monotonic()
+
+    async def _maybe_flush() -> None:
+        """if on_partial 设置且达到阈值,await 之 + 重置计数器。
+        on_partial 抛任何异常都 swallow + log,**不能打断 LLM 流**。"""
+        nonlocal chunks_since_flush, last_flush_at
+        if on_partial is None:
+            return
+        try:
+            await on_partial("".join(chunks))
+        except Exception:
+            log.exception(
+                "llm_on_partial_callback_failed",
+                project_id=project_id,
+                chapter_index=chapter_index,
+            )
+        chunks_since_flush = 0
+        last_flush_at = _time.monotonic()
 
     async for chunk in response:
         delta = chunk.choices[0].delta.content if chunk.choices else None
@@ -216,12 +254,32 @@ async def _do_stream(
                         "delta": delta,
                     },
                 )
+            # ⭐ R-14:flush by chunk count or wall time
+            chunks_since_flush += 1
+            if (
+                chunks_since_flush >= _PARTIAL_FLUSH_EVERY_CHUNKS
+                or (_time.monotonic() - last_flush_at)
+                >= _PARTIAL_FLUSH_EVERY_SECONDS
+            ):
+                await _maybe_flush()
         usage = getattr(chunk, "usage", None)
         if usage:
             prompt_tokens = usage.prompt_tokens
             completion_tokens = usage.completion_tokens
 
     text = "".join(chunks)
+    # ⭐ R-14 final flush:确保最后一段 token 也落 DB(完整文本由 caller 写
+    # final_text + status='awaiting_review',这里只是兜底防最后 < 100 chunks
+    # 没触发阈值时 partial 缺尾段)
+    if on_partial is not None and chunks_since_flush > 0:
+        try:
+            await on_partial(text)
+        except Exception:
+            log.exception(
+                "llm_on_partial_final_flush_failed",
+                project_id=project_id,
+                chapter_index=chapter_index,
+            )
     await record_token_usage(
         user_id=user_id,
         project_id=project_id,
@@ -378,9 +436,20 @@ async def _fake_stream(
     messages: list[dict[str, Any]],
     project_id: int,
     chapter_index: int | None,
+    on_partial: Any = None,
 ) -> StreamResult:
-    """``BID_APP_FAKE_LLM=1`` 时用,不调外网(§18.2)。"""
+    """``BID_APP_FAKE_LLM=1`` 时用,不调外网(§18.2)。
+
+    ⭐ R-14:同样支持 ``on_partial`` 回调,每 100 chars 触发一次,跑完
+    一次 final flush——保持与真路径相同的 partial 落库节奏,前端 hydrate
+    路径开发期间也能验证。
+    """
+    import time as _time
+
     fake = "# 章节标题\n\n这是测试用的章节正文。" + "占位段落。" * 50
+    sent: list[str] = []
+    last_flush = _time.monotonic()
+    chars_since = 0
     if chapter_index is not None:
         for ch in fake:
             await event_bus.publish(
@@ -391,6 +460,23 @@ async def _fake_stream(
                     "delta": ch,
                 },
             )
+            sent.append(ch)
+            chars_since += 1
+            if on_partial is not None and (
+                chars_since >= 100
+                or (_time.monotonic() - last_flush) >= 1.0
+            ):
+                try:
+                    await on_partial("".join(sent))
+                except Exception:
+                    log.exception("fake_stream_on_partial_failed")
+                chars_since = 0
+                last_flush = _time.monotonic()
+    if on_partial is not None and chars_since > 0:
+        try:
+            await on_partial(fake)
+        except Exception:
+            log.exception("fake_stream_on_partial_final_failed")
     return StreamResult(text=fake, prompt_tokens=100, completion_tokens=200)
 
 
