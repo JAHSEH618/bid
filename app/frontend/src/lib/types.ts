@@ -115,12 +115,15 @@ export interface StartResponseDTO {
   queued: boolean
 }
 
-// 章节版本(M2/REVIEW-2 暂未提供端点,前端在 mock 兼容,真 API 上线后再接)。
+// 章节版本(后端尚未提供端点,前端在 mock 兼容,真 API 上线后再接)。
+// 字段名对齐 backend models/chapter_version.py:
+//   - body_markdown(主名,与 SQLAlchemy 列同名)
+//   - 旧别名 `text` 已移除;消费侧用 body_markdown。
 export interface ChapterVersionDTO {
   id: number
   chapter_id: number
   version: number
-  text: string
+  body_markdown: string
   feedback: string | null
   created_at: string
 }
