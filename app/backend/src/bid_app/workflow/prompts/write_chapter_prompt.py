@@ -90,6 +90,27 @@ LLM2_USER_TEMPLATE = """请撰写以下章节的完整 Markdown 正文。
 
 
 REVISION_TEMPLATE = """====================
+⚠️ 本章上一轮人工审核未通过(第 {retry_count} 轮)。
+
+【上一轮生成的正文】
+
+{previous_text}
+
+【用户的修改意见】
+
+{revision_feedback}
+
+请基于上一轮正文 **结合** 用户修改意见做有针对性的修订:
+- 如果意见是局部调整(如"第 X 段加 Y" / "表格改流程图"),保持其他部分基本一致
+- 如果意见涉及整体结构问题(如"内容空泛" / "逻辑混乱"),做实质性重组
+- 不要简单换措辞或表面微调
+- 输出**完整修订后的本章 Markdown 正文**,而不是 diff
+====================
+"""
+
+# ⚠️ retry_count > 0 但 previous_text 缺失(DB 查不到 abandoned 版本,理论
+# 不该发生)时退化的旧模板,只带 feedback,不带 previous_text。
+_REVISION_TEMPLATE_NO_PREVIOUS = """====================
 ⚠️ 本章上一轮人工审核未通过(第 {retry_count} 轮),修改建议如下:
 
 {revision_feedback}
@@ -121,17 +142,34 @@ def build_messages(
     scoring_md: str,
     revision_feedback: str = "",
     retry_count: int = 0,
+    previous_text: str = "",
 ) -> list[dict[str, Any]]:
-    """构造 LLM-2 messages 数组。"""
+    """构造 LLM-2 messages 数组。
+
+    ⭐ R-18:revise 模式同时给 LLM 上一轮正文 + 用户意见 → patch 式修订。
+    - retry_count == 0(原稿)/ revision_feedback 空 → 不带 revision_section
+    - retry_count > 0 + previous_text + revision_feedback → 完整 REVISION_TEMPLATE
+    - retry_count > 0 + 仅 revision_feedback(previous_text 缺,理论不该发生)
+      → 退化到 _REVISION_TEMPLATE_NO_PREVIOUS,只带 feedback 兜底
+
+    previous_text 不截断:qwen3.6-max-preview 上下文 256K,5-10K 字 partial
+    完全装得下,patch 式 LLM-2 才能精准对齐用户意见。
+    """
     target_pages = int(chapter.get("target_pages", 3) or 3)
-    revision_section = (
-        REVISION_TEMPLATE.format(
+    if not revision_feedback or retry_count <= 0:
+        revision_section = ""
+    elif previous_text:
+        revision_section = REVISION_TEMPLATE.format(
+            retry_count=retry_count,
+            previous_text=previous_text,
+            revision_feedback=revision_feedback.strip(),
+        )
+    else:
+        # 兜底:理论不该发生(retry 必有上轮 abandoned 版本),保留旧行为
+        revision_section = _REVISION_TEMPLATE_NO_PREVIOUS.format(
             retry_count=retry_count,
             revision_feedback=revision_feedback.strip(),
         )
-        if revision_feedback
-        else ""
-    )
     return [
         {"role": "system", "content": LLM2_SYSTEM},
         {

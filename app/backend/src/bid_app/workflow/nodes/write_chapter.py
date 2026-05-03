@@ -166,6 +166,30 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     )
     await publish_event(project_id, "chapter_started", chapter_index=current)
 
+    retry_count = state.get("retry_count", 0)
+    revision_feedback = state.get("revision_feedback") or ""
+
+    # ⭐ R-18:retry / revise 时(retry_count > 0)拉上一轮正文给 LLM 做
+    # patch 修订。**必须在 save_chapter_version pre-create 之前查**——
+    # 否则查到的"latest"是新创建的空占位行。
+    previous_text: str = ""
+    if retry_count > 0 and _real_run(run_id):
+        try:
+            from ..sync import get_latest_chapter_version_text
+
+            previous_text = (
+                await get_latest_chapter_version_text(run_id, current)
+                or ""
+            )
+        except Exception:
+            import structlog
+
+            structlog.get_logger().exception(
+                "write_chapter_previous_text_fetch_failed",
+                run_id=run_id,
+                index=current,
+            )
+
     # ⭐ R-14:**预创建 ChapterVersion 占位**(空 body),拿到 version_id
     # 给 periodic flush 用。流式生成期间 partial 写到这一行的 body_markdown,
     # 流结束后同一行被 final UPDATE 成完整正文(idempotent)。
@@ -178,7 +202,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
                 run_id,
                 current,
                 "",  # 空 body 占位,流式期间被 flush_chapter_partial 覆盖
-                feedback_in=state.get("revision_feedback") or None,
+                feedback_in=revision_feedback or None,
             )
         except Exception:
             import structlog
@@ -193,8 +217,9 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         chapter=chapter,
         tech_spec_md=state.get("tech_spec_md", ""),
         scoring_md=state.get("scoring_md", ""),
-        revision_feedback=state.get("revision_feedback", ""),
-        retry_count=state.get("retry_count", 0),
+        revision_feedback=revision_feedback,
+        retry_count=retry_count,
+        previous_text=previous_text,  # ⭐ R-18
     )
 
     # ⭐ R-14:periodic flush 回调 —— call_llm_stream 内部每 100 chunks /

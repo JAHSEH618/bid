@@ -162,6 +162,46 @@ async def flush_chapter_partial(
             )
 
 
+async def get_latest_chapter_version_text(
+    run_id: int,
+    index: int,
+) -> str | None:
+    """⭐ R-18:取该章节当前最新一条 ChapterVersion 的 body_markdown。
+
+    用法(write_chapter 在 retry / revise 时):**在 ``save_chapter_version``
+    pre-create 新占位行之前**调本函数,拿到的就是"上一轮正文" — 因为
+    新行尚未插入,MAX(version) 还指向上轮。
+
+    返 None 时:章节不存在 / 没有任何 ChapterVersion(原稿首次生成 retry_count=0
+    本就不该走 revise 路径)。
+
+    注:不过滤 abandoned —— retry_failed 路径下旧版本都被标 abandoned=true,
+    revise 路径下不标。两种情况"最新版本"都是用户上一轮看到的内容,正是
+    LLM 修订需要的输入。
+    """
+    from sqlalchemy import select
+
+    from ..models import Chapter, ChapterVersion
+
+    async with session_factory() as s:
+        chapter_id_row = await s.execute(
+            select(Chapter.id).where(
+                Chapter.run_id == run_id, Chapter.index == index
+            )
+        )
+        chapter_id = chapter_id_row.scalar_one_or_none()
+        if chapter_id is None:
+            return None
+
+        row = await s.execute(
+            select(ChapterVersion.body_markdown)
+            .where(ChapterVersion.chapter_id == chapter_id)
+            .order_by(ChapterVersion.version.desc())
+            .limit(1)
+        )
+        return row.scalar_one_or_none()
+
+
 async def save_chapter_version(
     run_id: int,
     index: int,
