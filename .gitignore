@@ -19,6 +19,10 @@ app/.env.bak
 # Dev compose 本地数据卷(仅 docker-compose.dev.yml 使用)
 app/.dev-data/
 
+# 本地 runtime test 临时 override(把 /var/lib/bid-app bind mount 重定向到
+# 项目本地 ./.dev-data/,无 sudo 也能跑;生产部署不带此文件)
+app/docker-compose.override.yml
+
 # Python / Node 构建产物
 __pycache__/
 *.py[cod]

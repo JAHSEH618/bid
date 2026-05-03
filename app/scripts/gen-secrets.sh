@@ -69,10 +69,12 @@ sed -i.bak \
 rm -f "${OUT}.bak"
 chmod 600 "$OUT"
 
-# 自检:不能仍残留占位符
-if grep -E "__GENERATE_ME__|__64_HEX_CHARS__" "$OUT" >/dev/null; then
+# 自检:不能仍残留占位符。
+# 注意:.env.example 头部注释里也写了占位符字面量(给读者解释),不能裸 grep
+# 否则误命中。anchor `^[A-Z_]+=`,只看 KEY=VALUE 形式(忽略 # 注释行)。
+if grep -E "^[A-Z_]+=.*(__GENERATE_ME__|__64_HEX_CHARS__)" "$OUT" >/dev/null; then
   echo "❌ $OUT 仍有未替换占位符,请检查 .env.example 字段名" >&2
-  grep -nE "__GENERATE_ME__|__64_HEX_CHARS__" "$OUT" >&2
+  grep -nE "^[A-Z_]+=.*(__GENERATE_ME__|__64_HEX_CHARS__)" "$OUT" >&2
   exit 2
 fi
 

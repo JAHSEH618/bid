@@ -1,0 +1,36 @@
+# Python build artifacts(uv 在容器内 uv sync --frozen 时重建,绝不能从宿主机 COPY 进去 —
+# 宿主机 .venv/bin/python 是符号链接指向 /Library/Frameworks/...,容器里这个路径不存在,
+# 启动直接 "No such file or directory" 死循环)
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.pytest_cache/
+backend/.uv-cache/
+backend/.coverage
+backend/htmlcov/
+
+# Frontend build artifacts(Dockerfile stage 1 自己跑 pnpm build 重建)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# 不入库的本地文件
+.env
+.env.local
+.env.bak
+.dev-data/
+docker-compose.override.yml
+
+# git 元数据
+.git/
+.gitignore
+
+# 编辑器临时
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 测试产物
+*.coverage
+htmlcov/
