@@ -12,6 +12,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { useQueryClient } from '@tanstack/react-query'
 import { useChangePassword, useCurrentUser } from '@/hooks/useAuth'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
@@ -38,6 +39,7 @@ const schema = z
 
 export function ChangePasswordPage() {
   const navigate = useNavigate()
+  const qc = useQueryClient()
   const change = useChangePassword()
   const { toast } = useToast()
   const { data: user } = useCurrentUser()
@@ -65,8 +67,15 @@ export function ChangePasswordPage() {
         old_password: parsed.data.old_password,
         new_password: parsed.data.new_password,
       })
-      toast({ title: '密码已更新', variant: 'success' })
-      navigate('/', { replace: true })
+      // R-11:改密后必须跳 /login 让用户重新登录。
+      // 不调 /api/auth/logout(后端 cookie 已经被新密码标记 / 不需要),
+      // 只清前端 react-query 缓存,RequireAuth 看到 /me 401 会自然跳 /login。
+      qc.clear()
+      toast({
+        title: '密码已修改,请用新密码登录',
+        variant: 'success',
+      })
+      navigate('/login', { replace: true })
     } catch (err) {
       toast({
         title: '修改失败',
