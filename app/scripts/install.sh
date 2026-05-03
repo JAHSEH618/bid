@@ -69,7 +69,13 @@ $SUDO_PREFIX mkdir -p "$DATA_DIR/postgres-data" "$DATA_DIR/redis-data" \
 
 # postgres-data 必须属于 uid=999(postgres:16-alpine 镜像 user)
 $SUDO_PREFIX chown -R 999:999 "$DATA_DIR/postgres-data"
-# redis-data uid=999(redis:7-alpine 也是 999,巧合但需显式)
+# redis-data uid=999:实测 redis:7-alpine 镜像里 redis 用户也是 uid 999
+# (各自 distro 默认值,与 postgres 镜像同号属巧合,不耦合)。chown 是 best-effort:
+#   - 当前 redis:7-alpine:命中 999,redis 进程直接读写没问题
+#   - 将来 redis 升级改 uid:进程会用镜像内实际 user 起,数据卷可能落到 root,
+#     重跑 install.sh 也会被 chown 覆盖;无 silent breakage 风险
+# spec §17.3 line 5677 只显式提了 postgres-data:999;这里给 redis-data 也写
+# 999:999 作前置防御(REVIEW-4 🟡 nit 已注释)。
 $SUDO_PREFIX chown -R 999:999 "$DATA_DIR/redis-data"
 # 业务目录 1000(应用容器内 user;若用 root 跑则 0:0 也 OK,但保留 1000 兼容)
 $SUDO_PREFIX chown -R 1000:1000 "$DATA_DIR/projects" "$DATA_DIR/backups"
