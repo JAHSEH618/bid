@@ -457,6 +457,10 @@ async def get_outline(
                 "target_pages": c.target_pages,
                 "index": c.index,
                 "status": c.status,
+                # ⭐ R-15 配套:R-14 partial / 完整正文都让 outline 端点暴露,
+                # 前端 useProjectOutline 轮询拿到就 hydrate(单端点路径,
+                # 不强制额外调 GET /chapters/{idx})。
+                "final_text": c.final_text,
             }
             for c in rows
         ]
