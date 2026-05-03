@@ -33,8 +33,8 @@ async def _resolve_api_key(project_id: int, run_id: int | None = None) -> str:
 
     encrypted: bytes | None = None
     try:
-        from ...core.crypto import decrypt_api_key  # type: ignore[attr-defined]
-        from ...models import Project  # type: ignore[attr-defined]
+        from ...core.crypto import decrypt_api_key
+        from ...models import Project
 
         async with session_factory() as s:
             row = await s.execute(
@@ -51,7 +51,7 @@ async def _resolve_api_key(project_id: int, run_id: int | None = None) -> str:
 
     if encrypted is not None:
         try:
-            return decrypt_api_key(encrypted)  # type: ignore[name-defined]
+            return decrypt_api_key(encrypted)
         except Exception as e:
             if is_production:
                 raise RuntimeError(
@@ -77,7 +77,7 @@ async def _resolve_user_id(project_id: int) -> int:
     """``Project.api_key_owner`` 是 ``Mapped[int | None]``,行存在但字段
     NULL 时返 0(REVIEW-2 🟡 #3 fix)。"""
     try:
-        from ...models import Project  # type: ignore[attr-defined]
+        from ...models import Project
 
         async with session_factory() as s:
             row = await s.execute(

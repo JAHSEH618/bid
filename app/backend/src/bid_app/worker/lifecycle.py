@@ -19,11 +19,12 @@ AsyncConnection | AsyncConnectionPool``,见 ``_ainternal.Conn`` 联合类型)。
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy as sa
 import structlog
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -122,7 +123,12 @@ async def on_startup(ctx: dict[str, Any]) -> None:
         open=False,  # 显式 await pool.open() 控制启动语义
     )
     await pool.open(wait=True)
-    saver = AsyncPostgresSaver(conn=pool)
+    # ⚠️ langgraph stub 把 AsyncConnectionPool 泛型参数标 dict[str, Any] 才接受,
+    # 但 psycopg_pool 推断 row_factory=dict_row 时仍返 tuple[Any,...]。运行时
+    # row_factory 已对,这里 cast 让 mypy 收敛(stub 与实际行为不一致的 known issue)。
+    saver = AsyncPostgresSaver(
+        conn=cast(AsyncConnectionPool[AsyncConnection[dict[str, Any]]], pool)
+    )
     await saver.setup()
 
     ctx["checkpointer"] = saver

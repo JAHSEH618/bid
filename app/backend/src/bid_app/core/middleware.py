@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 
 import structlog
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -15,7 +16,9 @@ from starlette.responses import Response
 
 class TraceIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(
-        self, request: Request, call_next  # type: ignore[no-untyped-def]
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         trace_id = request.headers.get("X-Trace-Id") or uuid.uuid4().hex[:16]
         with structlog.contextvars.bound_contextvars(trace_id=trace_id):

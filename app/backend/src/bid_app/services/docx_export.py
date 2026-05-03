@@ -62,7 +62,7 @@ async def export_docx(
         await asyncio.wait_for(
             _module_lock.acquire(), timeout=_MODULE_LOCK_TIMEOUT
         )
-    except asyncio.TimeoutError as te:
+    except TimeoutError as te:
         raise TimeoutError(
             f"docx module lock timeout after {_MODULE_LOCK_TIMEOUT}s"
         ) from te
@@ -204,10 +204,10 @@ async def _render_mermaid(markdown: str, work: Path) -> str:
 
     # 反向替换(从最后一个 match 起,改原文不影响前面 match.start/end)
     out = markdown
-    for m, png in zip(reversed(matches), reversed(rendered)):
-        if png is None:
+    for m, png_or_none in zip(reversed(matches), reversed(rendered), strict=True):
+        if png_or_none is None:
             continue  # 保留原 fence 块,降级容错
-        replacement = f"![]({png.name})"
+        replacement = f"![]({png_or_none.name})"
         out = out[: m.start()] + replacement + out[m.end() :]
 
     return out

@@ -59,7 +59,14 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "PT", "SIM", "RUF"]
-ignore = ["E501"]
+# N818: 异常类名后缀;本项目内部异常名(SlotLost / LLMRetryFailed / ChapterGenerationFailed
+# 等)是 D-* 设计标记,跨 8+ 文件引用,改名风险大于收益,统一豁免。
+ignore = ["E501", "N818"]
+
+[tool.ruff.lint.per-file-ignores]
+# prompt 文件对中文 LLM,正文里 × ÷ — 等数学/排版字符是面向阅读者的真实内容,
+# RUF001/RUF002/RUF003(ambiguous unicode)在这里全是误报,豁免整个 prompts/。
+"src/bid_app/workflow/prompts/*.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -68,3 +75,24 @@ quote-style = "double"
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
+
+# langgraph 0.6 / langgraph-checkpoint-postgres 2.0 的 stub 偶尔与运行时
+# 不符(AsyncPostgresSaver.conn 期待 dict_row 泛型但 pool 推 tuple),为防止
+# 未来 untype 的 internal 模块漏出 missing-import,显式宽松。
+[[tool.mypy.overrides]]
+module = ["langgraph.*", "langgraph_checkpoint_postgres.*"]
+ignore_missing_imports = true
+
+# redis-py 5.x async client 的 stub 设计是 ``Awaitable[X] | X`` union(同步/集群
+# 双形态),且 ``from_url`` 标 untyped、``ScriptCommands.eval`` 的 ARGV 强制 str
+# 而 redis 实际 coerce numerics。修这些得在每个调用点 cast,不如对几个 redis 重度
+# 调用方文件统一豁免几类已知误报(代码本身的 await/参数类型在运行时都对)。
+[[tool.mypy.overrides]]
+module = [
+    "bid_app.services.concurrency",
+    "bid_app.events.bus",
+    "bid_app.core.login_throttle",
+    "bid_app.services.docx_export",
+    "bid_app.main",
+]
+disable_error_code = ["no-untyped-call", "no-any-return", "misc", "arg-type"]

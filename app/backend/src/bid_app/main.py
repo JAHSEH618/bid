@@ -10,6 +10,7 @@ M0/M1/M2/M3 router 全部挂完后末尾加 SPA fallback(§15.6)。
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from collections.abc import AsyncIterator
@@ -86,14 +87,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        try:
+        with contextlib.suppress(Exception):
             await arq_pool.aclose()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             await redis_client.aclose()
-        except Exception:
-            pass
 
 
 app = FastAPI(
@@ -150,7 +147,7 @@ _STATIC_DIR = Path(os.environ.get("BID_APP_STATIC_DIR", "/app/frontend/dist"))
     response_class=FileResponse,
     response_model=None,
 )
-async def spa_fallback(full_path: str):
+async def spa_fallback(full_path: str) -> FileResponse:
     """前端 React Router 的非 /api/* 路径,统一返回 index.html。
 
     - /api/* 路径已被前面 router 处理,本 handler 不会拿到(FastAPI 路由

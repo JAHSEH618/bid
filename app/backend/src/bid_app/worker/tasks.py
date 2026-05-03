@@ -17,13 +17,15 @@ argument: 'coroutine'``。
 """
 from __future__ import annotations
 
+import contextlib
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy as sa
 import structlog
 from langgraph.types import Command
+from sqlalchemy import CursorResult
 
 from ..config import settings
 from ..core.error_log import append_error
@@ -37,8 +39,8 @@ from ..services.concurrency import (
     try_acquire_project_slot,
     wake_queued_projects,
 )
-from ..services.docx_export import export_docx
 from ..services.document_extractor import extract_for_project
+from ..services.docx_export import export_docx
 from ..services.llm import ChapterGenerationFailed
 from ..workflow.graph import build_graph
 from ..workflow.state import WorkflowState
@@ -585,7 +587,7 @@ async def _commit_docx_done(
             {"i": docx_job_id, "p": str(final_path)},
         )
         await s.commit()
-        if result.rowcount == 0:
+        if cast(CursorResult[Any], result).rowcount == 0:
             cur = (
                 await s.execute(
                     sa.text("SELECT status FROM docx_jobs WHERE id=:i"),
@@ -700,7 +702,7 @@ async def generate_docx_task(  # max_tries=1 在 worker/settings.py functions �
             {"i": docx_job_id},
         )
         await s.commit()
-        if result.rowcount == 0:
+        if cast(CursorResult[Any], result).rowcount == 0:
             log.warning(
                 "docx_stage_blocked_at_rendering",
                 docx_job_id=docx_job_id,
@@ -748,7 +750,7 @@ async def generate_docx_task(  # max_tries=1 在 worker/settings.py functions �
                 {"s": stage, "i": docx_job_id},
             )
             await s.commit()
-            if r.rowcount == 0:
+            if cast(CursorResult[Any], r).rowcount == 0:
                 log.warning(
                     "docx_stage_blocked",
                     docx_job_id=docx_job_id,
@@ -809,7 +811,7 @@ async def generate_docx_task(  # max_tries=1 在 worker/settings.py functions �
             {"i": docx_job_id},
         )
         await s.commit()
-        if result.rowcount == 0:
+        if cast(CursorResult[Any], result).rowcount == 0:
             log.warning(
                 "docx_finalize_blocked",
                 docx_job_id=docx_job_id,
@@ -863,10 +865,8 @@ async def generate_docx_task(  # max_tries=1 在 worker/settings.py functions �
                 {"i": docx_job_id},
             )
             await s.commit()
-        try:
+        with contextlib.suppress(Exception):
             tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
         raise
 
     # ⭐ D-BQ + D-CE + D-CL:rename 成功才 commit done

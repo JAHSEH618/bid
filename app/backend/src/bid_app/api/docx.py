@@ -109,11 +109,11 @@ async def trigger_docx(
     db.add(docx_job)
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         await db.rollback()
         raise HTTPException(
             status.HTTP_409_CONFLICT, "该项目已有 DOCX 生成任务在进行中"
-        )
+        ) from e
     job_pk = docx_job.id
 
     arq_pool = getattr(request.app.state, "arq_pool", None)
@@ -186,7 +186,7 @@ async def get_docx_job(
     _: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, Any]:
     """轮询 DOCX 任务进度(D-BW + D-CD inline repair)。"""
-    row = (
+    row_raw = (
         await db.execute(
             sa.text(
                 "SELECT id, project_id, status, error, output_path, "
@@ -196,8 +196,11 @@ async def get_docx_job(
             {"i": docx_job_id, "p": project_id},
         )
     ).mappings().one_or_none()
-    if row is None:
+    if row_raw is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "docx job not found")
+    # 拷贝成可变 dict;后续 inline-repair 需要覆盖 status / output_path
+    # 等字段,RowMapping 是 read-only。
+    row: dict[str, Any] = dict(row_raw)
 
     # ⭐ D-CD:轮询路径上 inline finalizing repair
     if row["status"] == "finalizing":
@@ -226,13 +229,14 @@ async def get_docx_job(
                         docx_job_id=docx_job_id,
                         project_id=project_id,
                     )
-                    row = {
-                        **dict(row),
-                        "status": repaired["status"],
-                        "output_path": repaired["output_path"],
-                        "finished_at": repaired["finished_at"],
-                        "updated_at": repaired["updated_at"],
-                    }
+                    row.update(
+                        {
+                            "status": repaired["status"],
+                            "output_path": repaired["output_path"],
+                            "finished_at": repaired["finished_at"],
+                            "updated_at": repaired["updated_at"],
+                        }
+                    )
 
     # 内部 → 前端的 status 映射:不暴露 finalizing(D-BU 实现层细节)
     raw = row["status"]
@@ -274,7 +278,7 @@ async def download_docx(
     project_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[User, Depends(get_current_user)],
-):
+) -> FileResponse:
     """下载 ``proposal.docx``(D-L 固定缓存名 + D-CJ 拒分支 + D-CO inline repair)。"""
     project = await _get_done_project(db, project_id)
     path = Path(project.dir_path) / "proposal.docx"

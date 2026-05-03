@@ -229,7 +229,7 @@ async def extract_for_project(project_id: int) -> dict[str, str]:
     from sqlalchemy import select
 
     from ..db import session_factory
-    from ..models import Document  # type: ignore[attr-defined]
+    from ..models import Document
 
     out: dict[str, str] = {
         "tech_spec_md": "",

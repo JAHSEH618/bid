@@ -15,6 +15,8 @@ workflow 业务限流仍由 ``ACTIVE_SET`` 主导,两层独立。
 """
 from __future__ import annotations
 
+from typing import Any, ClassVar
+
 from arq.connections import RedisSettings
 from arq.cron import cron
 from arq.worker import func
@@ -38,7 +40,8 @@ class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
 
     # ⭐ D-Z + D-AY:max_tries=1 在 wrapper 上指定;arq 0.26 API 要求位置参数
-    functions = [
+    # arq 的 ``func`` 返 untyped 对象(Function),用 list[Any] 收纳
+    functions: ClassVar[list[Any]] = [
         func(start_workflow_task, max_tries=1),
         func(resume_review_task, max_tries=1),
         func(retry_failed_chapter_task, max_tries=1),
@@ -52,7 +55,7 @@ class WorkerSettings:
     on_startup = on_startup
     on_shutdown = on_shutdown
 
-    cron_jobs = [
+    cron_jobs: ClassVar[list[Any]] = [
         # 每分钟:清理 ACTIVE_SET 僵尸 + 同步 DB
         cron(
             reconcile_periodic,

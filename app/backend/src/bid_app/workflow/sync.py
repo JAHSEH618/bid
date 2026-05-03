@@ -18,10 +18,11 @@ API:
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy as sa
 import structlog
+from sqlalchemy import CursorResult
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -92,7 +93,7 @@ async def sync_outline_to_db(
     list 序列化成 jsonb,避免 sa.text 时的类型推断歧义。
     """
     # 延迟 import,M1 落 models 之后才有
-    from ..models import Chapter  # type: ignore[attr-defined]
+    from ..models import Chapter
 
     async with session_factory() as s, s.begin():
         if replace:
@@ -266,7 +267,9 @@ async def _mark_chapter_versions_abandoned_in_session(
     result = await session.execute(
         sa.text(_MARK_VERSIONS_ABANDONED_SQL), {"c": chapter_id}
     )
-    return result.rowcount or 0
+    # AsyncSession.execute 在 stub 里返 ``Result[Any]``;DML 实际是 CursorResult,
+    # 有 rowcount。cast 一下让 mypy 收敛。
+    return cast(CursorResult[Any], result).rowcount or 0
 
 
 async def mark_chapter_versions_abandoned(chapter_id: int) -> int:

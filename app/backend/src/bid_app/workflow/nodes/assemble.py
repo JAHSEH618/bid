@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +53,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
                         "UPDATE runs SET finished_at=:t, status='done' "
                         "WHERE id=:r"
                     ),
-                    {"r": run_id, "t": datetime.now(timezone.utc)},
+                    {"r": run_id, "t": datetime.now(UTC)},
                 )
                 await s.commit()
             except Exception:

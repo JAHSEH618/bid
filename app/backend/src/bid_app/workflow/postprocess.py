@@ -90,7 +90,7 @@ def normalize_markdown_paragraphs(text: str) -> str:
     out: list[str] = []
     in_fence = False
 
-    for i, line in enumerate(lines):
+    for line in lines:
         # 围栏检测:进入 / 退出
         if _FENCE_RE.match(line):
             # 围栏行前 / 后(prose ↔ fenced)需要空行,但 fence 行本身保留原样

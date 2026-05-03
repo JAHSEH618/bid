@@ -9,10 +9,11 @@ no-referrer、CSP(内网 SPA 友好版,允许 inline style 给 react-markdown
 """
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-
 
 _CSP = (
     "default-src 'self'; "
@@ -27,7 +28,9 @@ _CSP = (
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(
-        self, request: Request, call_next  # type: ignore[no-untyped-def]
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")

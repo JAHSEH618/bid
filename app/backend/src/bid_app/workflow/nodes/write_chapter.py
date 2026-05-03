@@ -9,8 +9,7 @@ worker task 据此把 project 切 ``awaiting_review`` 而不是 ``failed``——
 """
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
@@ -50,8 +49,8 @@ async def _resolve_api_key(project_id: int, run_id: int | None = None) -> str:
 
     encrypted: bytes | None = None
     try:
-        from ...core.crypto import decrypt_api_key  # type: ignore[attr-defined]
-        from ...models import Project  # type: ignore[attr-defined]
+        from ...core.crypto import decrypt_api_key
+        from ...models import Project
 
         async with session_factory() as s:
             row = await s.execute(
@@ -69,7 +68,7 @@ async def _resolve_api_key(project_id: int, run_id: int | None = None) -> str:
 
     if encrypted is not None:
         try:
-            return decrypt_api_key(encrypted)  # type: ignore[name-defined]
+            return decrypt_api_key(encrypted)
         except Exception as e:
             if is_production:
                 raise RuntimeError(
@@ -100,7 +99,7 @@ async def _resolve_user_id(project_id: int) -> int:
     后续 ``int(None)`` 静默 skip 记账)。
     """
     try:
-        from ...models import Project  # type: ignore[attr-defined]
+        from ...models import Project
 
         async with session_factory() as s:
             row = await s.execute(
@@ -162,7 +161,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         run_id,
         current,
         status="generating",
-        processing_started_at=datetime.now(timezone.utc),
+        processing_started_at=datetime.now(UTC),
     )
     await publish_event(project_id, "chapter_started", chapter_index=current)
 
@@ -233,7 +232,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             from ..sync import flush_chapter_partial
 
             await flush_chapter_partial(
-                run_id,  # type: ignore[arg-type]
+                run_id,
                 current,
                 version_id,
                 partial_text,
@@ -259,7 +258,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             temperature=0.6,
             on_partial=_on_partial,  # ⭐ R-14
         )
-    except (LLMRetryFailed, LLMTimeoutExceeded, asyncio.TimeoutError) as e:
+    except (TimeoutError, LLMRetryFailed, LLMTimeoutExceeded) as e:
         # D-BG:call_llm_stream 总超时已包成 LLMTimeoutExceeded,这里同时
         # catch asyncio.TimeoutError 是兜底。
         await _safe_sync_chapter(

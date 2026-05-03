@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Annotated, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Annotated
 
 import sqlalchemy as sa
 import structlog
@@ -59,7 +60,7 @@ async def stream(
     project_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
-):
+) -> StreamingResponse:
     if not await _project_visible_to_user(db, project_id, user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found")
 
@@ -75,7 +76,7 @@ async def stream(
                         ev_iter.__anext__(), timeout=PING_INTERVAL
                     )
                     yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield ": ping\n\n"
                 except StopAsyncIteration:
                     break

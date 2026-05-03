@@ -5,8 +5,8 @@ from .api_key import ApiKey
 from .base import Base
 from .chapter import Chapter
 from .chapter_version import ChapterVersion
-from .docx_job import DocxJob
 from .document import Document
+from .docx_job import DocxJob
 from .project import Project
 from .review_event import ReviewEvent
 from .run import Run
@@ -14,15 +14,15 @@ from .token_usage import TokenUsage
 from .user import User
 
 __all__ = [
-    "Base",
-    "User",
     "ApiKey",
-    "Project",
-    "Document",
-    "Run",
+    "Base",
     "Chapter",
     "ChapterVersion",
-    "ReviewEvent",
-    "TokenUsage",
+    "Document",
     "DocxJob",
+    "Project",
+    "ReviewEvent",
+    "Run",
+    "TokenUsage",
+    "User",
 ]

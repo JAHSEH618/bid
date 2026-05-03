@@ -24,16 +24,16 @@ from ..core.crypto import decrypt_api_key, encrypt_api_key
 from ..core.security import hash_password, verify_password
 from ..deps import get_current_user, get_current_user_lax, get_db
 from ..models import ApiKey, User
-from ..services.api_key_validator import (
-    ApiKeyValidationFailed,
-    validate_dashscope,
-)
 from ..schemas.auth import (
     ApiKeyInfoResponse,
     ChangePasswordRequest,
     SetApiKeyRequest,
     TokenUsageRow,
     TokenUsageSummary,
+)
+from ..services.api_key_validator import (
+    ApiKeyValidationFailed,
+    validate_dashscope,
 )
 
 router = APIRouter(prefix="/api/me", tags=["me"])
@@ -137,15 +137,15 @@ async def set_api_key(
     now = sa.func.now()
     if existing is not None:
         existing.encrypted_key = encrypted
-        existing.last_validated_at = now  # type: ignore[assignment]
-        existing.updated_at = now  # type: ignore[assignment]
+        existing.last_validated_at = now
+        existing.updated_at = now
     else:
         db.add(
             ApiKey(
                 user_id=user.id,
                 provider="dashscope",
                 encrypted_key=encrypted,
-                last_validated_at=now,  # type: ignore[arg-type]
+                last_validated_at=now,
             )
         )
     await db.commit()
@@ -186,7 +186,7 @@ async def test_api_key(
     except ApiKeyValidationFailed as e:
         return {"ok": False, "error": str(e)}
 
-    api_key.last_validated_at = sa.func.now()  # type: ignore[assignment]
+    api_key.last_validated_at = sa.func.now()
     await db.commit()
     return {"ok": True, "last_validated_at": api_key.last_validated_at}
 

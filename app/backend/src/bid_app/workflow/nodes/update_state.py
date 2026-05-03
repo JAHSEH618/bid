@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -105,7 +105,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         current,
         status="generating",
         retry_count=new_retry,
-        processing_started_at=datetime.now(timezone.utc),
+        processing_started_at=datetime.now(UTC),
     )
     return {
         "current_index": current,

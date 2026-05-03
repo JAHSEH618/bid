@@ -25,12 +25,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
 import redis.asyncio as redis_async
 import sqlalchemy as sa
 import structlog
+from sqlalchemy import Row
 
 from ..config import settings
 from ..db import session_factory
@@ -254,7 +256,7 @@ async def reconcile_active_projects() -> list[int]:
             for pid in members:
                 p.exists(ALIVE_KEY.format(pid))
             results = await p.execute()
-        zombies = [int(pid) for pid, alive in zip(members, results) if not alive]
+        zombies = [int(pid) for pid, alive in zip(members, results, strict=True) if not alive]
         if zombies:
             await r.srem(ACTIVE_SET, *zombies)
             log.warning("reconciled_zombie_projects", project_ids=zombies)
@@ -274,7 +276,7 @@ async def get_alive_project_ids() -> list[int]:
             for pid in members:
                 p.exists(ALIVE_KEY.format(pid))
             results = await p.execute()
-        return [int(pid) for pid, alive in zip(members, results) if alive]
+        return [int(pid) for pid, alive in zip(members, results, strict=True) if alive]
     finally:
         await r.aclose()
 
@@ -299,7 +301,7 @@ async def cleanup_stale_chapters(ctx: dict[str, Any]) -> None:
     """arq cron(每分钟):回滚 API commit 后进程崩溃导致卡 reviewing/retrying/
     pending/generating 的章节(D-AR / D-AS / D-BF / D-BL / D-BS / D-BB)。"""
     active_ids = await get_alive_project_ids()
-    rows: list[Any] = []
+    rows: Sequence[Row[Any]] = []
     gen_project_ids: list[int] = []
 
     async with session_factory() as s:
@@ -550,7 +552,9 @@ class SlotLost(Exception):
 
 
 @contextlib.asynccontextmanager
-async def project_heartbeat(project_id: int, token: str):
+async def project_heartbeat(
+    project_id: int, token: str
+) -> AsyncIterator[asyncio.Event]:
     """task 运行时上下文,每 ``HEARTBEAT_INTERVAL`` 秒续租 alive TTL(D-AM)。
 
     续租失败(token 不再匹配)→ 设 ``lost_event``,主循环用
@@ -572,12 +576,10 @@ async def project_heartbeat(project_id: int, token: str):
                     break
             except Exception:
                 log.exception("heartbeat_failed", project_id=project_id)
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(
                     lost_event.wait(), timeout=HEARTBEAT_INTERVAL
                 )
-            except asyncio.TimeoutError:
-                pass
 
     hb_task = asyncio.create_task(_loop())
     try:

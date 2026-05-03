@@ -96,7 +96,7 @@ async def get_chapter_detail(
         id=chapter.id,
         index=chapter.index,
         title=chapter.title,
-        status=chapter.status,  # type: ignore[arg-type]
+        status=chapter.status,
         final_text=chapter.final_text,
         retry_count=chapter.retry_count,
         last_error=chapter.last_error,

@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -68,7 +68,7 @@ async def login(
     # 序列化时(响应阶段 session 已关)getattr 触发 lazy refresh →
     # MissingGreenlet。Python datetime 直接是合法 datetime 值,from_attributes
     # 序列化无需 IO。
-    user.last_login_at = datetime.now(timezone.utc)
+    user.last_login_at = datetime.now(UTC)
     await db.commit()
     # 显式 model_validate 在 session 还活着时序列化,把 ORM 转 Pydantic DTO。
     # 之后即使 session 关闭,DTO 是纯 Python 对象,不会再触发 lazy load。

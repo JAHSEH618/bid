@@ -56,7 +56,7 @@ async def validate_dashscope(api_key: str) -> None:
                 max_tokens=1,
                 stream=False,
             )
-    except asyncio.TimeoutError as e:
+    except TimeoutError as e:
         raise ApiKeyValidationFailed(
             f"DashScope 验证超时(>{_TEST_TIMEOUT_SECONDS}s)"
         ) from e

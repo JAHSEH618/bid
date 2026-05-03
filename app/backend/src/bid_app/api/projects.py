@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import secrets
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -360,7 +360,7 @@ async def start_workflow(
     run = Run(
         project_id=project_id,
         langgraph_thread_id=thread_id,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         status="running",
     )
     db.add(run)
@@ -386,7 +386,7 @@ async def start_workflow(
             await release_project_slot(project_id, result.token)
             project.status = "init"
             run.status = "aborted"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = datetime.now(UTC)
             run.error = "arq_pool not initialized"
             await db.commit()
             raise HTTPException(
@@ -407,7 +407,7 @@ async def start_workflow(
             )
             project.status = "init"
             run.status = "aborted"
-            run.finished_at = datetime.now(timezone.utc)
+            run.finished_at = datetime.now(UTC)
             run.error = f"enqueue failed: {e!r}"
             await db.commit()
             await release_project_slot(project_id, result.token)
@@ -521,12 +521,12 @@ async def confirm_outline(
             slot_token=result.token,
             reviewer_id=user.id,
         )
-    except Exception:
+    except Exception as e:
         await release_project_slot(project_id, result.token)
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "无法入队提纲确认任务,请稍后重试",
-        )
+        ) from e
 
     return {"ok": True}
 
@@ -567,7 +567,7 @@ async def download_proposal_md(
     project_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[User, Depends(get_current_user)],
-):
+) -> FileResponse:
     """直接下载 ``proposal.md`` 文件(``Content-Disposition`` 含项目名)。"""
     project = await _get_project_or_404(db, project_id)
     md_path = Path(project.dir_path) / "proposal.md"

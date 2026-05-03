@@ -31,7 +31,7 @@ ACCEPTANCE_AUDIT deviation 时按 §10.2 spec 拆回**严格 11 节点**:
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END, StateGraph
 
@@ -64,14 +64,18 @@ def _route_after_update(state: WorkflowState) -> str:
     )
 
 
-def build_graph(checkpointer: "AsyncPostgresSaver | None" = None):
+def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     """编译 LangGraph workflow。``checkpointer`` 由 worker lifecycle 注入。
 
     M0 CLI ``run_local`` 时不带 checkpointer(用 ``None``,LangGraph 默认
     in-memory 路径,interrupt 在单进程内仍能 resume),M1+ 由 worker 注入
     AsyncPostgresSaver。
+
+    返回 ``CompiledStateGraph`` 但 langgraph 0.6 没暴露稳定 type 给我们标
+    注,这里返 ``Any``。worker.tasks 用 ``await graph.ainvoke(...)`` 不依赖
+    具体方法签名。
     """
-    g: StateGraph = StateGraph(WorkflowState)
+    g = StateGraph(WorkflowState)
 
     g.add_node("extract_documents", extract_documents.run)
     g.add_node("generate_outline", generate_outline.run)

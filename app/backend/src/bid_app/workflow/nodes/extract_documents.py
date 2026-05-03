@@ -29,7 +29,7 @@ async def run(state: WorkflowState) -> dict[str, str]:
 
     # Fallback:从 DB 读项目文档并 markitdown 抽取(M1+ services/document_extractor 落地后才会跑)
     try:
-        from ...services.document_extractor import (  # type: ignore[attr-defined]
+        from ...services.document_extractor import (
             extract_for_project,
         )
     except Exception:
