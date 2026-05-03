@@ -524,6 +524,20 @@ function route(ctx: ResolveContext): unknown {
     const ch = list.find((c) => c.index === idx)
     if (!ch) throw apiError(404, { detail: 'chapter not found' })
 
+    if (sub === '' && method === 'GET') {
+      // R-15:GET /api/projects/{id}/chapters/{idx} ChapterDetailResponse
+      return {
+        id: idx + 1, // mock 用 index+1 作 id 占位
+        index: ch.index,
+        title: ch.title,
+        status: ch.status,
+        final_text: ch.final_text,
+        retry_count: ch.retry_count,
+        last_error: null,
+        current_version_id: idx * 1000 + 1,
+        updated_at: NOW,
+      }
+    }
     if (sub === '/review' && method === 'POST') {
       const b = ctx.body as { decision: 'approve' | 'revise' | 'skip' }
       if (b.decision === 'approve') ch.status = 'approved'

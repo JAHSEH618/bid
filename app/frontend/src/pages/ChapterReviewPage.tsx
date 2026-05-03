@@ -7,7 +7,8 @@ import { ChapterSidebar } from '@/components/ChapterSidebar'
 import { ChapterPreview } from '@/components/ChapterPreview'
 import { ReviewActions } from '@/components/ReviewActions'
 import { useProject, useProjectOutline } from '@/api/projects'
-import { useReviewChapter, useRetryChapter } from '@/api/chapters'
+import { useChapter, useReviewChapter, useRetryChapter } from '@/api/chapters'
+import { useQueryClient } from '@tanstack/react-query'
 import { useProjectStream, type ProjectEvent } from '@/hooks/useSSE'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
@@ -21,6 +22,7 @@ export function ChapterReviewPage() {
   const review = useReviewChapter()
   const retry = useRetryChapter()
   const { toast } = useToast()
+  const qc = useQueryClient()
 
   const chapters = outline.data?.chapters ?? []
 
@@ -40,29 +42,32 @@ export function ChapterReviewPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [outline.data?.run_id])
 
-  // SSE 增量 buffer 与「事件携带的完整版」缓存。
-  // R-15 新约定:始终由 chapter.final_text(R-14 周期 flush 到 DB)兜底,
-  // 用户刷新 / 切页面回来时显示 ≥ 上次看到的内容(单调增不变量)。
+  // R-15:active chapter 详情走 GET /api/projects/{id}/chapters/{idx}。
+  // useChapter 内部 refetchInterval 智能策略:generating/retrying/reviewing
+  // → 2s polling(R-14 backend 每 1s flush partial),终态停轮询。
+  const chapterDetail = useChapter(projectId, activeIndex)
+  const detail = chapterDetail.data
+  const finalTextDb = detail?.final_text ?? ''
+
+  // SSE 增量 buffer 与 awaiting_review 事件携带的完整版缓存。
+  // 显示优先级单调增不变量:刷新/切页后看到的内容 ≥ 之前看到的内容。
   const [streaming, setStreaming] = useState<{ index: number; text: string }>({
     index: -1,
     text: '',
   })
   const [readyText, setReadyText] = useState<Record<number, string>>({})
 
-  // 短查找:章节当前 DB 持久化的 final_text(generating 期是 partial,
-  // awaiting_review/approved/skipped 是完整版)。
-  const finalTextOf = (idx: number): string => {
-    const c = chapters.find((ch) => ch.index === idx)
-    return c?.final_text ?? ''
-  }
-
   useProjectStream(projectId, (e: ProjectEvent) => {
     if (e.type === 'chapter_started' || e.type === 'chapter_picked') {
-      // 流开始:buffer 用 DB 已有 partial 作种子,token append 从这继续。
+      // 流开始:buffer 用 DB 已有 partial 作种子(若已 hydrate)
       const idx = e.chapter_index ?? -1
-      setStreaming({ index: idx, text: finalTextOf(idx) })
+      const seed = idx === activeIndex ? finalTextDb : ''
+      setStreaming({ index: idx, text: seed })
       project.refetch()
       outline.refetch()
+      qc.invalidateQueries({
+        queryKey: ['projects', projectId, 'chapters', idx],
+      })
     } else if (e.type === 'chapter_token' && e.chapter_index === activeIndex) {
       setStreaming((prev) =>
         prev.index === e.chapter_index
@@ -75,7 +80,10 @@ export function ChapterReviewPage() {
         setReadyText((prev) => ({ ...prev, [idx]: e.chapter_text! }))
       }
       setStreaming({ index: -1, text: '' })
-      outline.refetch() // 让 final_text 切到完整版
+      outline.refetch()
+      qc.invalidateQueries({
+        queryKey: ['projects', projectId, 'chapters', idx],
+      })
       toast({
         title: `第 ${idx + 1} 章待审核`,
         variant: 'info',
@@ -87,15 +95,21 @@ export function ChapterReviewPage() {
     ) {
       setStreaming({ index: -1, text: '' })
       outline.refetch()
+      qc.invalidateQueries({
+        queryKey: ['projects', projectId, 'chapters'],
+      })
     } else if (e.type === 'chapter_failed') {
       setStreaming({ index: -1, text: '' })
       outline.refetch()
+      qc.invalidateQueries({
+        queryKey: ['projects', projectId, 'chapters'],
+      })
       toast({
         title: `第 ${(e.chapter_index ?? 0) + 1} 章生成失败`,
         variant: 'destructive',
       })
     } else if (e.type === 'chapter_visuals_ready') {
-      // 可视化建议已就绪,这里不做特殊处理(章节正文流仍由 awaiting_review 触发)
+      // 可视化建议已就绪,这里不做特殊处理
     } else if (e.type === 'proposal_ready') {
       project.refetch()
       toast({ title: '全文已生成', variant: 'success' })
@@ -104,33 +118,19 @@ export function ChapterReviewPage() {
     }
   })
 
-  // generating / retrying 期间,SSE 可能临时断或丢 token;每 2s 拉一次 outline,
-  // 让 chapter.final_text 兜底(R-14 partial flush 1s/100chunks),
-  // 万一 SSE 完全失联,用户刷新后也能继续看到内容缓慢更新。
   const activeChapter = chapters.find((c) => c.index === activeIndex)
-  const shouldPollOutline =
-    activeChapter?.status === 'generating' ||
-    activeChapter?.status === 'retrying'
-  useEffect(() => {
-    if (!shouldPollOutline) return
-    const t = window.setInterval(() => {
-      outline.refetch()
-    }, 2_000)
-    return () => window.clearInterval(t)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shouldPollOutline])
 
-  // 显示优先级(R-15 单调增):
+  // 显示优先级(单调增):
   //   1. SSE 实时 buffer(active streaming 期长度持续上升)
   //   2. SSE awaiting_review 事件携带的 chapter_text 完整版
-  //   3. DB persisted final_text(generating partial / awaiting_review 完整版)
-  // 三者取最长 — 防 outline refetch 中途 buffer 临时短于 DB 快照导致闪烁。
+  //   3. DB persisted final_text(R-14 周期 flush;hydrate 路径)
+  // 三者取最长,防 polling 中途 buffer 临时短于 DB 快照导致闪烁。
   const isStreaming =
     streaming.index === activeIndex && streaming.text.length > 0
   const candidates = [
     isStreaming ? streaming.text : '',
     readyText[activeIndex] ?? '',
-    finalTextOf(activeIndex),
+    finalTextDb,
   ]
   const previewMarkdown = candidates.reduce(
     (longest, cur) => (cur.length > longest.length ? cur : longest),
