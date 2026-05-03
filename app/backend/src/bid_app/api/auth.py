@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.login_throttle import clear_fails, is_locked, record_fail
 from ..core.security import (
     create_access_token,
-    create_refresh_token,
     verify_password,
 )
 from ..deps import get_current_user_lax, get_db
@@ -75,14 +74,10 @@ async def login(
         max_age=2 * 3600,
         path="/",
     )
-    response.set_cookie(
-        "refresh_token",
-        create_refresh_token(user.id),
-        httponly=True,
-        samesite="strict",
-        max_age=7 * 86400,
-        path="/api/auth/refresh",
-    )
+    # ⚠️ refresh_token cookie 暂不下发(REVIEW-2 🟡 #2):
+    # 没有 ``/api/auth/refresh`` 端点消费,设它是死数据。后续若加 refresh
+    # 流(spec §14.6 未列),在此重新 set_cookie + 配套 logout delete_cookie
+    # + ``core.security.create_refresh_token`` 仍保留备用。
     return user
 
 
@@ -94,6 +89,8 @@ async def logout(
     """删 cookie。豁免 must_change_password 检查(让首次登录强制改密前
     也能登出)。"""
     response.delete_cookie("access_token", path="/")
+    # 兼容老前端:历史会话可能存有 refresh_token cookie,显式 delete 一次
+    # 清掉,新 login 已不再下发(见上注释)
     response.delete_cookie("refresh_token", path="/api/auth/refresh")
     return {"ok": True}
 
