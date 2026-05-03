@@ -154,6 +154,9 @@ function ToastViewport({
   )
 }
 
+// TODO(M4-后续): 把 useToast hook 与 ToastProvider 拆到不同文件以满足 react-refresh。
+// 现状:Provider + hook 同文件,HMR 边界不纯净但便于一次 import。
+// eslint-disable-next-line react-refresh/only-export-components
 export function useToast() {
   const ctx = useContext(ToastContext)
   if (!ctx) {

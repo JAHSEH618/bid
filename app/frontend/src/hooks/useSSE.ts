@@ -106,6 +106,7 @@ export function useProjectStream(
       es?.close()
     }
     // 仅用 projectId / enabled 触发重连,避免 onEvent 引用变化每次重订阅。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // (react-hooks 5.x 已识别 onEventRef pattern,不再报 exhaustive-deps,
+    //  历史的 disable 注释移除以兼容 --report-unused-disable-directives)
   }, [projectId, options.enabled])
 }

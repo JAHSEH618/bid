@@ -80,6 +80,9 @@ export function ConfirmDialogHost() {
   )
 }
 
+// TODO(M4-后续): 把 confirmDialog helper 拆到独立文件以满足 react-refresh,
+// 当前为简单 trade-off:多导出一个工具函数换取调用点不必到处 import。
+// eslint-disable-next-line react-refresh/only-export-components
 export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     if (!setPendingExternal) {

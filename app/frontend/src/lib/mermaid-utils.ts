@@ -1,3 +1,7 @@
+/* eslint-disable no-irregular-whitespace, no-misleading-character-class */
+// 文件级 disable 说明:本模块的核心职责就是"清洗 LLM 输出里的不可见字符"(零宽空格、
+// NBSP、全角空格)。正则字面量内出现这些字符是**有意为之**,不是误输入;
+// eslint 的两条规则在此场景反向触发了误报。
 // Mermaid 健壮性辅助:LLM 生成的图表在不同 mermaid 版本(8.x ~ 11.x)间常见
 // 兼容差异。这里做一遍预处理,把 LLM 输出 normalize 成 11.x 接受的形式;
 // render 失败再 fallback 显示源码 + 在线编辑器链接(用户可手动修)。

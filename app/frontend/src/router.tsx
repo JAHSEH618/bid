@@ -17,6 +17,9 @@ import { AdminPage } from './pages/AdminPage'
 // IMPLEMENTATION_SPEC §16.1 + REQUIREMENTS P0~P8。
 // /change-password 用 allowMustChange 让 must_change_password=true 的用户能访问。
 // AppShell 提供顶部导航 + DashScopeBanner;login / change-password 不挂壳。
+// TODO(M4-后续): 把 Authed 拆到独立文件以满足 react-refresh / only-export-components,
+// 当前 router.tsx 同时导出 router(常量)和 Authed(组件),HMR 边界不纯净。
+// eslint-disable-next-line react-refresh/only-export-components
 function Authed({
   children,
   shell = true,

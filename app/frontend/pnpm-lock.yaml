@@ -72,6 +72,9 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
     devDependencies:
+      '@eslint/js':
+        specifier: ^9.16.0
+        version: 9.39.4
       '@types/node':
         specifier: ^22.10.0
         version: 22.19.17
@@ -102,6 +105,9 @@ importers:
       eslint-plugin-react-refresh:
         specifier: ^0.4.16
         version: 0.4.26(eslint@9.39.4(jiti@1.21.7))
+      globals:
+        specifier: ^15.14.0
+        version: 15.15.0
       postcss:
         specifier: ^8.4.49
         version: 8.5.13
@@ -1755,6 +1761,10 @@ packages:
 
   globals@14.0.0:
     resolution: {integrity: sha512-oahGvuMGQlPw/ivIYBjVSrWAfWLBeku5tpPE2fOPLi+WHffIWbuh2tCjhyQhTBPMf5E9jDEH4FOmTYgYwbKwtQ==}
+    engines: {node: '>=18'}
+
+  globals@15.15.0:
+    resolution: {integrity: sha512-7ACyT3wmyp3I61S4fG682L0VA2RGD9otkqGJIwNUMF1SWUombIIk+af1unuDYgMm082aHYwD+mzJvv9Iu8dsgg==}
     engines: {node: '>=18'}
 
   hachure-fill@0.5.2:
@@ -4276,6 +4286,8 @@ snapshots:
       is-glob: 4.0.3
 
   globals@14.0.0: {}
+
+  globals@15.15.0: {}
 
   hachure-fill@0.5.2: {}
 
