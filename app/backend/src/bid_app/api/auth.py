@@ -7,9 +7,9 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Annotated
 
-import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from slowapi.util import get_remote_address
 from sqlalchemy import select
@@ -33,7 +33,7 @@ async def login(
     body: LoginRequest,
     response: Response,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> User:
+) -> MeResponse:
     """FR-6.7 D-Q:Redis 计数,失败 ≥ 5/min 锁 5 分钟;成功清失败计数。"""
     ip = get_remote_address(request)
 
@@ -63,8 +63,16 @@ async def login(
 
     await clear_fails(ip)
 
-    user.last_login_at = sa.func.now()  # type: ignore[assignment]
+    # ⭐ R-5 修复:用 Python datetime 而不是 sa.func.now()。
+    # sa.func.now() 是 SQL 表达式 token,赋给 ORM attr 后 commit,pydantic
+    # 序列化时(响应阶段 session 已关)getattr 触发 lazy refresh →
+    # MissingGreenlet。Python datetime 直接是合法 datetime 值,from_attributes
+    # 序列化无需 IO。
+    user.last_login_at = datetime.now(timezone.utc)
     await db.commit()
+    # 显式 model_validate 在 session 还活着时序列化,把 ORM 转 Pydantic DTO。
+    # 之后即使 session 关闭,DTO 是纯 Python 对象,不会再触发 lazy load。
+    me = MeResponse.model_validate(user)
 
     response.set_cookie(
         "access_token",
@@ -78,7 +86,7 @@ async def login(
     # 没有 ``/api/auth/refresh`` 端点消费,设它是死数据。后续若加 refresh
     # 流(spec §14.6 未列),在此重新 set_cookie + 配套 logout delete_cookie
     # + ``core.security.create_refresh_token`` 仍保留备用。
-    return user
+    return me
 
 
 @router.post("/logout")
@@ -98,7 +106,11 @@ async def logout(
 @router.get("/me", response_model=MeResponse)
 async def me(
     user: Annotated[User, Depends(get_current_user_lax)],
-) -> User:
+) -> MeResponse:
     """⚠️ 走 lax(必须):前端登录后第一时间拉 /me 渲染 UI;若 strict
-    走 must_change_password=true 直接 428,前端就拿不到用户信息。"""
-    return user
+    走 must_change_password=true 直接 428,前端就拿不到用户信息。
+
+    显式 ``model_validate``(R-5 同源防御):session 关后 ORM 序列化可能
+    触发 lazy IO → MissingGreenlet,DTO 是纯 Python 对象 immune。
+    """
+    return MeResponse.model_validate(user)
