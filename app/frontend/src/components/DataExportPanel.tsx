@@ -1,5 +1,12 @@
 import { useState } from 'react'
-import { Download, FileText, Loader2, RefreshCw } from 'lucide-react'
+import {
+  Copy,
+  Download,
+  FileText,
+  Loader2,
+  Package,
+  RefreshCw,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -13,7 +20,6 @@ import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
 import type { DocxJobStatus } from '@/lib/types'
 
-// 后端 stage 已返回中文进度提示(如「渲染流程图...」),前端直接用,不再二次映射。
 const STATUS_VARIANT: Record<
   DocxJobStatus,
   'secondary' | 'success' | 'destructive' | 'info' | 'warning'
@@ -31,9 +37,6 @@ export interface DataExportPanelProps {
   markdown?: string
 }
 
-// REQUIREMENTS P6 / FR-5:全文预览 + 复制 + .md / .docx 下载 + 进度条。
-// DOCX 流程:POST 触发 → 轮询 docx-job → done 后链接转可下载。
-// invalidated 状态(D-CG):显示"原文档已更新,需重新生成"。
 export function DataExportPanel({
   projectId,
   projectName,
@@ -90,10 +93,19 @@ export function DataExportPanel({
     docxJobId != null && job && job.status !== 'done' && job.status !== 'failed'
 
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-base">导出</CardTitle>
-        <span className="text-xs text-muted-foreground">{projectName}</span>
+    <Card className="border-border/70 shadow-sm">
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
+        <div className="flex items-center gap-2">
+          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <Package className="h-4 w-4" />
+          </span>
+          <div>
+            <CardTitle className="text-base">导出方案</CardTitle>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {projectName}
+            </p>
+          </div>
+        </div>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
@@ -103,7 +115,7 @@ export function DataExportPanel({
             onClick={handleCopyMarkdown}
             disabled={!markdown}
           >
-            <FileText className="mr-1.5 h-4 w-4" />
+            <Copy className="mr-1.5 h-4 w-4" />
             复制 Markdown
           </Button>
           <Button
@@ -114,12 +126,12 @@ export function DataExportPanel({
           >
             {markdown ? (
               <a href={downloadMarkdownUrl(projectId)} download>
-                <Download className="mr-1.5 h-4 w-4" />
+                <FileText className="mr-1.5 h-4 w-4" />
                 下载 .md
               </a>
             ) : (
               <span>
-                <Download className="mr-1.5 h-4 w-4" />
+                <FileText className="mr-1.5 h-4 w-4" />
                 下载 .md
               </span>
             )}
@@ -142,7 +154,11 @@ export function DataExportPanel({
             )}
           </Button>
           {isDone && (
-            <Button asChild variant="default" size="sm">
+            <Button
+              asChild
+              size="sm"
+              className="shadow-md shadow-primary/15"
+            >
               <a href={downloadDocxUrl(projectId)} download>
                 <Download className="mr-1.5 h-4 w-4" />
                 下载 .docx
@@ -152,8 +168,14 @@ export function DataExportPanel({
         </div>
 
         {job && (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-2 rounded-md bg-muted/50 px-3 py-2 text-xs">
             <Badge variant={STATUS_VARIANT[job.status]}>{job.stage}</Badge>
+            {isWorking && (
+              <span className="flex items-center gap-1 text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                正在打包…
+              </span>
+            )}
             {isFailed && job.error && (
               <span className="text-destructive">{job.error}</span>
             )}

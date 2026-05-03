@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, History } from 'lucide-react'
+import { ArrowLeft, FileCheck, History, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ChapterSidebar } from '@/components/ChapterSidebar'
@@ -24,7 +24,6 @@ export function ChapterReviewPage() {
 
   const chapters = outline.data?.chapters ?? []
 
-  // 当前章节:首选第一个 awaiting_review;否则首个非 approved/skipped;否则 0。
   const [activeIndex, setActiveIndex] = useState<number>(0)
   useEffect(() => {
     if (!outline.data) return
@@ -41,8 +40,6 @@ export function ChapterReviewPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [outline.data?.run_id])
 
-  // 流式 token 缓冲。chapter_index !== activeIndex 时不显示。
-  // awaiting_review 事件携带 chapter_text(完整正文),用作落地 markdown。
   const [streaming, setStreaming] = useState<{ index: number; text: string }>({
     index: -1,
     text: '',
@@ -61,7 +58,6 @@ export function ChapterReviewPage() {
           : { index: e.chapter_index ?? -1, text: e.delta ?? '' },
       )
     } else if (e.type === 'awaiting_review') {
-      // backend 在 awaiting_review payload 里附 chapter_text(M1-8 spec)
       const idx = e.chapter_index ?? -1
       if (e.chapter_text) {
         setReadyText((prev) => ({ ...prev, [idx]: e.chapter_text! }))
@@ -152,8 +148,11 @@ export function ChapterReviewPage() {
 
   if (project.isLoading || outline.isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
-        加载中…
+      <div className="flex h-screen items-center justify-center">
+        <div className="flex flex-col items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-5 w-5 animate-spin" />
+          加载中…
+        </div>
       </div>
     )
   }
@@ -166,39 +165,46 @@ export function ChapterReviewPage() {
   }
 
   return (
-    <div className="grid h-[calc(100vh-3.5rem)] grid-cols-[300px_1fr]">
-      <ChapterSidebar
-        chapters={chapters}
-        currentIndex={activeIndex}
-        onSelect={setActiveIndex}
-      />
+    <div className="grid h-[calc(100vh-3.5rem)] grid-cols-1 md:grid-cols-[300px_1fr]">
+      <div className="hidden md:block">
+        <ChapterSidebar
+          chapters={chapters}
+          currentIndex={activeIndex}
+          onSelect={setActiveIndex}
+        />
+      </div>
       <main className="flex min-h-0 flex-col">
-        <div className="flex items-center justify-between border-b bg-background px-6 py-3">
-          <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between gap-3 border-b bg-background/95 px-6 py-3 backdrop-blur">
+          <div className="flex min-w-0 items-center gap-3">
             <Button variant="ghost" size="sm" asChild>
               <Link to="/">
                 <ArrowLeft className="mr-1 h-4 w-4" />
                 列表
               </Link>
             </Button>
-            <div>
-              <h1 className="text-base font-semibold leading-tight">
+            <div className="min-w-0">
+              <h1 className="truncate text-base font-semibold leading-tight">
                 {project.data.name}
               </h1>
-              <p className="text-xs text-muted-foreground">
+              <p className="mt-0.5 truncate text-xs text-muted-foreground">
                 第 {activeIndex + 1} 章 / {chapters.length}
                 {activeChapter && (
                   <>
-                    {' · '}
-                    {activeChapter.title}
+                    <span className="mx-1.5 text-muted-foreground/40">·</span>
+                    <span className="font-medium text-foreground/80">
+                      {activeChapter.title}
+                    </span>
                   </>
                 )}
               </p>
             </div>
           </div>
           {project.data.status === 'done' && (
-            <Button asChild size="sm">
-              <Link to={`/projects/${projectId}/proposal`}>查看全文</Link>
+            <Button asChild size="sm" className="shadow-sm">
+              <Link to={`/projects/${projectId}/proposal`}>
+                <FileCheck className="mr-1.5 h-4 w-4" />
+                查看全文
+              </Link>
             </Button>
           )}
         </div>
@@ -224,13 +230,13 @@ export function ChapterReviewPage() {
                 )}
               </TabsContent>
               <TabsContent value="versions">
-                <p className="text-sm text-muted-foreground">
-                  本期后端尚未提供历史版本端点。重写后请等待新内容自然涌入。
-                </p>
+                <Card>
+                  本期后端尚未提供历史版本端点。重写后请等待新内容自然涌入
+                </Card>
               </TabsContent>
             </Tabs>
           ) : (
-            <p className="text-sm text-muted-foreground">章节尚未就绪。</p>
+            <p className="text-sm text-muted-foreground">章节尚未就绪</p>
           )}
         </div>
 
@@ -244,47 +250,87 @@ export function ChapterReviewPage() {
   )
 }
 
+// 简化的占位 Card 标签(只在 versions tab 用)
+function Card({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-dashed border-border bg-muted/30 p-6 text-center text-sm text-muted-foreground">
+      {children}
+    </div>
+  )
+}
+
 // 当前 chapter 没有可显示的 markdown 时,根据状态给用户合适的提示。
-// 后端 OutlineResponse 不返回 final_text,所以已 approved/skipped 的章节,
-// 用户从其他页面回来不会看到正文(除非这次 SSE 流过)。这是 M1 的限制。
 function ChapterEmptyHint({ status }: { status: ChapterStatus }) {
+  const base =
+    'flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-muted/30 py-16 text-center'
+
   if (status === 'pending') {
     return (
-      <p className="text-sm text-muted-foreground">
-        本章尚未轮到生成,请等待前序章节完成。
-      </p>
+      <div className={base}>
+        <span className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
+          <span className="text-lg">⏳</span>
+        </span>
+        <p className="text-sm font-medium text-foreground">等待生成</p>
+        <p className="max-w-xs text-xs text-muted-foreground">
+          本章尚未轮到生成,请等待前序章节完成
+        </p>
+      </div>
     )
   }
   if (status === 'generating' || status === 'retrying') {
     return (
-      <p className="text-sm text-muted-foreground">
-        正在生成本章…(若长时间无内容涌入,可刷新页面重新建立 SSE 连接)
-      </p>
+      <div className={base}>
+        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+        <p className="text-sm font-medium text-foreground">
+          {status === 'retrying' ? 'AI 正在重新生成…' : 'AI 正在生成本章…'}
+        </p>
+        <p className="max-w-xs text-xs text-muted-foreground">
+          长时间无内容涌入,可刷新页面重新建立 SSE 连接
+        </p>
+      </div>
     )
   }
   if (status === 'reviewing') {
     return (
-      <p className="text-sm text-muted-foreground">
-        审核已提交,后端处理中…
-      </p>
+      <div className={base}>
+        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+        <p className="text-sm font-medium text-foreground">
+          审核已提交,后端处理中…
+        </p>
+      </div>
     )
   }
   if (status === 'approved' || status === 'skipped') {
     return (
-      <p className="text-sm text-muted-foreground">
-        {status === 'approved' ? '已通过' : '已跳过'},章节正文已并入全文。
-        刷新后无历史内容查看(本期后端不暴露已审章节正文,见全文页)。
-      </p>
+      <div className={base}>
+        <span className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+          ✓
+        </span>
+        <p className="text-sm font-medium text-foreground">
+          {status === 'approved' ? '已通过' : '已跳过'}
+        </p>
+        <p className="max-w-sm text-xs text-muted-foreground">
+          章节正文已并入全文。本期后端不暴露已审章节的历史正文,可前往「全文」页查看完整结果
+        </p>
+      </div>
     )
   }
   if (status === 'failed') {
     return (
-      <p className="text-sm text-destructive">
-        本章生成失败。请点击下方「重新生成本章」。
-      </p>
+      <div className={base.replace('border-dashed', '').replace('bg-muted/30', 'bg-destructive/5 border-destructive/30')}>
+        <span className="flex h-10 w-10 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+          ✕
+        </span>
+        <p className="text-sm font-medium text-destructive">本章生成失败</p>
+        <p className="max-w-xs text-xs text-muted-foreground">
+          请点击下方「重新生成本章」尝试重试
+        </p>
+      </div>
     )
   }
   return (
-    <p className="text-sm text-muted-foreground">章节尚未就绪。</p>
+    <div className={base}>
+      <p className="text-sm text-muted-foreground">章节尚未就绪</p>
+    </div>
   )
 }
