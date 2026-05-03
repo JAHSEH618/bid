@@ -32,6 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         supervisor \
         cron \
         ca-certificates \
+        libreoffice-core \
+        libreoffice-writer \
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
        gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \

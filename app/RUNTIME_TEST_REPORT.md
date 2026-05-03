@@ -1,6 +1,6 @@
 # RUNTIME_TEST_REPORT — 本地启动 + 烟囱测试 + 重启验证
 
-任务 #41 的执行记录。runtime test 在本地 macOS + Colima Linux VM 跑通了完整链路:启动 → 烟囱(13 项)→ 重启验证。期间发现并修复了 8 个运行时 bug(R-1 ~ R-8,R-6 误诊撤回)。
+任务 #41 的执行记录。runtime test 在本地 macOS + Colima Linux VM 跑通了完整链路:启动 → 烟囱(13 项)→ 重启验证。期间发现并修复了 9 个运行时 bug(R-1 ~ R-9,R-6 误诊撤回)。
 
 ## 总览
 
@@ -21,6 +21,8 @@
 - `1992ba1` (backend) login MissingGreenlet → 显式 DTO(R-5)
 - `2962df8` (backend) chapter awaiting_review + api_key_validator FAKE_LLM(R-7)
 - `f423e33` (backend) sanitize NUL+C0 controls + markitdown UnsupportedFormat(R-8 后续发现,已部署)
+- `6e1886e` (backend) .doc 老 Word 格式支持(LibreOffice headless 转 docx,R-9 后续发现)
+- `<this commit>` (devops) Dockerfile 加 libreoffice-core + libreoffice-writer 配套 R-9
 
 ## 环境
 
@@ -121,6 +123,15 @@
   - `extract_for_project` 读已抽取 markdown 时也 sanitize 自愈历史脏数据
 - **deploy 状态**:✅ devops 在本地容器 `docker compose build app && up -d --force-recreate app` 已部署(2026-05-03 11:52),三进程 healthy,redis 状态保留(db_keys=12)
 - **遗留**:已上传的脏 markdown 文件磁盘上仍含 NUL/�,但 extract_for_project 读时 sanitize,workflow 不会再炸;Document.extract_error 字段是历史空(无 UI 错误提示)。**用户彻底清洁路径**:删项目重建 → 新上传走新 extract 路径,DocumentExtractError 完整记录
+
+### Bug R-9:`.doc` 老 Word 格式不支持(markitdown 只吃 .docx)✅ FIXED
+
+- **Trigger**:用户上传 `.doc`(2003 之前 OLE 格式),markitdown 抛 `UnsupportedFormat` → R-8 fix 后 Document.extract_error 记录但 workflow 跑不动
+- **修复**:
+  - **backend** commit `6e1886e`:`extract_file` 检测 `.doc` 后缀 → tempdir → `subprocess.run(['soffice','--headless','--convert-to','docx','--outdir',tmp,doc])` → markitdown 转 .docx → 返 markdown;`shutil.which('soffice')` 不存在则 raise `DocumentExtractError`("请安装 libreoffice-core + libreoffice-writer,或上传 .docx");timeout 60s
+  - **devops** Dockerfile apt-get 块加 `libreoffice-core` + `libreoffice-writer`(镜像 +600MB,但保留表格/标题层级,LLM-1 提纲质量不降级)
+- **deploy 状态**:✅ rebuild 通过(`docker run --rm bid-app:latest soffice --version` → "LibreOffice 7.4.7.2 40(Build:2)"),app force-recreate 后三进程 healthy
+- **为什么不用 antiword 轻量方案**:antiword 只能转纯文本,丢表格 + Heading 层级,LLM-1 提纲生成的"目标 / 章节 / 评分细则"等结构化抽取会变成纯散文,质量下降
 
 ---
 
