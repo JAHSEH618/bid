@@ -33,6 +33,11 @@ import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
 import type { AdminTokenUsageRow } from '@/lib/types'
 
+interface ResetPwdTarget {
+  userId: number
+  username: string
+}
+
 export function AdminPage() {
   const users = useAdminUsers()
   const create = useCreateAdminUser()
@@ -40,6 +45,7 @@ export function AdminPage() {
   const remove = useDeleteAdminUser()
   const { toast } = useToast()
   const [open, setOpen] = useState(false)
+  const [resetTarget, setResetTarget] = useState<ResetPwdTarget | null>(null)
   const [period, setPeriod] = useState<UsagePeriod>('month')
   const usage = useAdminTokenUsage(period)
 
@@ -70,28 +76,34 @@ export function AdminPage() {
     }
   }
 
-  const handleResetPwd = async (userId: number, username: string) => {
-    const newPwd = window.prompt(`为 ${username} 重置密码(≥ 8 位):`)?.trim()
-    if (!newPwd) return
+  // window.prompt 已替换成 shadcn Dialog + type=password 输入(REVIEW-3 🟡 #5)。
+  // 浏览器 prompt 不支持密码遮蔽,且不可统一样式;dialog 走 PATCH {reset_password}
+  // 后,后端会同步置 must_change_password=true 强制用户下次改密(api/admin.py)。
+  const submitResetPwd = async (
+    target: ResetPwdTarget,
+    newPwd: string,
+  ): Promise<boolean> => {
     if (newPwd.length < 8) {
       toast({ title: '至少 8 位', variant: 'warning' })
-      return
+      return false
     }
     try {
       await update.mutateAsync({
-        userId,
+        userId: target.userId,
         body: { reset_password: newPwd },
       })
       toast({
         title: '密码已重置,该用户下次登录需改密',
         variant: 'success',
       })
+      return true
     } catch (err) {
       toast({
         title: '重置失败',
         description: readApiError(err, '重置失败'),
         variant: 'destructive',
       })
+      return false
     }
   }
 
@@ -266,7 +278,12 @@ export function AdminPage() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => handleResetPwd(u.id, u.username)}
+                          onClick={() =>
+                            setResetTarget({
+                              userId: u.id,
+                              username: u.username,
+                            })
+                          }
                           disabled={update.isPending}
                           title="重置密码"
                         >
@@ -398,7 +415,92 @@ export function AdminPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <ResetPasswordDialog
+        target={resetTarget}
+        onClose={() => setResetTarget(null)}
+        onSubmit={submitResetPwd}
+        pending={update.isPending}
+      />
     </div>
+  )
+}
+
+function ResetPasswordDialog({
+  target,
+  onClose,
+  onSubmit,
+  pending,
+}: {
+  target: ResetPwdTarget | null
+  onClose: () => void
+  onSubmit: (target: ResetPwdTarget, newPwd: string) => Promise<boolean>
+  pending: boolean
+}) {
+  const [pwd, setPwd] = useState('')
+  const [show, setShow] = useState(false)
+
+  const handleClose = () => {
+    setPwd('')
+    setShow(false)
+    onClose()
+  }
+
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    if (!target) return
+    const ok = await onSubmit(target, pwd)
+    if (ok) handleClose()
+  }
+
+  return (
+    <Dialog open={target != null} onOpenChange={(v) => !v && handleClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>重置 {target?.username} 的密码</DialogTitle>
+          <DialogDescription>
+            ≥ 8 位。重置后该用户首次登录会被强制再次修改密码
+            (must_change_password=true)。
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="reset-pwd">新密码</Label>
+            <div className="flex gap-2">
+              <Input
+                id="reset-pwd"
+                type={show ? 'text' : 'password'}
+                autoFocus
+                autoComplete="new-password"
+                value={pwd}
+                onChange={(e) => setPwd(e.target.value)}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setShow((s) => !s)}
+              >
+                {show ? '隐藏' : '显示'}
+              </Button>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleClose}
+              disabled={pending}
+            >
+              取消
+            </Button>
+            <Button type="submit" disabled={pending || pwd.length < 8}>
+              {pending ? '提交中…' : '确认重置'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }
 
