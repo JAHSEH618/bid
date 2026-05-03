@@ -48,7 +48,11 @@ HEARTBEAT_INTERVAL = 20  # heartbeat 周期,< ALIVE_TTL 的一半留容错
 
 # ⭐ D-AR / D-AS / D-BF 中间态超时清理
 STALE_CHAPTER_TIMEOUT_SECONDS = 60
-STALE_GENERATING_TIMEOUT_SECONDS = 60 * 15  # 15 分钟 = 600s + 5 min margin
+# ⭐ R-20:从 15min 缩到 3min。理由:LLM 单 chapter 5K 字流式 1-3min 跑完,
+# worker 健康跑章节时 partial_flush 持续更新 processing_started_at;3min 阈值
+# + worker startup reconciler 双保险,容器 rebuild 后用户不再等 15min 才看到
+# retry CTA。
+STALE_GENERATING_TIMEOUT_SECONDS = 60 * 3  # 3 分钟
 STALE_DOCX_TIMEOUT_SECONDS = 30 * 60
 
 

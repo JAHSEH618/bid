@@ -37,6 +37,77 @@ from ..services.concurrency import (
 log = structlog.get_logger()
 
 
+async def _reconcile_orphaned_chapters_on_startup() -> None:
+    """⭐ R-20:worker 启动立即清理 zombie 章节(processing_started_at 非 NULL
+    + status IN generating/reviewing/retrying)。
+
+    场景:容器 rebuild/restart 后,arq worker 进程是新的,之前 in-flight 的
+    章节 task 已死。它们 status 仍是 generating 但永远不会有 worker 跑它。
+    本函数把所有这种章节标 failed + last_error 写明,前端能看到 retry CTA,
+    不必等 cron stale 阈值(R-20 同步缩到 180s)。
+
+    保守路径:只 reconcile ``processing_started_at < NOW() - INTERVAL '30 seconds'``
+    的章节,给真有快速续跑的 worker 留 30 秒 grace,避免误伤刚 enqueue 不久的
+    task。后续如出现 active_set/heartbeat 残留,周期 cron 仍会兜底。
+
+    错误吞掉(打 log 不阻塞 worker 启动)。
+    """
+    grace = 30  # 秒
+    try:
+        async with session_factory() as s:
+            result = await s.execute(
+                sa.text(
+                    f"""
+                    UPDATE chapters c SET
+                        status = CASE
+                            WHEN c.status='reviewing'  THEN 'awaiting_review'
+                            WHEN c.status='retrying'   THEN 'failed'
+                            WHEN c.status='generating' THEN 'failed'
+                        END,
+                        processing_started_at = NULL,
+                        last_error = COALESCE(c.last_error, '') ||
+                            ' [worker 启动时自动回滚:容器 restart 切断 in-flight workflow]'
+                    WHERE c.status IN ('generating','reviewing','retrying')
+                      AND c.processing_started_at IS NOT NULL
+                      AND c.processing_started_at < NOW() - INTERVAL '{grace} seconds'
+                    RETURNING c.id, c.run_id, c.index, c.status
+                    """
+                )
+            )
+            rows = result.all()
+            if rows:
+                log.warning(
+                    "worker_startup_reconciled_orphans", count=len(rows)
+                )
+            # ⭐ 把对应 run + project 状态从 failed 改回 running:之前若被 cron
+            # cleanup 抢标 failed,但实际 chapters 已被本函数回滚为
+            # failed/awaiting_review,UI 上需 running 状态才让用户能 retry 续跑。
+            await s.execute(
+                sa.text(
+                    """
+                    UPDATE runs SET status='running', finished_at=NULL
+                    WHERE status='failed' AND id IN (
+                      SELECT DISTINCT run_id FROM chapters WHERE status='failed'
+                      AND last_error LIKE '%worker 启动时自动回滚%'
+                    )
+                    """
+                )
+            )
+            await s.execute(
+                sa.text(
+                    """
+                    UPDATE projects SET status='running'
+                    WHERE status='failed' AND id IN (
+                      SELECT project_id FROM runs WHERE status='running'
+                    )
+                    """
+                )
+            )
+            await s.commit()
+    except Exception:
+        log.exception("worker_startup_reconcile_orphans_failed")
+
+
 async def on_startup(ctx: dict[str, Any]) -> None:
     # AsyncConnectionPool:LangGraph 文档与 _ainternal.Conn 联合类型都允许走池
     pool = AsyncConnectionPool(
@@ -75,6 +146,10 @@ async def on_startup(ctx: dict[str, Any]) -> None:
     woke = await wake_queued_projects(ctx["arq_pool"])
     if woke:
         log.info("worker_startup_woke_queued", count=woke)
+
+    # ⭐ R-20:清理上次容器 restart 切断的 in-flight 章节(generating/reviewing/
+    # retrying)。错误吞掉,不阻塞 worker 启动。
+    await _reconcile_orphaned_chapters_on_startup()
 
 
 async def on_shutdown(ctx: dict[str, Any]) -> None:
