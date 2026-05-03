@@ -5,7 +5,15 @@ D-AW / D-AZ / D-BA / D-BK / D-BS / D-BT)。
   · ``start_workflow_task`` — /start 端点,新启动
   · ``resume_review_task``  — /review / /confirm-outline 端点,从 interrupt 恢复
   · ``retry_failed_chapter_task`` — /chapters/{idx}/retry 端点,失败章节续跑
-  · ``generate_docx_task``  — /docx POST 端点(M3-2 真实现,本文件占位)
+  · ``generate_docx_task``  — /docx POST 端点
+
+⚠️ arq 0.26.x 的 ``arq.worker.func`` 不是装饰器工厂(``func(coroutine, *,
+max_tries=...)``,coroutine 是必填位置参数);spec §17.2 的 ``@func(max_tries=1)``
+写法在该版本不可用——会抛 ``TypeError: func() missing 1 required positional
+argument: 'coroutine'``。
+正确做法:任务保持 plain async function,在 ``worker/settings.py`` 的
+``WorkerSettings.functions`` 列表里用 ``func(start_workflow_task, max_tries=1)``
+逐个包装(返 ``Function`` 对象)。
 """
 from __future__ import annotations
 
@@ -15,7 +23,6 @@ from typing import Any
 
 import sqlalchemy as sa
 import structlog
-from arq.worker import func
 from langgraph.types import Command
 
 from ..config import settings
@@ -278,7 +285,6 @@ async def _slot_lost_compensation(
 # ----- workflow tasks ---------------------------------------------------
 
 
-@func(max_tries=1)
 async def start_workflow_task(
     ctx: dict[str, Any],
     *,
@@ -349,7 +355,6 @@ async def start_workflow_task(
         await wake_queued_projects(arq_pool)
 
 
-@func(max_tries=1)
 async def resume_review_task(
     ctx: dict[str, Any],
     *,
@@ -457,7 +462,6 @@ async def resume_review_task(
         await wake_queued_projects(arq_pool)
 
 
-@func(max_tries=1)
 async def retry_failed_chapter_task(
     ctx: dict[str, Any],
     *,
@@ -618,8 +622,7 @@ async def _commit_docx_done(
     return {"status": "done", "output_path": str(final_path)}
 
 
-@func(max_tries=1)  # ⭐ D-AY 与其他 task 一致
-async def generate_docx_task(
+async def generate_docx_task(  # max_tries=1 在 worker/settings.py functions 列表里 wrap(D-AY)
     ctx: dict[str, Any],
     *,
     project_id: int,

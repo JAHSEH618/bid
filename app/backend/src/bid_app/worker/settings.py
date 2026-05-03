@@ -1,7 +1,11 @@
 """arq WorkerSettings(§17.2 / D-AJ / D-AY / D-Z)。
 
-⚠️ D-Z + D-AY:**所有任务 max_tries=1**(workflow 三类 + DOCX),通过
-``@func(max_tries=...)`` 装饰器在 ``tasks.py`` 配置。
+⚠️ D-Z + D-AY:**所有任务 max_tries=1**(workflow 三类 + DOCX)。
+arq 0.26.x 的 ``arq.worker.func`` 不是装饰器工厂——``coroutine`` 是必填位置
+参数。spec §17.2 写法 ``@func(max_tries=1)`` 在该版本会抛
+``TypeError: func() missing 1 required positional argument: 'coroutine'``。
+正确做法:tasks.py 里保持 plain async function,本文件 ``functions=`` 列表
+用 ``func(coroutine, max_tries=1)`` 逐个包装(返 ``Function`` 对象)。
 
 ⭐ D-AJ:``functions`` 与 ``cron_jobs`` 都直接放函数对象(不是字符串路径),
 避免依赖 arq 字符串导入路径下 wrapped attribute 是否被发现的隐式行为。
@@ -13,6 +17,7 @@ from __future__ import annotations
 
 from arq.connections import RedisSettings
 from arq.cron import cron
+from arq.worker import func
 
 from ..config import settings
 from ..services.concurrency import (
@@ -32,11 +37,12 @@ from .tasks import (
 class WorkerSettings:
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
 
+    # ⭐ D-Z + D-AY:max_tries=1 在 wrapper 上指定;arq 0.26 API 要求位置参数
     functions = [
-        start_workflow_task,
-        resume_review_task,
-        retry_failed_chapter_task,
-        generate_docx_task,
+        func(start_workflow_task, max_tries=1),
+        func(resume_review_task, max_tries=1),
+        func(retry_failed_chapter_task, max_tries=1),
+        func(generate_docx_task, max_tries=1),
     ]
 
     max_jobs = settings.max_concurrent_projects + 2
