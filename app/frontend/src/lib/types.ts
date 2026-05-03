@@ -59,12 +59,9 @@ export type ChapterStatus =
   | 'failed'
   | 'retrying'
 
-// /outline 返回的章节(陈述 ID 是字符串 'ch_01' 形式;index 是数字)。
-// R-15:final_text 是 backend models/chapter.py:Chapter.final_text 的快照,
-// generating 期间 partial(R-14 周期 flush 1s/100chunks),
-// awaiting_review/approved/skipped 时是完整版。
-// 字段可能不在 OutlineResponse 默认 chapter dict 中(取决于 backend 版本),
-// 故标 optional,前端按 ?? '' 处理。
+// /outline 返回的章节(id 字符串 'ch_01' 形式;index 是数字)。
+// commit 7fbda55 后 backend 也在 outline 端点 chapters dict 里返 final_text,
+// 用于 R-15 hydrate 「刷新页面已生成内容不丢」。仍可选走 GET /chapters/{idx} 拿完整 ChapterDetailDTO。
 export interface OutlineChapterDTO {
   id: string
   title: string
@@ -73,7 +70,24 @@ export interface OutlineChapterDTO {
   target_pages: number
   index: number
   status: ChapterStatus
-  final_text?: string | null
+  final_text: string | null
+}
+
+// GET /api/projects/{id}/chapters/{idx} ChapterDetailResponse(commit 7dfc2fe)。
+// R-14 周期 flush + R-15 hydrate 用:
+//   status='generating' + final_text != null → partial 快照(允许刷新后立即看到)
+//   status='awaiting_review' + final_text → 完整章节(显示三按钮)
+//   status='failed' + last_error → 显示错误 + retry 按钮
+export interface ChapterDetailDTO {
+  id: number
+  index: number
+  title: string
+  status: ChapterStatus
+  final_text: string | null
+  retry_count: number
+  last_error: string | null
+  current_version_id: number | null
+  updated_at: string
 }
 
 // /outline 整体响应。
