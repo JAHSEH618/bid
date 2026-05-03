@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import secrets
 import shutil
 from datetime import UTC, datetime
@@ -281,20 +282,26 @@ async def upload_document(
         )
 
     # 落盘
+    # ⭐ M1 perf:50MB 文件 write_bytes / Office 抽取(LibreOffice headless
+    # subprocess)是同步阻塞 IO,直接跑会卡死整个 Uvicorn event loop ——
+    # 所有 SSE / 其他请求会一起冻几十秒。包 asyncio.to_thread 让 IO 重活
+    # 走 default thread pool,event loop 仍能 serve 别的请求。
+    # 注:不需要建 arq queue 异步化(那是 M2 的 docx 路径才需要的更大改动);
+    # 上传是用户同步请求,UI 等响应,to_thread 已足够。
     project_dir = Path(project.dir_path)
     uploads_dir = project_dir / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     safe_name = f"{kind}_{secrets.token_hex(4)}{suffix}"
     stored_path = uploads_dir / safe_name
-    stored_path.write_bytes(raw)
+    await asyncio.to_thread(stored_path.write_bytes, raw)
 
     # markitdown 抽取(失败容忍,记 extract_error 字段)
     md_path: Path | None = None
     extract_error: str | None = None
     try:
-        md_text = extract_file(stored_path)
+        md_text = await asyncio.to_thread(extract_file, stored_path)
         md_path = uploads_dir / f"{kind}.md"
-        md_path.write_text(md_text, encoding="utf-8")
+        await asyncio.to_thread(md_path.write_text, md_text, encoding="utf-8")
     except Exception as e:
         log.exception(
             "document_extract_failed",
