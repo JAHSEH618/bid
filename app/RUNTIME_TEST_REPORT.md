@@ -1,6 +1,6 @@
 # RUNTIME_TEST_REPORT — 本地启动 + 烟囱测试 + 重启验证
 
-任务 #41 的执行记录。runtime test 在本地 macOS + Colima Linux VM 跑通了完整链路:启动 → 烟囱(13 项)→ 重启验证。期间发现并修复了 7 个运行时 bug(R-1 ~ R-7)。
+任务 #41 的执行记录。runtime test 在本地 macOS + Colima Linux VM 跑通了完整链路:启动 → 烟囱(13 项)→ 重启验证。期间发现并修复了 8 个运行时 bug(R-1 ~ R-8,R-6 误诊撤回)。
 
 ## 总览
 
@@ -20,6 +20,7 @@
 - `d5d003f` (backend) arq @func(max_tries=1) API 修(R-4)
 - `1992ba1` (backend) login MissingGreenlet → 显式 DTO(R-5)
 - `2962df8` (backend) chapter awaiting_review + api_key_validator FAKE_LLM(R-7)
+- `f423e33` (backend) sanitize NUL+C0 controls + markitdown UnsupportedFormat(R-8 后续发现,已部署)
 
 ## 环境
 
@@ -110,6 +111,16 @@
 - **API 影响**:`POST /chapters/0/review {decision:approve}` 返 409,审核流程卡死
 - **修复**:backend-lead commit `2962df8`(R-7 chapter 卡 generating + api_key_validator FAKE_LLM bypass)
 - **附加**:`api_key_validator.py` 也加了 FAKE_LLM 短路,PUT /api/me/api-key 在 FAKE_LLM=1 时不调真 dashscope
+
+### Bug R-8:损坏 docx → silent bytes.decode → NUL/C0 控制字符进 LangGraph state → postgres JSON 拒收 ✅ FIXED
+
+- **Trigger**:用户上传含损坏 binary 区域的 docx,旧 `extract_file` silent 走 `bytes.decode(errors="replace")` fallback,把 NUL + C0 控制字符塞进 markdown,后续 langgraph_checkpoint 写 postgres JSONB 时 `invalid byte sequence` 拒收
+- **修复**:backend-lead commit `f423e33`
+  - 加 `_sanitize_for_json` helper 剥 NUL + C0 控制字符(保留 \n \r \t)
+  - `DocumentExtractError` 异常显式抛代替 silent fallback,Document.extract_error 字段记录原因(前端 UI 可见)
+  - `extract_for_project` 读已抽取 markdown 时也 sanitize 自愈历史脏数据
+- **deploy 状态**:✅ devops 在本地容器 `docker compose build app && up -d --force-recreate app` 已部署(2026-05-03 11:52),三进程 healthy,redis 状态保留(db_keys=12)
+- **遗留**:已上传的脏 markdown 文件磁盘上仍含 NUL/�,但 extract_for_project 读时 sanitize,workflow 不会再炸;Document.extract_error 字段是历史空(无 UI 错误提示)。**用户彻底清洁路径**:删项目重建 → 新上传走新 extract 路径,DocumentExtractError 完整记录
 
 ---
 
