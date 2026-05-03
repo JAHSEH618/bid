@@ -1,13 +1,23 @@
 import { useEffect, useRef } from 'react'
 import { isMockEnabled, MockProjectEventSource } from '@/lib/mock'
 
-// SSE 事件类型对齐 backend api/stream.py(M1-8 commit 7dca873)。
+// SSE 事件类型对齐 backend workflow/sync.py:publish_event 实际调用站点
+// (extract_documents.py / generate_outline.py / outline_review.py /
+//  human_review.py / pick_chapter.py / write_chapter.py / gen_visuals.py /
+//  update_state.py / assemble.py)。
+//
 // 服务端帧:
-//   · `event: ready` 紧跟订阅成功(订阅前用 addEventListener 才能听到,onmessage 不响应)
+//   · `event: ready` 紧跟订阅成功(订阅前用 addEventListener 才能听到)
 //   · `data: {...}\n\n` 业务事件:type 字段 ∈ 下列枚举
 //   · `: ping\n\n` 每 20s 心跳,浏览器自动忽略
 export type ProjectEventType =
+  // 文档抽取(extract_documents.py)
+  | 'extract_documents_passthrough'
+  | 'extract_documents_done'
+  // 提纲生成
+  | 'outline_started'
   | 'outline_ready'
+  // 章节循环
   | 'chapter_started'
   | 'chapter_picked'
   | 'chapter_token'
@@ -17,6 +27,7 @@ export type ProjectEventType =
   | 'chapter_approved'
   | 'chapter_skipped'
   | 'chapter_max_retry_skip'
+  // 收尾
   | 'proposal_ready'
   | 'error'
 
