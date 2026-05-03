@@ -35,7 +35,8 @@ export function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
-    const fd = new FormData(e.currentTarget)
+    const form = e.currentTarget
+    const fd = new FormData(form)
     const parsed = schema.safeParse({
       username: fd.get('username'),
       password: fd.get('password'),
@@ -47,6 +48,15 @@ export function LoginPage() {
       }
       setErrors(fe)
       triggerShake()
+      // Vercel 表单指南:校验失败时把焦点送到第一个错误字段。
+      const firstKey = parsed.error.issues[0]?.path[0] as
+        | 'username'
+        | 'password'
+        | undefined
+      if (firstKey) {
+        const target = form.elements.namedItem(firstKey)
+        if (target instanceof HTMLElement) target.focus()
+      }
       return
     }
     setErrors({})
@@ -117,11 +127,17 @@ export function LoginPage() {
                   name="username"
                   autoComplete="username"
                   autoFocus
+                  spellCheck={false}
                   placeholder="admin"
                   aria-invalid={errors.username ? true : undefined}
+                  aria-describedby={
+                    errors.username ? 'username-error' : undefined
+                  }
                 />
                 {errors.username && (
-                  <p className="text-xs text-destructive">{errors.username}</p>
+                  <p id="username-error" className="text-xs text-destructive">
+                    {errors.username}
+                  </p>
                 )}
               </div>
               <div className="space-y-1.5">
@@ -133,9 +149,14 @@ export function LoginPage() {
                   autoComplete="current-password"
                   placeholder="首次登录使用 admin123"
                   aria-invalid={errors.password ? true : undefined}
+                  aria-describedby={
+                    errors.password ? 'password-error' : undefined
+                  }
                 />
                 {errors.password && (
-                  <p className="text-xs text-destructive">{errors.password}</p>
+                  <p id="password-error" className="text-xs text-destructive">
+                    {errors.password}
+                  </p>
                 )}
               </div>
             </CardContent>

@@ -85,7 +85,8 @@ export function ChangePasswordPage() {
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
-    const fd = new FormData(e.currentTarget)
+    const form = e.currentTarget
+    const fd = new FormData(form)
     const parsed = schema.safeParse({
       old_password: fd.get('old_password'),
       new_password: fd.get('new_password'),
@@ -98,6 +99,12 @@ export function ChangePasswordPage() {
       }
       setErrors(fe)
       triggerShake()
+      // Vercel 表单指南:校验失败聚焦第一个错误字段
+      const firstKey = parsed.error.issues[0]?.path[0] as string | undefined
+      if (firstKey) {
+        const target = form.elements.namedItem(firstKey)
+        if (target instanceof HTMLElement) target.focus()
+      }
       return
     }
     setErrors({})

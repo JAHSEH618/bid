@@ -35,7 +35,8 @@ export function NewProjectPage() {
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
-    const fd = new FormData(e.currentTarget)
+    const form = e.currentTarget
+    const fd = new FormData(form)
     const parsed = schema.safeParse({
       name: (fd.get('name') as string)?.trim(),
       description: (fd.get('description') as string)?.trim() || undefined,
@@ -46,6 +47,12 @@ export function NewProjectPage() {
         fe[issue.path[0] as string] = issue.message
       }
       setErrors(fe)
+      // Vercel 表单指南:校验失败聚焦第一个错误字段
+      const firstKey = parsed.error.issues[0]?.path[0] as string | undefined
+      if (firstKey) {
+        const target = form.elements.namedItem(firstKey)
+        if (target instanceof HTMLElement) target.focus()
+      }
       return
     }
     setErrors({})
