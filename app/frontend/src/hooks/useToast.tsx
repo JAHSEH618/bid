@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 // 极简 toast。比 shadcn 完整 toast 短,够用就好;后续如需 Promise/Action 再升级。
@@ -72,6 +73,36 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   )
 }
 
+function variantStyles(v: ToastVariant) {
+  switch (v) {
+    case 'success':
+      return {
+        wrap: 'border-emerald-200 bg-emerald-50 text-emerald-900',
+        icon: <CheckCircle2 className="h-4 w-4 text-emerald-600" />,
+      }
+    case 'destructive':
+      return {
+        wrap: 'border-destructive/30 bg-destructive/10 text-destructive',
+        icon: <AlertCircle className="h-4 w-4 text-destructive" />,
+      }
+    case 'warning':
+      return {
+        wrap: 'border-amber-200 bg-amber-50 text-amber-900',
+        icon: <AlertTriangle className="h-4 w-4 text-amber-600" />,
+      }
+    case 'info':
+      return {
+        wrap: 'border-sky-200 bg-sky-50 text-sky-900',
+        icon: <Info className="h-4 w-4 text-sky-600" />,
+      }
+    default:
+      return {
+        wrap: 'border-border bg-card text-foreground',
+        icon: <Info className="h-4 w-4 text-muted-foreground" />,
+      }
+  }
+}
+
 function ToastViewport({
   items,
   onDismiss,
@@ -81,27 +112,44 @@ function ToastViewport({
 }) {
   return (
     <div className="pointer-events-none fixed inset-0 z-50 flex flex-col items-end gap-2 p-4 sm:right-4 sm:top-4">
-      {items.map((t) => (
-        <button
-          key={t.id}
-          type="button"
-          onClick={() => onDismiss(t.id)}
-          className={cn(
-            'pointer-events-auto w-full max-w-sm rounded-lg border bg-card p-4 text-left text-sm shadow-md transition-all',
-            t.variant === 'success' && 'border-emerald-200 bg-emerald-50',
-            t.variant === 'destructive' && 'border-destructive bg-destructive/10',
-            t.variant === 'warning' && 'border-amber-200 bg-amber-50',
-            t.variant === 'info' && 'border-sky-200 bg-sky-50',
-          )}
-        >
-          {t.title && <div className="font-medium">{t.title}</div>}
-          {t.description && (
-            <div className="mt-1 text-xs text-muted-foreground">
-              {t.description}
+      {items.map((t) => {
+        const v = variantStyles(t.variant)
+        return (
+          <div
+            key={t.id}
+            role="status"
+            className={cn(
+              'pointer-events-auto relative flex w-full max-w-sm items-start gap-2.5 rounded-lg border p-3 pr-8 shadow-lg backdrop-blur-sm animate-fade-up',
+              v.wrap,
+            )}
+          >
+            <span className="mt-0.5 shrink-0">{v.icon}</span>
+            <div className="min-w-0 flex-1 text-sm">
+              {t.title && (
+                <div className="font-medium leading-tight">{t.title}</div>
+              )}
+              {t.description && (
+                <div
+                  className={cn(
+                    'text-xs leading-relaxed',
+                    t.title ? 'mt-0.5 opacity-85' : '',
+                  )}
+                >
+                  {t.description}
+                </div>
+              )}
             </div>
-          )}
-        </button>
-      ))}
+            <button
+              type="button"
+              onClick={() => onDismiss(t.id)}
+              aria-label="关闭"
+              className="absolute right-2 top-2 rounded-md p-1 opacity-60 transition-opacity hover:bg-black/5 hover:opacity-100"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )
+      })}
     </div>
   )
 }

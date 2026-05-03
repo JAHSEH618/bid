@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { X } from 'lucide-react'
+import { Info, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const STORAGE_KEY = 'dashscope_banner_dismissed'
@@ -28,24 +28,23 @@ export function DashScopeBanner({ className }: { className?: string }) {
     <div
       role="status"
       className={cn(
-        'flex items-start gap-3 border-b border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900',
+        'flex items-center gap-3 border-b border-amber-200 bg-amber-50/80 px-6 py-2.5 text-xs text-amber-900',
         className,
       )}
     >
-      <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-200 text-xs font-semibold">
-        i
-      </span>
+      <Info className="h-3.5 w-3.5 shrink-0 text-amber-600" />
       <p className="flex-1 leading-relaxed">
-        本系统会将文档内容发送至 <strong>阿里云 DashScope 大模型</strong>{' '}
-        生成方案,机密项目请评估后使用。
+        本系统会将文档内容发送至{' '}
+        <strong className="font-semibold">阿里云 DashScope 大模型</strong>{' '}
+        生成方案,机密项目请评估后使用
       </p>
       <button
         type="button"
         aria-label="关闭提示"
         onClick={dismiss}
-        className="rounded p-1 hover:bg-amber-100"
+        className="rounded-md p-1 text-amber-700/70 transition-colors hover:bg-amber-100 hover:text-amber-900"
       >
-        <X className="h-4 w-4" />
+        <X className="h-3.5 w-3.5" />
       </button>
     </div>
   )

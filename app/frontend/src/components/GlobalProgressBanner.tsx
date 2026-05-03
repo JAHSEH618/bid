@@ -47,9 +47,7 @@ const STATUS_VARIANT: Record<
 
 function pickActive(projects: ProjectDTO[] | undefined): ProjectDTO[] {
   if (!projects) return []
-  return projects
-    .filter((p) => ACTIVE_STATUSES.has(p.status))
-    .slice(0, 3) // 最多展示 3 个,避免顶部 banner 过长
+  return projects.filter((p) => ACTIVE_STATUSES.has(p.status)).slice(0, 3)
 }
 
 export function GlobalProgressBanner() {
@@ -59,21 +57,20 @@ export function GlobalProgressBanner() {
 
   return (
     <div className="flex items-center gap-3 border-b border-sky-100 bg-sky-50/60 px-6 py-2 text-xs">
-      <Activity className="h-3.5 w-3.5 shrink-0 text-sky-700" />
-      <span className="shrink-0 text-sky-900">进行中:</span>
+      <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-sky-100 text-sky-700">
+        <Activity className="h-3 w-3 animate-pulse-soft" />
+      </span>
+      <span className="shrink-0 font-medium text-sky-900">进行中</span>
       <ul className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1">
         {active.map((p) => (
           <li key={p.id} className="flex items-center gap-1.5">
             <Link
               to={routeFor(p)}
-              className="line-clamp-1 max-w-[200px] font-medium text-sky-900 underline-offset-2 hover:underline"
+              className="line-clamp-1 max-w-[200px] font-medium text-sky-900 underline-offset-2 transition-colors hover:underline"
             >
               {p.name}
             </Link>
-            <Badge
-              variant={STATUS_VARIANT[p.status]}
-              className="text-[10px]"
-            >
+            <Badge variant={STATUS_VARIANT[p.status]} className="text-[10px]">
               {STATUS_HINT[p.status]}
             </Badge>
           </li>
@@ -81,7 +78,7 @@ export function GlobalProgressBanner() {
       </ul>
       <Link
         to="/"
-        className="ml-auto flex shrink-0 items-center gap-0.5 text-sky-800 hover:underline"
+        className="ml-auto flex shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 text-sky-800 transition-colors hover:bg-sky-100"
       >
         全部 <ChevronRight className="h-3 w-3" />
       </Link>
@@ -90,7 +87,12 @@ export function GlobalProgressBanner() {
 }
 
 function routeFor(p: ProjectDTO): string {
-  if (p.status === 'outline_ready' || p.status === 'extracting' || p.status === 'outlining' || p.status === 'queued') {
+  if (
+    p.status === 'outline_ready' ||
+    p.status === 'extracting' ||
+    p.status === 'outlining' ||
+    p.status === 'queued'
+  ) {
     return `/projects/${p.id}/outline`
   }
   if (p.status === 'done') return `/projects/${p.id}/proposal`
