@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { isMockEnabled, MockProjectEventSource } from '@/lib/mock'
+import { isMockEnabled } from '@/lib/mock-flag'
 
 // SSE 事件类型对齐 backend workflow/sync.py:publish_event 实际调用站点
 // (extract_documents.py / generate_outline.py / outline_review.py /
@@ -60,33 +60,50 @@ export function useProjectStream(
     if (options.enabled === false) return
 
     const url = `/api/projects/${projectId}/stream`
-    const es: EventSource | MockProjectEventSource = isMockEnabled()
-      ? new MockProjectEventSource(url)
-      : new EventSource(url, { withCredentials: true })
+    let es: { close: () => void } | null = null
+    let cancelled = false
 
-    es.onopen = () => {
-      optionsRef.current.onOpen?.()
-    }
-
-    es.onmessage = (msg) => {
-      // 后端心跳是 SSE 注释行(`: ping`),浏览器不会触发 onmessage,这里忽略 data 为空的边界情况。
-      if (!msg.data) return
-      try {
-        const parsed = JSON.parse(msg.data) as ProjectEvent
-        handlerRef.current(parsed)
-      } catch (err) {
-        console.warn('[useProjectStream] parse failed', err, msg.data)
+    const wireListeners = (
+      target: EventSource | { onmessage: ((e: MessageEvent) => void) | null;
+        onerror: ((e: Event) => void) | null;
+        onopen: ((e: Event) => void) | null },
+    ) => {
+      target.onopen = () => {
+        optionsRef.current.onOpen?.()
+      }
+      target.onmessage = (msg: MessageEvent) => {
+        // 心跳 `: ping` 不会触发 onmessage,这里只兜底空 data。
+        if (!msg.data) return
+        try {
+          const parsed = JSON.parse(msg.data) as ProjectEvent
+          handlerRef.current(parsed)
+        } catch (err) {
+          console.warn('[useProjectStream] parse failed', err, msg.data)
+        }
+      }
+      target.onerror = (err: Event) => {
+        // EventSource 自带重连(默认 ~3s),不主动 close。
+        optionsRef.current.onError?.(err)
       }
     }
 
-    es.onerror = (err) => {
-      // EventSource 自带重连(浏览器默认 ~3s),一般不要主动 close;
-      // 但如果状态进入 CLOSED(后端真的关闭),fall through 让 cleanup 收尾。
-      optionsRef.current.onError?.(err)
+    if (isMockEnabled()) {
+      // 动态 import:prod build 时不可达,fixtures 不进 bundle(REVIEW-3 🟡 #4)
+      void import('@/lib/mock').then(({ MockProjectEventSource }) => {
+        if (cancelled) return
+        const mock = new MockProjectEventSource(url)
+        es = mock
+        wireListeners(mock)
+      })
+    } else {
+      const real = new EventSource(url, { withCredentials: true })
+      es = real
+      wireListeners(real)
     }
 
     return () => {
-      es.close()
+      cancelled = true
+      es?.close()
     }
     // 仅用 projectId / enabled 触发重连,避免 onEvent 引用变化每次重订阅。
     // eslint-disable-next-line react-hooks/exhaustive-deps

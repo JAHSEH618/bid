@@ -19,12 +19,10 @@ import type {
 } from './types'
 import type { ProjectEvent } from '@/hooks/useSSE'
 
-export function isMockEnabled(): boolean {
-  if (typeof import.meta === 'undefined') return false
-  if (import.meta.env.PROD) return false
-  if (import.meta.env.VITE_API_REAL === '1') return false
-  return true
-}
+// 注意:isMockEnabled 已搬到 ./mock-flag.ts(纯函数无 fixture),让本模块
+// 走 dynamic import 后 vite 能从 prod bundle 完全 tree-shake 掉 fixtures。
+// 重导出一份保持回退兼容,但调用方应该 import from '@/lib/mock-flag'。
+export { isMockEnabled } from './mock-flag'
 
 // ─────────────────────────── Fixtures ───────────────────────────
 

@@ -5,8 +5,9 @@
 //   - 拦截器对 /api/auth/login 自身放行(否则登录失败会陷入循环)。
 //   - cookie 走 credentials: 'include'(JWT httpOnly cookie,§14)。
 //   - DEV 期默认走 mock(lib/mock.ts);设置 VITE_API_REAL=1 切回真请求。
+//   - mock.ts 走 dynamic import,prod build 后 813 行 fixtures 不打包到 bundle。
 
-import { isMockApiError, isMockEnabled, mockResolve } from './mock'
+import { isMockEnabled } from './mock-flag'
 
 const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ''
 
@@ -50,10 +51,13 @@ export async function apiFetch<T = unknown>(
   init: RequestInit = {},
 ): Promise<T> {
   if (isMockEnabled()) {
+    // 动态 import:prod build PROD=true 时 isMockEnabled 永远 false,这条
+    // 分支不可达,vite 把 ./mock 整模块 tree-shake 掉(连 fixtures 都不进 bundle)。
+    const mock = await import('./mock')
     try {
-      return await mockResolve<T>(path, init)
+      return await mock.mockResolve<T>(path, init)
     } catch (err) {
-      if (isMockApiError(err)) {
+      if (mock.isMockApiError(err)) {
         if (!isPassthrough(path)) {
           if (err.status === 401) redirect('/login')
           else if (err.status === 428) redirect('/change-password')
