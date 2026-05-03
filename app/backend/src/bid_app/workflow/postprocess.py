@@ -133,3 +133,60 @@ def normalize_markdown_paragraphs(text: str) -> str:
     joined = re.sub(r"\n{3,}", "\n\n", joined)
     # 确保末尾恰好 1 个 \n(写文件友好)
     return joined.rstrip("\n") + "\n"
+
+
+# ============================================================================
+# Mermaid 装饰色清理:LLM 偶尔在 mermaid block 里塞 `style A fill:#xxx`
+# 等装饰色,会 override 前端 mermaid theme(用户已要求统一白底)。
+# 在写入前 strip 掉这些行,让前端 themeVariables(commit 7426ff0)接管。
+# ============================================================================
+
+_MERMAID_FENCE_OPEN = re.compile(r"^[ \t]*```\s*mermaid\b", re.IGNORECASE)
+_MERMAID_FENCE_CLOSE = re.compile(r"^[ \t]*```\s*$")
+# 匹配 mermaid 节点装饰行:`style XX fill:...`、`classDef XX fill:...`、`class XX classname`
+_MERMAID_STYLE_LINE = re.compile(
+    r"^[ \t]*(?:style\s+\S+\s+fill:|classDef\s+\S+\s+fill:|class\s+[\w,\s]+\s+\w+\s*$)",
+    re.IGNORECASE,
+)
+
+
+def strip_mermaid_decorations(text: str) -> str:
+    """删除 mermaid 块内自定义颜色装饰行(让前端 theme 接管白底/中文/dark)。
+
+    保留:节点定义、边、subgraph、注释、direction、note 等结构性语法
+    删除:`style X fill:#abc`、`classDef X fill:...`、`class X colorName`
+    """
+    if not text or "```mermaid" not in text.lower():
+        return text
+
+    out: list[str] = []
+    in_mermaid = False
+    for line in text.splitlines():
+        if not in_mermaid and _MERMAID_FENCE_OPEN.match(line):
+            in_mermaid = True
+            out.append(line)
+            continue
+        if in_mermaid and _MERMAID_FENCE_CLOSE.match(line):
+            in_mermaid = False
+            out.append(line)
+            continue
+        if in_mermaid and _MERMAID_STYLE_LINE.match(line):
+            # 删掉装饰行(不输出)
+            continue
+        out.append(line)
+
+    return "\n".join(out)
+
+
+def postprocess_chapter_markdown(text: str) -> str:
+    """章节 final_text / ChapterVersion.body_markdown 写入前的统一后处理入口。
+
+    顺序:
+    1. strip mermaid 装饰色(让 theme 白底接管)
+    2. normalize 段落空行(R-17)
+    """
+    if not text:
+        return text
+    text = strip_mermaid_decorations(text)
+    text = normalize_markdown_paragraphs(text)
+    return text

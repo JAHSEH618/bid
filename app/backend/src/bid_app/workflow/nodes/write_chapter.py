@@ -279,13 +279,13 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             chapter_id=await _resolve_chapter_id(run_id, current),
         ) from e
 
-    # ⭐ R-17:LLM 出来的 markdown 偶尔段落紧挨,过 normalize 兜底
-    # (prompt 已要求规范排版,这里是 belt-and-suspenders)。**只对 final
-    # 正文** normalize,不动 partial flush(那是流式中间态,正在打字渲染
-    # 反复 normalize 会让用户看到段落跳变)
-    from ..postprocess import normalize_markdown_paragraphs
+    # ⭐ R-17 + R-19:LLM 出来的 markdown 偶尔段落紧挨 / mermaid block 里夹
+    # 装饰色 `style X fill:#xxx`(会 override 前端白底主题)。统一过 postprocess
+    # 入口兜底:strip mermaid 装饰 → normalize 段落空行。**只对 final 正文**
+    # 处理,不动 partial flush(流式中间态,反复处理会让用户看到段落跳变)
+    from ..postprocess import postprocess_chapter_markdown
 
-    final_text = normalize_markdown_paragraphs(result.text)
+    final_text = postprocess_chapter_markdown(result.text)
 
     # ⭐ R-14:final flush 完整正文到 DB(_on_partial 末尾触发的 flush 在
     # 真实路径下已包含完整 text,本 UPDATE 是兜底/语义闭合 + 写 normalize 后版本)
