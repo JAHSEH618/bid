@@ -4,6 +4,7 @@ import { RouterProvider } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { router } from './router'
 import { ToastProvider } from './hooks/useToast'
+import { ConfirmDialogHost } from './components/ConfirmDialog'
 import './styles/globals.css'
 
 const queryClient = new QueryClient({
@@ -21,6 +22,7 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
         <RouterProvider router={router} />
+        <ConfirmDialogHost />
       </ToastProvider>
     </QueryClientProvider>
   </React.StrictMode>,

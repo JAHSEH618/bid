@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
+import { confirmDialog } from '@/components/ConfirmDialog'
 import {
   useApiKeyInfo,
   useDeleteApiKey,
@@ -80,7 +81,15 @@ export function SettingsPage() {
   }
 
   const handleDelete = async () => {
-    if (!window.confirm('确认删除已保存的 API Key?')) return
+    // shadcn 风格统一(REVIEW-3 🟡 #6)。比 window.confirm 更显眼,destructive 样式。
+    const ok = await confirmDialog({
+      title: '确认删除已保存的 API Key?',
+      description:
+        'Key 将从数据库永久删除。已启动的项目仍能继续跑(快照机制 FR-7.6)。',
+      confirmText: '删除',
+      destructive: true,
+    })
+    if (!ok) return
     await deleteKey.mutateAsync()
     toast({ title: '已删除', variant: 'default' })
   }
