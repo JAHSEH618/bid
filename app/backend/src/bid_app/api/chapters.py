@@ -19,8 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import get_current_user, get_db
-from ..models import Run, User
-from ..schemas.chapters import ReviewRequest
+from ..models import Chapter, Run, User
+from ..schemas.chapters import ChapterDetailResponse, ReviewRequest
 from ..services.concurrency import (
     release_project_slot,
     try_acquire_project_slot,
@@ -44,6 +44,65 @@ async def _get_active_run(db: AsyncSession, project_id: int) -> Run:
             "no active run for project; did /start succeed?",
         )
     return run
+
+
+# ============== GET 单章详情 ==============
+
+
+@router.get(
+    "/{project_id}/chapters/{idx}",
+    response_model=ChapterDetailResponse,
+)
+async def get_chapter_detail(
+    project_id: int,
+    idx: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> ChapterDetailResponse:
+    """单章详情(R-14 配套):暴露 ``final_text`` 给前端 hydrate。
+
+    - 取项目最新 Run 下 index=idx 的章节
+    - ``status='generating'`` 时 ``final_text`` 是 partial 快照(R-14 periodic flush 写入)
+    - ``status='awaiting_review'`` / ``approved`` / ``skipped`` 时是完整正文
+    - ``current_version_id`` 是最新一条 ``ChapterVersion.id``(给 /review POST 路径关联,
+      没有版本时 None)
+
+    路径与现有 ``/chapters/{idx}/review`` / ``/chapters/{idx}/retry`` 同前缀。
+    """
+    run = await _get_active_run(db, project_id)
+
+    chapter = (
+        await db.execute(
+            select(Chapter).where(
+                Chapter.run_id == run.id, Chapter.index == idx
+            )
+        )
+    ).scalar_one_or_none()
+    if chapter is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
+
+    # current_version_id:取该 chapter 最新 ChapterVersion 行(MAX(version))
+    cv_row = await db.execute(
+        sa.text(
+            "SELECT id FROM chapter_versions "
+            "WHERE chapter_id=:c "
+            "ORDER BY version DESC LIMIT 1"
+        ),
+        {"c": chapter.id},
+    )
+    current_version_id = cv_row.scalar_one_or_none()
+
+    return ChapterDetailResponse(
+        id=chapter.id,
+        index=chapter.index,
+        title=chapter.title,
+        status=chapter.status,  # type: ignore[arg-type]
+        final_text=chapter.final_text,
+        retry_count=chapter.retry_count,
+        last_error=chapter.last_error,
+        current_version_id=current_version_id,
+        updated_at=chapter.created_at,  # 没有 onupdate;暂用 created_at
+    )
 
 
 # ============== /review ==============
