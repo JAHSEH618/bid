@@ -1,7 +1,8 @@
 """文档抽取(markitdown 包装,§22 M0 Day2)。
 
 支持 .docx / .doc / .md / .txt / .pdf 等(markitdown 内置 mammoth + pdfminer +
-其他 plugin)。FR-1.4 限制上传类型。
+其他 plugin;.doc 老 OLE 格式走 LibreOffice headless 转 .docx 后再过 markitdown,
+见 R-9)。FR-1.4 限制上传类型。
 
 接口:
 - ``extract_file(path)``:同步函数,返回 sanitize 后的 markdown 字符串;
@@ -10,25 +11,24 @@
 - ``extract_for_project(project_id)``:async,从 DB 读 documents 表 + 抽取,
   返回 ``{tech_spec_md, scoring_md, template_md}``
 
-⚠️ R-8 修复(devops + team-lead report):用户上传 markitdown 不支持的格式
-(扫描 PDF / 加密 doc 等)时,旧实现走 ``except Exception: read_bytes().decode``
-fallback,把 binary 直接 decode-replace,产物含 ``\\u0000`` (NUL) + 一堆
-``\\ufffd``。这串脏文本进 LangGraph state → AsyncPostgresSaver 写
-postgres JSON → ``UntranslatableCharacter: unsupported Unicode escape sequence``
-炸,workflow checkpoint 全断。
+⚠️ R-8 修复:用户上传 markitdown 不支持的格式时旧实现 silent
+``read_bytes().decode-replace`` fallback 把 NUL/C0 binary 喂进 LangGraph state
+→ postgres JSON 拒收 → checkpoint 全断。修:`_sanitize_for_json` 单一信源
++ ``DocumentExtractError`` 显式抛 + 读已抽取产物时也 sanitize(自愈)。
 
-修法:
-1. 把所有抽取产物用 ``_sanitize_for_json`` 过一遍——剥 NUL 和 C0 控制字符
-   (postgres JSON 拒收),但保留 \\n / \\r / \\t
-2. markitdown ``UnsupportedFormatException`` / ``FileConversionException``
-   显式抛 ``DocumentExtractError``,**不再静默走 bytes fallback**
-3. ``extract_for_project`` 读已抽取的 markdown_path 时也 sanitize 一遍
-   (历史脏数据自愈)
+⚠️ R-9 修复:.doc 老 OLE 格式 markitdown 内置 DocxConverter 不支持
+(只支持 .docx OOXML)。先用 ``libreoffice --headless --convert-to docx``
+转成 .docx 再过 markitdown(完整保留表格/标题层级)。LibreOffice 由
+Dockerfile ``libreoffice-core libreoffice-writer`` 提供;本地 dev 没装
+则 raise ``DocumentExtractError`` 提示装包或换 .docx。
 
 CLI ``run_local`` 走 ``extract_file``,不需要 DB。
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import structlog
@@ -42,6 +42,8 @@ from markitdown import (
 log = structlog.get_logger()
 
 _TEXT_KIND_EXT = {".md", ".markdown", ".txt"}
+_LEGACY_DOC_EXT = {".doc"}  # 老 OLE Word,需 LibreOffice headless 转 .docx
+_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS = 60
 
 
 class DocumentExtractError(Exception):
@@ -79,13 +81,120 @@ def _sanitize_for_json(text: str) -> str:
     return text
 
 
+def _convert_doc_to_docx(doc_path: Path) -> Path:
+    """R-9:用 LibreOffice headless 把 .doc(老 OLE)转 .docx(OOXML)。
+
+    返回新生成的 .docx 路径(在临时目录里,调用方负责清理或不管,
+    随 tempdir 自动清)。调用方应在 ``with tempfile.TemporaryDirectory()``
+    上下文里调本函数,避免临时文件泄漏。
+
+    LibreOffice 不在 PATH(本地 dev / Dockerfile 没装)→ raise
+    ``DocumentExtractError`` 提示运维 / 用户。
+    """
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        raise DocumentExtractError(
+            ".doc 格式需要 LibreOffice 转换,但容器内未安装 "
+            "(请安装 libreoffice-core + libreoffice-writer,或上传 .docx)"
+        )
+
+    out_dir = doc_path.parent  # 转出文件直接落在 doc 同目录(临时目录)
+    args = [
+        soffice,
+        "--headless",
+        "--convert-to",
+        "docx",
+        "--outdir",
+        str(out_dir),
+        str(doc_path),
+    ]
+    log.info("libreoffice_convert_doc_start", path=str(doc_path))
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            timeout=_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise DocumentExtractError(
+            f"LibreOffice 转换 .doc 超时 (>{_LIBREOFFICE_CONVERT_TIMEOUT_SECONDS}s)"
+        ) from e
+
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace")[:500]
+        raise DocumentExtractError(
+            f"LibreOffice 转换 .doc 失败 (rc={proc.returncode}): {stderr}"
+        )
+
+    # LibreOffice 生成 ``<doc_stem>.docx``(同名换扩展)
+    docx_path = out_dir / f"{doc_path.stem}.docx"
+    if not docx_path.is_file():
+        raise DocumentExtractError(
+            f"LibreOffice 转换后未找到产物 {docx_path.name},stderr: "
+            + proc.stderr.decode("utf-8", errors="replace")[:300]
+        )
+    log.info(
+        "libreoffice_convert_doc_done",
+        src=str(doc_path),
+        dst=str(docx_path),
+        size=docx_path.stat().st_size,
+    )
+    return docx_path
+
+
+def _markitdown_convert(path: Path) -> str:
+    """跑 markitdown,返回 sanitize 后的 markdown。失败统一抛
+    ``DocumentExtractError``。"""
+    try:
+        md = MarkItDown(enable_plugins=False)
+        result = md.convert(str(path))
+        text = getattr(result, "text_content", None)
+        if text is None:
+            text = getattr(result, "markdown", None)
+        if text is None:
+            raise DocumentExtractError(
+                f"markitdown returned empty result for {path.name}"
+            )
+        return _sanitize_for_json(text)
+    except UnsupportedFormatException as e:
+        log.warning(
+            "markitdown_unsupported_format",
+            path=str(path),
+            suffix=path.suffix.lower(),
+            error=str(e),
+        )
+        raise DocumentExtractError(
+            f"markitdown 不支持该格式 {path.suffix!r}(可能是扫描 PDF / "
+            f"加密文档 / 损坏文件): {e}"
+        ) from e
+    except FileConversionException as e:
+        log.warning("markitdown_file_conversion_failed", path=str(path), error=str(e))
+        raise DocumentExtractError(f"markitdown 转换失败:{e}") from e
+    except MarkItDownException as e:
+        log.warning("markitdown_other_failure", path=str(path), error=str(e))
+        raise DocumentExtractError(
+            f"markitdown 失败:{type(e).__name__}: {e}"
+        ) from e
+    except DocumentExtractError:
+        raise
+    except Exception as e:
+        log.exception("markitdown_extract_unexpected_failure", path=str(path))
+        raise DocumentExtractError(
+            f"抽取失败:{type(e).__name__}: {e}"
+        ) from e
+
+
 def extract_file(path: str | Path) -> str:
     """把单个文件转成 markdown 字符串(sanitize 后)。
 
-    .md / .markdown / .txt 直读 utf-8 文本;其他类型走 markitdown。
+    .md / .markdown / .txt 直读 utf-8 文本。
+    .doc(老 OLE)先用 LibreOffice headless 转 .docx 再过 markitdown(R-9)。
+    其他格式直接走 markitdown。
+
     markitdown 抛 ``UnsupportedFormatException`` / ``FileConversionException``
-    时本函数 raise ``DocumentExtractError``——**不再 silent fallback 到
-    bytes.decode**(R-8 根因)。
+    时 raise ``DocumentExtractError``——**不再 silent fallback 到 bytes.decode**
+    (R-8 根因)。
     """
     p = Path(path)
     if not p.exists():
@@ -96,48 +205,15 @@ def extract_file(path: str | Path) -> str:
             p.read_text(encoding="utf-8", errors="replace")
         )
 
-    try:
-        md = MarkItDown(enable_plugins=False)
-        result = md.convert(str(p))
-        text = getattr(result, "text_content", None)
-        if text is None:
-            text = getattr(result, "markdown", None)
-        if text is None:
-            raise DocumentExtractError(
-                f"markitdown returned empty result for {p.name}"
-            )
-        return _sanitize_for_json(text)
-    except UnsupportedFormatException as e:
-        log.warning(
-            "markitdown_unsupported_format",
-            path=str(p),
-            suffix=p.suffix.lower(),
-            error=str(e),
-        )
-        raise DocumentExtractError(
-            f"markitdown 不支持该格式 {p.suffix!r}(可能是扫描 PDF / "
-            f"加密文档 / 损坏文件): {e}"
-        ) from e
-    except FileConversionException as e:
-        log.warning("markitdown_file_conversion_failed", path=str(p), error=str(e))
-        raise DocumentExtractError(
-            f"markitdown 转换失败:{e}"
-        ) from e
-    except MarkItDownException as e:
-        log.warning("markitdown_other_failure", path=str(p), error=str(e))
-        raise DocumentExtractError(
-            f"markitdown 失败:{type(e).__name__}: {e}"
-        ) from e
-    except DocumentExtractError:
-        # 已经是我们自己的语义化异常,直接透传
-        raise
-    except Exception as e:
-        # 真未预料异常(IO 等):log + 抛 DocumentExtractError,**不再** bytes
-        # fallback——避免把 binary 当文本污染下游
-        log.exception("markitdown_extract_unexpected_failure", path=str(p))
-        raise DocumentExtractError(
-            f"抽取失败:{type(e).__name__}: {e}"
-        ) from e
+    # ⭐ R-9:.doc 老 OLE → 先 LibreOffice 转 .docx 再 markitdown
+    if p.suffix.lower() in _LEGACY_DOC_EXT:
+        with tempfile.TemporaryDirectory(prefix="bid_doc_convert_") as tmpdir:
+            tmp_doc = Path(tmpdir) / p.name
+            shutil.copyfile(p, tmp_doc)  # LibreOffice 生成 docx 落同目录
+            docx_path = _convert_doc_to_docx(tmp_doc)
+            return _markitdown_convert(docx_path)
+
+    return _markitdown_convert(p)
 
 
 async def extract_for_project(project_id: int) -> dict[str, str]:
