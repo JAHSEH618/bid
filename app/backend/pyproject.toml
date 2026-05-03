@@ -17,6 +17,11 @@ dependencies = [
   "arq>=0.26,<0.27",
   "redis>=5.2,<6",
   "passlib[bcrypt]>=1.7.4,<2",
+  # ⚠️ pin bcrypt < 5:passlib 1.7.4 的 detect_wrap_bug 假设 bcrypt verify
+  # 不 raise,bcrypt 5.0 严格 reject > 72 bytes 时 raise ValueError → backend
+  # 初始化阶段就崩,migration 0001(bcrypt.using(rounds=12).hash)挂死。
+  # passlib 1.8+ 修了但未 release,先 pin 到 4.x。
+  "bcrypt<5",
   "pyjwt[crypto]>=2.10,<3",
   "cryptography>=44.0,<45",
   "slowapi>=0.1.9,<0.2",
