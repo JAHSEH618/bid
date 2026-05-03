@@ -3,20 +3,24 @@
 M0 骨架 → M1 增量挂:health(§15.4)/ stream(§12.3)/ projects / chapters
 路由,以及 lifespan 内 redis pool。
 M2 / M3 继续挂 auth / me / admin / docx router 与中间件。
+M0/M1/M2/M3 router 全部挂完后末尾加 SPA fallback(§15.6)。
 
 ⚠️ ``app.state.redis``(异步 redis client)在 lifespan 启动时实例化,
 ``api/health.py`` 用 ``request.app.state.redis.ping()`` 检测连通。
 """
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from hashlib import sha256
+from pathlib import Path
 
 import redis.asyncio as redis_async
 from arq.connections import RedisSettings, create_pool
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -131,3 +135,52 @@ app.include_router(_stream_router.router)
 app.include_router(_projects_router.router)
 app.include_router(_chapters_router.router)
 app.include_router(_docx_router.router)
+
+
+# === SPA fallback(§15.6) ===
+# **必须在所有 /api/* router 之后挂**,否则会先吞掉真 API 路径。
+# 默认 /app/frontend/dist(Dockerfile COPY 目标),允许 BID_APP_STATIC_DIR
+# 环境变量覆盖(本地 dev 模式可指向 host 的 frontend/dist)。
+_STATIC_DIR = Path(os.environ.get("BID_APP_STATIC_DIR", "/app/frontend/dist"))
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str) -> FileResponse:
+    """前端 React Router 的非 /api/* 路径,统一返回 index.html。
+
+    - /api/* 路径已被前面 router 处理,本 handler 不会拿到(FastAPI 路由
+      匹配时按注册顺序,但本端点接受任意 path,所以仍要显式拦 /api 前缀
+      防露底)
+    - /health 也已经被 health_router 处理;本兜底显式 404 防止"/health" 被
+      返成 index.html
+    - 静态资源(/assets/foo.js 等)走 ``static_dir / requested`` 直接返;
+      未命中文件 → fallback 到 index.html(SPA 路由模式)
+    """
+    if full_path.startswith("api/") or full_path == "health":
+        raise HTTPException(status_code=404, detail="not found")
+
+    static_dir = _STATIC_DIR
+    index_html = static_dir / "index.html"
+    if not index_html.is_file():
+        # 静态目录未挂(开发模式直接 uvicorn,前端走 vite dev server)→
+        # 让前端开发者看到清晰错误,而不是 silent 404
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"frontend static dir not built at {static_dir}; "
+                "run pnpm build or set BID_APP_STATIC_DIR"
+            ),
+        )
+
+    if full_path:
+        requested = static_dir / full_path
+        # 防 path traversal:resolved 必须在 static_dir 内
+        try:
+            resolved = requested.resolve()
+            resolved.relative_to(static_dir.resolve())
+        except (OSError, ValueError):
+            return FileResponse(index_html)
+        if resolved.is_file():
+            return FileResponse(resolved)
+
+    return FileResponse(index_html)
