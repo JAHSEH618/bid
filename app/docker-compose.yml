@@ -1,5 +1,17 @@
 # 生产用 compose:app + postgres + redis
 # 参考 IMPLEMENTATION_SPEC §17.3
+#
+# ⚠️ 必须 cd app/ 后再跑 docker compose 命令:
+#     cd app/
+#     docker compose up -d                              # ✅ 正确
+#     docker compose -f app/docker-compose.yml up -d   # ❌ 错!
+#
+# 原因:compose 用项目根目录的 .env 做 ${VAR} 插值(POSTGRES_PASSWORD 等)。
+# 在仓库根跑 -f app/docker-compose.yml,compose 把仓库根当项目根,读不到
+# app/.env,${POSTGRES_PASSWORD} 等被替换成空字符串,postgres 容器起不来
+# (HEALTHCHECK pg_isready 永远 fail,app 因 depends_on 永远 starting)。
+# scripts/install.sh 已强制 cd 到 app/;手动跑请同样 cd app/ 再 docker compose。
+#
 # 关键决策:
 #   - 单一 .env(D-R):由 scripts/gen-secrets.sh 从 .env.example seed 生成,
 #     compose 项目根读这一份 .env 做 ${VAR} 插值;不用 service env_file 列表

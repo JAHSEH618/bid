@@ -32,6 +32,21 @@ sudo ./scripts/install.sh
 
 > 30 分钟内能跑完(2c4g Ubuntu 22.04 验收口径,§22 M5 Day 2)。
 
+### ⚠️ 必须 `cd app/` 后再跑 docker compose
+
+所有 docker compose 命令必须在 `app/` 目录下运行。**不要**用 `-f` 从仓库根跨目录跑,否则 compose 把仓库根当项目根,读不到 `app/.env`,`${POSTGRES_PASSWORD}` 等被替换成空字符串,postgres 容器起不来:
+
+```bash
+# ✅ 正确
+cd app/
+docker compose up -d
+
+# ❌ 错!compose 项目根 = 仓库根,.env 读不到,postgres 起不来
+docker compose -f app/docker-compose.yml up -d
+```
+
+`scripts/install.sh` 已强制 cd 到 `app/`;手动跑命令也必须 `cd app/` 再 `docker compose ...`。
+
 ---
 
 ## 环境变量
