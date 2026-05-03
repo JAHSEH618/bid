@@ -6,10 +6,14 @@
 ⚠️ 不在这层做 token 计费(避免把 validator 测试 token 算进用户配额);
 litellm 的 ``record_token_usage`` 只在业务路径 ``call_llm_stream`` /
 ``call_llm_json`` 内部调,本 validator 不走那两个入口。
+
+⚠️ ``BID_APP_FAKE_LLM=1`` 模式(devops report)直接 bypass 真 LiteLLM
+调用,只校验 key 长度——避免 fake 测试链路 vs validator 真调用错位。
 """
 from __future__ import annotations
 
 import asyncio
+import os
 
 import litellm
 import structlog
@@ -32,9 +36,16 @@ async def validate_dashscope(api_key: str) -> None:
 
     成功:return None。
     失败:raise ``ApiKeyValidationFailed`` 带原因。
+
+    BID_APP_FAKE_LLM=1 时 bypass 真 LiteLLM,只校验 key 长度(devops
+    RUNTIME-TEST 期间用 fake 链路跑端到端,validator 不应去真 dashscope)。
     """
     if not api_key or len(api_key) < 8:
         raise ApiKeyValidationFailed("api_key 太短或为空")
+
+    if os.environ.get("BID_APP_FAKE_LLM") == "1":
+        log.info("api_key_validate_bypassed_fake_llm")
+        return
 
     try:
         async with asyncio.timeout(_TEST_TIMEOUT_SECONDS):
