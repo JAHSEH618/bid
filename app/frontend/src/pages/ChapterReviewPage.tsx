@@ -40,15 +40,27 @@ export function ChapterReviewPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [outline.data?.run_id])
 
+  // SSE 增量 buffer 与「事件携带的完整版」缓存。
+  // R-15 新约定:始终由 chapter.final_text(R-14 周期 flush 到 DB)兜底,
+  // 用户刷新 / 切页面回来时显示 ≥ 上次看到的内容(单调增不变量)。
   const [streaming, setStreaming] = useState<{ index: number; text: string }>({
     index: -1,
     text: '',
   })
   const [readyText, setReadyText] = useState<Record<number, string>>({})
 
+  // 短查找:章节当前 DB 持久化的 final_text(generating 期是 partial,
+  // awaiting_review/approved/skipped 是完整版)。
+  const finalTextOf = (idx: number): string => {
+    const c = chapters.find((ch) => ch.index === idx)
+    return c?.final_text ?? ''
+  }
+
   useProjectStream(projectId, (e: ProjectEvent) => {
     if (e.type === 'chapter_started' || e.type === 'chapter_picked') {
-      setStreaming({ index: e.chapter_index ?? -1, text: '' })
+      // 流开始:buffer 用 DB 已有 partial 作种子,token append 从这继续。
+      const idx = e.chapter_index ?? -1
+      setStreaming({ index: idx, text: finalTextOf(idx) })
       project.refetch()
       outline.refetch()
     } else if (e.type === 'chapter_token' && e.chapter_index === activeIndex) {
@@ -63,7 +75,7 @@ export function ChapterReviewPage() {
         setReadyText((prev) => ({ ...prev, [idx]: e.chapter_text! }))
       }
       setStreaming({ index: -1, text: '' })
-      outline.refetch()
+      outline.refetch() // 让 final_text 切到完整版
       toast({
         title: `第 ${idx + 1} 章待审核`,
         variant: 'info',
@@ -92,13 +104,38 @@ export function ChapterReviewPage() {
     }
   })
 
+  // generating / retrying 期间,SSE 可能临时断或丢 token;每 2s 拉一次 outline,
+  // 让 chapter.final_text 兜底(R-14 partial flush 1s/100chunks),
+  // 万一 SSE 完全失联,用户刷新后也能继续看到内容缓慢更新。
   const activeChapter = chapters.find((c) => c.index === activeIndex)
+  const shouldPollOutline =
+    activeChapter?.status === 'generating' ||
+    activeChapter?.status === 'retrying'
+  useEffect(() => {
+    if (!shouldPollOutline) return
+    const t = window.setInterval(() => {
+      outline.refetch()
+    }, 2_000)
+    return () => window.clearInterval(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shouldPollOutline])
+
+  // 显示优先级(R-15 单调增):
+  //   1. SSE 实时 buffer(active streaming 期长度持续上升)
+  //   2. SSE awaiting_review 事件携带的 chapter_text 完整版
+  //   3. DB persisted final_text(generating partial / awaiting_review 完整版)
+  // 三者取最长 — 防 outline refetch 中途 buffer 临时短于 DB 快照导致闪烁。
   const isStreaming =
     streaming.index === activeIndex && streaming.text.length > 0
-  const previewMarkdown =
-    isStreaming && streaming.index === activeIndex
-      ? streaming.text
-      : (readyText[activeIndex] ?? '')
+  const candidates = [
+    isStreaming ? streaming.text : '',
+    readyText[activeIndex] ?? '',
+    finalTextOf(activeIndex),
+  ]
+  const previewMarkdown = candidates.reduce(
+    (longest, cur) => (cur.length > longest.length ? cur : longest),
+    '',
+  )
 
   const submitReview = async (
     decision: ReviewDecision,

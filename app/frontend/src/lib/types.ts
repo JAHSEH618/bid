@@ -60,6 +60,11 @@ export type ChapterStatus =
   | 'retrying'
 
 // /outline 返回的章节(陈述 ID 是字符串 'ch_01' 形式;index 是数字)。
+// R-15:final_text 是 backend models/chapter.py:Chapter.final_text 的快照,
+// generating 期间 partial(R-14 周期 flush 1s/100chunks),
+// awaiting_review/approved/skipped 时是完整版。
+// 字段可能不在 OutlineResponse 默认 chapter dict 中(取决于 backend 版本),
+// 故标 optional,前端按 ?? '' 处理。
 export interface OutlineChapterDTO {
   id: string
   title: string
@@ -68,6 +73,7 @@ export interface OutlineChapterDTO {
   target_pages: number
   index: number
   status: ChapterStatus
+  final_text?: string | null
 }
 
 // /outline 整体响应。

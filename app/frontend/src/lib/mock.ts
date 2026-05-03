@@ -594,6 +594,8 @@ function route(ctx: ResolveContext): unknown {
           target_pages: c.target_pages,
           index: c.index,
           status: c.status,
+          // R-15:final_text 是 R-14 周期 flush 的快照,前端 hydrate 用
+          final_text: c.final_text,
         })),
       }
       return resp
