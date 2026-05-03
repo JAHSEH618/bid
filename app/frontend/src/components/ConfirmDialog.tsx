@@ -46,7 +46,13 @@ export function ConfirmDialogHost() {
 
   return (
     <Dialog open={pending != null} onOpenChange={(v) => !v && close(false)}>
-      <DialogContent>
+      <DialogContent
+        // 防止误删/误确认:destructive 时把默认 autoFocus 让给 Cancel,
+        // 避免用户回车后立即触发不可恢复操作(Vercel 指南:破坏性操作需慎用 autoFocus)。
+        onOpenAutoFocus={(e) => {
+          if (pending?.destructive) e.preventDefault()
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{pending?.title}</DialogTitle>
           {pending?.description && (
@@ -54,13 +60,17 @@ export function ConfirmDialogHost() {
           )}
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => close(false)}>
+          <Button
+            variant="outline"
+            onClick={() => close(false)}
+            autoFocus={pending?.destructive}
+          >
             {pending?.cancelText ?? '取消'}
           </Button>
           <Button
             variant={pending?.destructive ? 'destructive' : 'default'}
             onClick={() => close(true)}
-            autoFocus
+            autoFocus={!pending?.destructive}
           >
             {pending?.confirmText ?? '确认'}
           </Button>
