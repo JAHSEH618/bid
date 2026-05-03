@@ -75,7 +75,7 @@ function ChapterSummary({ chapters }: { chapters: ChapterSidebarItem[] }) {
       </div>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
         <div
-          className="h-full rounded-full bg-gradient-to-r from-primary to-primary/80 transition-all duration-300 ease-out"
+          className="h-full rounded-full bg-gradient-to-r from-primary to-primary/80 transition-[width] duration-300 ease-out motion-reduce:transition-none"
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -123,7 +123,7 @@ export function ChapterSidebar({
                 type="button"
                 onClick={() => onSelect?.(ch.index)}
                 className={cn(
-                  'group relative flex w-full items-start gap-3 px-4 py-2.5 text-left text-sm transition-all duration-150',
+                  'group relative flex w-full items-start gap-3 px-4 py-2.5 text-left text-sm transition-[background-color,box-shadow,color] duration-150',
                   'hover:bg-accent/60',
                   active &&
                     'bg-background shadow-sm before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-primary',

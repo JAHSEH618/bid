@@ -218,7 +218,7 @@ export function ChangePasswordPage() {
                       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
                         <div
                           className={cn(
-                            'h-full rounded-full transition-all duration-200 ease-out',
+                            'h-full rounded-full transition-[width,background-color] duration-200 ease-out motion-reduce:transition-none',
                             strength.className,
                           )}
                           style={{ width: `${strength.score}%` }}

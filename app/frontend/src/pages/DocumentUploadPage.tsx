@@ -168,7 +168,7 @@ export function DocumentUploadPage() {
         </div>
         <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
           <div
-            className="h-full rounded-full bg-primary transition-all duration-300 ease-out"
+            className="h-full rounded-full bg-primary transition-[width] duration-300 ease-out motion-reduce:transition-none"
             style={{ width: `${(requiredCount / 2) * 100}%` }}
           />
         </div>
@@ -366,7 +366,7 @@ function UploadSlot({
             onDragLeave={() => setDragActive(false)}
             onDrop={handleDrop}
             className={cn(
-              'flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-border bg-background/80 px-3 py-4 text-center transition-all duration-150',
+              'flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-border bg-background/80 px-3 py-4 text-center transition-[background-color,border-color,transform] duration-150',
               'hover:border-primary/50 hover:bg-primary/5',
               'focus-visible:outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/30',
               dragActive && 'border-primary bg-primary/10 scale-[1.01]',

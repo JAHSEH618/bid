@@ -165,7 +165,7 @@ export function ProjectListPage() {
                     goToProject(p)
                   }
                 }}
-                className="group relative cursor-pointer overflow-hidden border-border/70 transition-all duration-200 ease-out hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                className="group relative cursor-pointer overflow-hidden border-border/70 transition-[transform,border-color,box-shadow] duration-200 ease-out hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0"
               >
                 {/* 顶部色条:状态视觉标识 */}
                 <div
