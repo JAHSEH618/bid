@@ -50,12 +50,16 @@ async def _project_visible_to_user(
     return row.scalar_one_or_none() is not None
 
 
-@router.get("/{project_id}/stream")
+@router.get(
+    "/{project_id}/stream",
+    response_class=StreamingResponse,
+    response_model=None,
+)
 async def stream(
     project_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
-) -> StreamingResponse:
+):
     if not await _project_visible_to_user(db, project_id, user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found")
 

@@ -265,12 +265,16 @@ async def get_docx_job(
 # ============== GET 下载 ==============
 
 
-@router.get("/{project_id}/proposal.docx")
+@router.get(
+    "/{project_id}/proposal.docx",
+    response_class=FileResponse,
+    response_model=None,
+)
 async def download_docx(
     project_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[User, Depends(get_current_user)],
-) -> FileResponse:
+):
     """下载 ``proposal.docx``(D-L 固定缓存名 + D-CJ 拒分支 + D-CO inline repair)。"""
     project = await _get_done_project(db, project_id)
     path = Path(project.dir_path) / "proposal.docx"

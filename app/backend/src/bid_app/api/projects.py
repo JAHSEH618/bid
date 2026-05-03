@@ -30,7 +30,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -554,12 +554,16 @@ async def get_proposal_text(
     }
 
 
-@router.get("/{project_id}/proposal.md")
+@router.get(
+    "/{project_id}/proposal.md",
+    response_class=FileResponse,
+    response_model=None,  # ⭐ FastAPI 不能从 Union[Response, Response] 推 schema
+)
 async def download_proposal_md(
     project_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[User, Depends(get_current_user)],
-) -> PlainTextResponse | FileResponse:
+):
     """直接下载 ``proposal.md`` 文件(``Content-Disposition`` 含项目名)。"""
     project = await _get_project_or_404(db, project_id)
     md_path = Path(project.dir_path) / "proposal.md"

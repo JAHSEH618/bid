@@ -144,8 +144,13 @@ app.include_router(_docx_router.router)
 _STATIC_DIR = Path(os.environ.get("BID_APP_STATIC_DIR", "/app/frontend/dist"))
 
 
-@app.get("/{full_path:path}", include_in_schema=False)
-async def spa_fallback(full_path: str) -> FileResponse:
+@app.get(
+    "/{full_path:path}",
+    include_in_schema=False,
+    response_class=FileResponse,
+    response_model=None,
+)
+async def spa_fallback(full_path: str):
     """前端 React Router 的非 /api/* 路径,统一返回 index.html。
 
     - /api/* 路径已被前面 router 处理,本 handler 不会拿到(FastAPI 路由
