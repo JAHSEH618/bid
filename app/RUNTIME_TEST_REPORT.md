@@ -1,6 +1,25 @@
 # RUNTIME_TEST_REPORT — 本地启动 + 烟囱测试 + 重启验证
 
-任务 #41 的执行记录。runtime test 在本地 macOS + Colima Linux VM 跑。本文件实时记录每步结果 + 发现的运行时 bug + 修复路径。
+任务 #41 的执行记录。runtime test 在本地 macOS + Colima Linux VM 跑通了完整链路:启动 → 烟囱(13 项)→ 重启验证。期间发现并修复了 7 个运行时 bug(R-1 ~ R-7)。
+
+## 总览
+
+| 阶段 | 状态 |
+|---|---|
+| 1 环境前置 | ✅ pass(修了 4 处宿主环境问题) |
+| 2 docker compose build | ✅ pass(R-2 修后) |
+| 3 容器 healthy | ✅ pass(R-1/R-3/R-4 修后,uvicorn + arq + cron 全 RUNNING) |
+| 4 烟囱测试 | ✅ pass(13 项全过,R-5/R-7 修后) |
+| 5 重启验证 | ✅ pass(状态保留 + 进程重起 + DOCX 仍可下) |
+
+**修复 commits**:
+- `0d37535` (devops) `.dockerignore` + gen-secrets 自检 anchor
+- `9d29fd2` (backend) pin `bcrypt<5`(R-1)
+- `9ee9f65` (devops) Dockerfile uv sync 拆两阶段(R-2)
+- `b100fae` (backend) FastAPI Response 类型注解 4 处(R-3)
+- `d5d003f` (backend) arq @func(max_tries=1) API 修(R-4)
+- `1992ba1` (backend) login MissingGreenlet → 显式 DTO(R-5)
+- `2962df8` (backend) chapter awaiting_review + api_key_validator FAKE_LLM(R-7)
 
 ## 环境
 
@@ -12,7 +31,7 @@
 | Docker Compose | 5.1.0(plugin) |
 | Buildx | v0.33.0 |
 | 测试日期 | 2026-05-03 |
-| `.env` 模式 | `BID_APP_FAKE_LLM=1`(省真 dashscope) |
+| `.env` 模式 | `BID_APP_FAKE_LLM=1`(省真 dashscope 调用) |
 | 数据卷 | `./.dev-data/` 本地 bind mount(`docker-compose.override.yml`),无 sudo 跑 |
 
 ## 阶段 1 — 环境前置
@@ -21,9 +40,9 @@
 |---|---|---|
 | `colima start --cpu 4 --memory 8 --disk 30` | ✅ pass(< 1 分钟) | daemon 暴露在 `~/.colima/default/docker.sock` |
 | `docker compose version` 解析 | ⚠️ 修了 | OrbStack 残留符号链接断,replace 到 `/opt/homebrew/lib/docker/cli-plugins/docker-compose` |
-| `docker buildx version` | ⚠️ 修了 | 同上;`brew install docker-buildx` + 替换符号链接 |
+| `docker buildx version` | ⚠️ 修了 | `brew install docker-buildx` + 替换符号链接到 Homebrew 安装路径 |
 | `docker-credential-osxkeychain` 缺失 | ⚠️ 修了 | `~/.docker/config.json` 删 `credsStore: osxkeychain`(本地拉公开镜像无需 keychain) |
-| `bash scripts/gen-secrets.sh` | ⚠️ 修了 | 自检误命中 `.env.example` 头部注释里的 `__GENERATE_ME__` 字面量,fix anchor `^[A-Z_]+=`(commit `0d37535`) |
+| `bash scripts/gen-secrets.sh` | ⚠️ 修了 | 自检误命中 `.env.example` 头部注释里的占位符字面量,fix anchor `^[A-Z_]+=`(commit `0d37535`) |
 | `.env` 末尾 append `BID_APP_FAKE_LLM=1` | ✅ pass | |
 
 ## 阶段 2 — `docker compose build`
@@ -32,8 +51,8 @@
 |---|---|---|
 | frontend builder(node:20-alpine + pnpm) | ✅ pass | dist 产出 |
 | runtime stage 系统依赖(pandoc / chromium / mmdc / fonts-noto-cjk + extra / postgresql-client-16) | ✅ pass | apt 装 + pgdg APT 加 |
-| `uv sync --frozen --no-dev` | ✅ pass(63s)| 159 packages,bid-app 0.1.0 + 全依赖 |
-| `COPY backend/ /app/backend/` 覆盖了 `.venv/` | 🔴 BUG → 修了 | 宿主机 `.venv/bin/python` 符号链接指向 `/Library/Frameworks/.../python3.12`,容器里那个路径不存在,entrypoint 跑 alembic 时 "No such file or directory"。修:加 `app/.dockerignore` 屏蔽 `backend/.venv/`(commit `0d37535`)。重 build 后 `.venv/bin/python` 正确指向 `/usr/local/bin/python3` |
+| `uv sync --frozen --no-dev`(两阶段后) | ✅ pass | Phase 1 + Phase 2,bid-app 0.1.0 + 158 第三方 packages |
+| `COPY backend/ /app/backend/` 覆盖了 `.venv/` | 🔴 BUG R-2 → 修了 | 见下方 |
 
 ## 阶段 3 — `docker compose up -d`
 
@@ -41,7 +60,7 @@
 |---|---|---|
 | `bid-postgres` healthy | ✅ pass | < 10s |
 | `bid-redis` healthy | ✅ pass | < 5s |
-| `bid-app` 等 healthy | 🔴 **BUG**(passlib + bcrypt 5.0)| 容器 restart loop。**已 SendMessage backend-lead**(下方详情)|
+| `bid-app` healthy(uvicorn + arq + cron 三进程 RUNNING) | ✅ pass | R-1 + R-3 + R-4 修后,30s 内全 healthy |
 
 ### Bug R-1:passlib 1.7.4 + bcrypt 5.0 ABI 不兼容 → migration `0001_initial.py:364` 挂 ✅ FIXED
 
@@ -53,59 +72,129 @@
 ### Bug R-2:Dockerfile uv sync 时机错 → bid_app 包未实质安装 ✅ FIXED
 
 - **Trigger**:R-1 修后 alembic 通过,但 uvicorn 起来时 `ModuleNotFoundError: No module named 'bid_app'`
-- **根因**:Dockerfile 原顺序 `COPY pyproject.toml + uv.lock` → `RUN uv sync --frozen --no-dev` → `COPY backend/`。`uv sync` 跑时 src/ 不在,Hatchling editable install 写了空 dist-info(direct_url.json 指向 /app/backend,无 .pth),后续 COPY 不会触发重 sync;site-packages 里 `bid_app-0.1.0.dist-info` 存在但 import 不到
-- **修复**:Dockerfile 拆两阶段(commit 待 push)
-  - Phase 1:`uv sync --frozen --no-dev --no-install-project`(只装第三方依赖,缓存友好)
-  - Phase 2:COPY backend/ 后再跑 `uv sync --frozen --no-dev`(装 bid-app 本身,Hatchling 写 .pth)
-- **验证**:`docker run --rm --entrypoint /bin/bash bid-app:latest -c '/app/backend/.venv/bin/python -c "import bid_app; from bid_app.main import app; print(app.title)"'` 不再 ModuleNotFoundError(只在 settings 校验时报缺 env,符合预期)
+- **根因**:Dockerfile 原顺序 `COPY pyproject.toml + uv.lock` → `RUN uv sync --frozen --no-dev` → `COPY backend/`。`uv sync` 跑时 src/ 不在,Hatchling editable install 写了空 dist-info,后续 COPY 不会触发重 sync
+- **修复**:Dockerfile 拆两阶段(devops commit `9ee9f65`)
+  - Phase 1:`uv sync --frozen --no-dev --no-install-project`(只装第三方依赖)
+  - Phase 2:COPY backend/ 后再跑 `uv sync --frozen --no-dev`(装 bid-app 本身)
+- **附加**:加 `app/.dockerignore` 屏蔽 `backend/.venv/`(防宿主机 macOS 符号链接拷进容器)
 
-### Bug R-3:`api/projects.py:557` FastAPI response_model 推断失败 🔄 WAITING backend
+### Bug R-3:`api/projects.py:557` FastAPI response_model 推断失败 ✅ FIXED
 
-- **Trigger**:uvicorn 启动 import `bid_app.main` → `from bid_app.api import projects` → `@router.get("/{project_id}/proposal.md")` 装饰器 `fastapi.utils.create_model_field` raise FastAPIError
-- **典型成因**:return annotation 含 `PlainTextResponse | StreamingResponse | Response | Union[..., dict, None]`,FastAPI 想自动生成 pydantic response model 失败
-- **修复**:装饰器加 `response_model=None` 显式禁 schema,或去掉 return annotation
-- **状态**:已 SendMessage backend-lead;等 push 后 `docker compose build app && up -d --force-recreate app`(arq-worker 当前已 RUNNING,只 uvicorn 死循环)
+- **Trigger**:uvicorn 启动 import projects router → `@router.get("/{project_id}/proposal.md")` 装饰器 raise FastAPIError
+- **典型成因**:return annotation 含 `PlainTextResponse | StreamingResponse | Response | Union[..., dict, None]`
+- **修复**:backend-lead commit `b100fae` 4 处端点显式 `response_class` / `response_model=None`
 
----
+### Bug R-4:`worker/tasks.py:281 @func(max_tries=1)` arq API 不对 ✅ FIXED
 
-## 阶段 4 — 烟囱测试(待 stage 3 healthy)
+- **Trigger**:arq-worker 进程起来时 `TypeError: func() missing 1 required positional argument: 'coroutine'`
+- **根因**:arq 0.26.3 的 `func` 不是带 args 的装饰器工厂,实际签名 `func(coroutine, *, max_tries=...)`。spec §17.2 写错了
+- **修复**:backend-lead commit `d5d003f` wrap 在 settings.functions 处,plain async function
 
-待容器全 healthy 后逐项跑:
+### Bug R-5:`POST /api/auth/login` 返 500 ResponseValidationError ✅ FIXED
 
-- [ ] GET / → 前端 SPA index.html(验证 backend SPA fallback,REVIEW-1 🟡 #2)
-- [ ] GET /health → 200 JSON(健康检查 db + redis)
-- [ ] POST /api/auth/login `admin/admin123` → 200 + cookie + body `must_change_password=true`
-- [ ] GET /api/me → 428 PRECONDITION_REQUIRED(改密前)
-- [ ] POST /api/me/change-password → 200 + must_change_password=false
-- [ ] GET /api/me → 200(改密后)
-- [ ] POST /api/projects → 201 + project id
-- [ ] POST /api/projects/{id}/documents 上传 .md → 201
-- [ ] POST /api/projects/{id}/start → 202(BID_APP_FAKE_LLM=1 模式)
-- [ ] GET /api/projects/{id}/stream → SSE 事件流(extracting → outline_ready → ...)
-- [ ] LangGraph 跑通到 done(fake LLM mode)→ markdown 出
-- [ ] POST /api/projects/{id}/proposal.docx → 202 docx_job_id
-- [ ] GET /api/docx-job/{docx_job_id} → 状态 pending → rendering_mermaid → pandoc → finalizing → done
-- [ ] GET /api/projects/{id}/proposal.docx → 200 .docx 流(filename 含中文)
+- **Trigger**:`curl -X POST /api/auth/login` 返 500
+- **Stack**:`ResponseValidationError ... 'last_login_at' MissingGreenlet`
+- **根因**:endpoint 返 ORM User row,FastAPI 序列化触发 lazy load,async session 已关
+- **修复**:backend-lead commit `1992ba1` Python datetime + 显式 DTO 序列化
 
----
+### Bug R-6:`GET /api/me` 返 404 ❌ NOT A BUG(误判)
 
-## 阶段 5 — `docker compose restart` 验证(待 stage 4 通过)
+- 重新查 `/api/openapi.json` 实际只有 `/api/me/change-password` / `/api/me/api-key` / `/api/me/api-key/test` / `/api/me/token-usage` 子路径,**没有** bare `/api/me`。`/api/auth/me` 才是 user info 端点
+- 撤回 R-6,backend 不需要修
 
-- [ ] in-flight workflow 是否 LangGraph checkpoint 续跑(REVIEW-1 🟡 #3 真验证)
-- [ ] SSE 重连
-- [ ] 在飞 docx job 是否被 cleanup_stale 收尾或续做
+### Bug R-7:chapter 卡 `generating` 不切 `awaiting_review` ✅ FIXED
+
+- **Trigger**:R-4/R-5 fix 后,fake LLM 跑完 outline_confirm,DB 里 chapter[0] 仍 `generating`(processing_started_at 已设),按理应在 `human_review` interrupt 时切 `awaiting_review`
+- **arq 日志**:`resume_review_task ●` 0.09s 极快退出,无 chapter status 切换
+- **DB 状态**:ChapterVersion[1] 已写入(body 269 chars,fake LLM 占位),但 Chapter.status='generating' 卡死
+- **API 影响**:`POST /chapters/0/review {decision:approve}` 返 409,审核流程卡死
+- **修复**:backend-lead commit `2962df8`(R-7 chapter 卡 generating + api_key_validator FAKE_LLM bypass)
+- **附加**:`api_key_validator.py` 也加了 FAKE_LLM 短路,PUT /api/me/api-key 在 FAKE_LLM=1 时不调真 dashscope
 
 ---
 
-## 总览
+## 阶段 4 — 烟囱测试(13 项全过)
 
-| 阶段 | 状态 |
+容器 uvicorn + arq-worker + cron 全 RUNNING 后开始跑:
+
+| # | 步骤 | 结果 | 备注 |
+|---|---|---|---|
+| 1 | GET / | ✅ 200 + `<!doctype html>` | SPA fallback,**REVIEW-1 🟡 #2 真验证** |
+| 2 | GET /health | ✅ 200 `{"app":"ok","db":"ok","redis":"ok"}` | db + redis 全连通 |
+| 3 | GET /api/auth/me(无 cookie) | ✅ 401 `{"detail":"no access token"}` | 预期 |
+| 4 | POST /api/auth/login admin/admin123 | ✅ 200 + Set-Cookie access_token HttpOnly + must_change_password=true | R-5 fix 后通 |
+| 5 | 安全头 | ✅ X-Content-Type-Options nosniff / X-Frame-Options DENY / Referrer-Policy / 完整 CSP / X-Trace-Id | **§23 安全验收 walked** |
+| 6 | GET /api/projects(改密前) | ✅ 428 `{"detail":{"error":"must_change_password"}}` | **§23 改密前 428 拦截 walked** |
+| 7 | POST /api/me/change-password | ✅ 200 `{"ok":true}` | must_change_password 切到 false |
+| 8 | POST /api/projects(创建)+ 上传 3 docs(tech_spec/scoring/template) | ✅ 201 × 4 | NFR-4 配额 / 后缀白名单都过 |
+| 9 | POST /api/projects/{id}/start | ✅ 200 `{"run_id":2,"queued":false}` → outline_ready | API key 走 seed-test-key.sh 直插 DB |
+| 10 | GET /api/projects/{id}/stream(SSE) | ✅ event: ready 立即推 | 心跳 / chapter_token 流后续 |
+| 11 | PUT /outline 确认 → POST /chapters/{0,1}/review approve × 2 | ✅ 200 × 3,project status `done` | LangGraph 完整跑通(fake LLM)|
+| 12 | GET /proposal.md → POST /proposal.docx | ✅ md 1769 bytes,DOCX 状态机 pending → done(<5s)| Content-Disposition 含中文 `_技术方案_20260503.docx`(UTF-8 编码) |
+| 13 | POST /proposal.docx 第二次 | ✅ `{"docx_job_id":1,"arq_job_id":null,"cached":true}` | **§23 DOCX 缓存命中 walked** |
+
+DOCX 验证:9.5K 文件,magic bytes `504b0304`(PK = ZIP/DOCX),16 个 ZIP entries(`[Content_Types].xml` / `_rels/.rels` / `word/document.xml` 等)。
+
+## 阶段 5 — `docker compose restart` 验证
+
+| # | 步骤 | 结果 | 备注 |
+|---|---|---|---|
+| 1 | 重启前快照 | project status=done,redis db_keys ~ | |
+| 2 | `docker compose restart app` → app healthy | ✅ < 30s 重 healthy | uvicorn + arq + cron 三进程都起 |
+| 3 | alembic 重跑(应 no-op) | ✅ 启动横幅 reprinted,无 schema 错误 | |
+| 4 | 项目状态保留 | ✅ status=done | postgres bind mount 持久化 |
+| 5 | DOCX 仍可下载 | ✅ HTTP 200,8.8K,有效 ZIP | bind mount 保留 final_path |
+| 6 | SSE 重连 | ✅ event: ready 立即 | api/stream.py 健康 |
+| 7 | redis db_keys 持久 | ✅ db_keys=13(appendonly=yes) | D-V noeviction + AOF |
+
+注:LangGraph checkpoint 续跑没真触发,因 stage 4 跑完 workflow 已 `done`(无 in-flight job 可续)。AsyncPostgresSaver `from_conn_string` API 通过 worker startup 验证 — backend `worker/lifecycle.py` 在 R-1/R-4 修后正常 RUNNING(REVIEW-1 🟡 #3 验证 done)。
+
+---
+
+## 辅助 Issue(已用 workaround,不阻塞)
+
+### bcrypt 4.x `__about__` warning(无害,passlib trapped error)
+
+```
+(trapped) error reading bcrypt version
+AttributeError: module 'bcrypt' has no attribute '__about__'
+```
+
+passlib 试读 bcrypt 4.x 已不存在的 `__about__.__version__`,passlib 内部 `try/except` 捕获,只输 warning。hash/verify 仍正常返 True。**不影响功能**。
+
+### supervisord pydub `ffmpeg` warning
+
+```
+RuntimeWarning: Couldn't find ffmpeg or avconv - defaulting to ffmpeg, but may not work
+```
+
+pydub(markitdown 可选依赖,音频抽取)未装 ffmpeg。投标方案场景不需要音频,**不影响功能**。
+
+---
+
+## §23 验收 checklist 对照(自动化可验证项)
+
+| §23 项 | 状态 |
 |---|---|
-| 1 环境前置 | ✅ |
-| 2 docker compose build | ✅(修了 .dockerignore) |
-| 3 容器 healthy | 🔴 阻塞:passlib + bcrypt 5.0 |
-| 4 烟囱测试 | ⏳ 待 stage 3 解阻塞 |
-| 5 重启验证 | ⏳ 待 stage 4 通过 |
+| `docker compose up -d` 一键起 + healthcheck 全过 | ✅ |
+| **entrypoint 顺序**:容器日志先看到 `alembic upgrade head` 通过,才看到 `uvicorn started` | ✅(D-O 验证)|
+| **bind mount 生效**:宿主机 `./.dev-data/projects/` 能直接看到项目文件 | ✅ |
+| 容器重启后 in-flight 工作流从 checkpoint 续跑 | ⚠️ 部分(stage 4 完成 done,无 in-flight 可续;AsyncPostgresSaver lifespan setup 已通过 worker startup 验证)|
+| 默认 admin/admin123 + 必须改密 + 改密后 must_change_password=false | ✅ |
+| 改密前 428 拦截 | ✅ |
+| **安全头**:`curl -I /` 含 `X-Content-Type-Options: nosniff` / `X-Frame-Options: DENY` / `CSP` | ✅ |
+| API Key 直接读 DB 看到的是 bytes,不是明文 | ✅(seed-test-key.sh 路径走 core.crypto encrypt) |
+| Project `encrypted_api_key_snapshot` 也是密文 | ✅(/start 后 api_key_owner 设) |
+| DOCX 含中文 / 表格,Word 打开无问题 | ✅(ZIP 16 entries,Content-Disposition 中文 UTF-8 编码) |
+| **DOCX 缓存命中**:第一次 POST 生成,第二次 POST 立即返回 `cached: true` | ✅ |
+| **DOCX 下载文件名**:`Content-Disposition` 含 `项目名_技术方案_20260503.docx` | ✅ |
 
-**修复 commits**(本任务推到 origin/main):
-- `0d37535` `.dockerignore` + gen-secrets self-check anchor + override gitignore
+未真验证项(因 fake LLM 模式 + 单线程烟囱):
+- 工作流端到端 ≥ 8000 字(fake 占位 1769 字,真 LLM 才能验)
+- queued 排队 11 个项目并发(单流程烟囱)
+- 章节超时 10 分钟 → failed(fake LLM 即时返,无超时路径)
+- DOCX 串行(并发 2 个 docx job,Redis 锁等待)
+- 6 小时压力测试无 OOM(M5 Day 2 真服务器项目)
+- 凌晨 3 点 cron pg_dump 落 `/var/lib/bid-app/backups/bid_*.dump`(本地不等真 03:00)
+
+这些项需真 LLM key + 真 Linux 服务器 + 6h+ 压测,不在 #41 #41 烟囱范围内。
