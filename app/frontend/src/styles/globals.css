@@ -4,24 +4,61 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    /* 中性背景与文字(更柔和的层次,避免纯白/纯黑刺眼) */
+    --background: 220 25% 98.5%;
+    --foreground: 222 47% 11%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --primary: 222.2 47.4% 11.2%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    /* 主色:沉稳的靛青(替代默认 near-black,更适合长时间阅读且具品牌感) */
+    --primary: 222 65% 35%;
     --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
-    --radius: 0.5rem;
+
+    /* 次色 / 弱按钮底色 */
+    --secondary: 220 20% 95%;
+    --secondary-foreground: 222 47% 18%;
+
+    /* 静音背景(空态、分组背景) */
+    --muted: 220 16% 95%;
+    --muted-foreground: 220 10% 46%;
+
+    /* 强调(hover / 选中态) */
+    --accent: 220 22% 93%;
+    --accent-foreground: 222 47% 18%;
+
+    /* 警示色 */
+    --destructive: 0 78% 56%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 60% 38%;
+    --success-foreground: 0 0% 100%;
+    --warning: 35 92% 48%;
+    --warning-foreground: 35 100% 12%;
+    --info: 210 90% 50%;
+    --info-foreground: 0 0% 100%;
+
+    /* 边框 / 输入框 / focus ring */
+    --border: 220 16% 88%;
+    --input: 220 16% 88%;
+    --ring: 222 65% 50%;
+
+    /* 圆角分级 — btn 6px / card 12px / dialog 16px */
+    --radius: 0.75rem;
+
+    /* 阴影分级 — 卡片 / 弹窗 / 浮层 */
+    --shadow-sm:
+      0 1px 2px 0 rgba(15, 23, 42, 0.04),
+      0 1px 3px 0 rgba(15, 23, 42, 0.05);
+    --shadow-md:
+      0 4px 6px -1px rgba(15, 23, 42, 0.07),
+      0 2px 4px -2px rgba(15, 23, 42, 0.05);
+    --shadow-lg:
+      0 12px 24px -8px rgba(15, 23, 42, 0.12),
+      0 4px 8px -4px rgba(15, 23, 42, 0.06);
+    --shadow-xl:
+      0 24px 48px -12px rgba(15, 23, 42, 0.18),
+      0 8px 16px -8px rgba(15, 23, 42, 0.08);
   }
 }
 
@@ -29,17 +66,51 @@
   * {
     @apply border-border;
   }
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
   body {
     @apply bg-background text-foreground;
     font-family:
       -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei',
-      'Helvetica Neue', sans-serif;
+      'Helvetica Neue', 'Segoe UI', Roboto, sans-serif;
+    font-feature-settings:
+      'cv11' on,
+      'ss01' on;
+    /* 中文标点紧凑 + 中英文混排留白更自然 */
+    text-spacing: trim-start allow-end trim-adjacent;
+  }
+  /* 输入元素与浏览器默认 outline 协调 */
+  input,
+  textarea,
+  select,
+  button {
+    font-family: inherit;
+  }
+  /* 滚动条更精致(WebKit) */
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: hsl(220 14% 84%);
+    border-radius: 6px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(220 14% 70%);
   }
 }
 
 /* prose 调整(react-markdown 章节预览) */
 .prose pre {
-  @apply rounded-md bg-slate-900 text-slate-100 p-4 overflow-x-auto;
+  @apply rounded-lg bg-slate-900 text-slate-100 p-4 overflow-x-auto shadow-sm;
 }
 .prose code {
   @apply font-mono text-sm;
@@ -52,5 +123,105 @@
 }
 .prose th,
 .prose td {
-  @apply border border-slate-300 px-3 py-2;
+  @apply border border-slate-200 px-3 py-2;
+}
+.prose th {
+  @apply bg-slate-50;
+}
+
+/* === 公用动效 === */
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-4px);
+  }
+  40%,
+  80% {
+    transform: translateX(4px);
+  }
+}
+.animate-shake {
+  animation: shake 200ms ease-out;
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+.animate-pulse-soft {
+  animation: pulse-soft 1.6s ease-in-out infinite;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-up {
+  animation: fade-up 220ms ease-out both;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    hsl(220 14% 92%) 0%,
+    hsl(220 14% 96%) 50%,
+    hsl(220 14% 92%) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+/* === streaming 光标 === */
+@keyframes caret-blink {
+  0%,
+  60% {
+    opacity: 1;
+  }
+  61%,
+  100% {
+    opacity: 0;
+  }
+}
+.caret-blink {
+  animation: caret-blink 1s step-end infinite;
+}
+
+/* hover 微抬升:用于卡片 / 主 CTA */
+.lift-on-hover {
+  transition:
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.lift-on-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+/* 整页加载渐入,避免突兀 */
+.page-enter {
+  animation: fade-up 240ms ease-out both;
 }

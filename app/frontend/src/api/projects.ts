@@ -33,6 +33,15 @@ export function useProjects() {
   return useQuery({
     queryKey: PROJECTS_KEY,
     queryFn: () => apiFetch<ProjectDTO[]>('/api/projects'),
+    // R-12 全局进度感知:有 in-flight 项目时 5s 一次轮询,让 GlobalProgressBanner
+    // 跨页能看到 status 变迁。无 in-flight 时停止 polling,避免空转。
+    refetchInterval: (query) => {
+      const data = query.state.data
+      const hasActive = (data ?? []).some((p) =>
+        ['queued', 'extracting', 'outlining', 'outline_ready', 'running', 'awaiting_review'].includes(p.status),
+      )
+      return hasActive ? 5_000 : false
+    },
   })
 }
 

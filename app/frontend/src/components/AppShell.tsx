@@ -3,6 +3,7 @@ import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { LogOut, Settings, ShieldCheck, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DashScopeBanner } from '@/components/DashScopeBanner'
+import { GlobalProgressBanner } from '@/components/GlobalProgressBanner'
 import { useCurrentUser, useLogout } from '@/hooks/useAuth'
 import { cn } from '@/lib/utils'
 
@@ -59,6 +60,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </header>
       <DashScopeBanner />
+      <GlobalProgressBanner />
       <main className="flex-1 bg-muted/30">{children}</main>
     </div>
   )

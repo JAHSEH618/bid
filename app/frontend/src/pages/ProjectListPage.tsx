@@ -42,6 +42,20 @@ const STATUS_VARIANT: Record<
   aborted: 'outline',
 }
 
+// R-12 进度感知:点击卡片前用户能看到「下一步该做什么」的简短提示。
+const STAGE_HINT: Record<ProjectStatus, string> = {
+  init: '点击进入,上传 3 份招标文档',
+  queued: '排队中,等待并发名额释放后自动启动',
+  extracting: 'AI 正在解析上传的招标文档',
+  outlining: 'AI 正在生成方案提纲',
+  outline_ready: '提纲已就绪,点击进入确认',
+  running: '正在生成章节,可进入查看进度',
+  awaiting_review: '有章节等你审核,点击进入',
+  done: '方案已完成,点击查看全文与下载',
+  failed: '工作流失败,点击进入查看失败章节',
+  aborted: '项目已中止',
+}
+
 export function ProjectListPage() {
   const projects = useProjects()
   const remove = useDeleteProject()
@@ -146,6 +160,9 @@ export function ProjectListPage() {
                     {new Date(p.created_at).toLocaleDateString('zh-CN')}
                   </span>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  {STAGE_HINT[p.status]}
+                </p>
                 <div
                   className="flex items-center justify-end gap-1"
                   onClick={(e) => e.stopPropagation()}
