@@ -217,3 +217,21 @@ export interface AdminTokenUsageDTO {
 }
 
 export type ReviewDecision = 'approve' | 'revise' | 'skip'
+
+// === 模型配置(§0002) ===
+// 与后端 GET /api/me/model-config 返回结构对齐
+export interface ModelConfigDTO {
+  llm1_outline_model: string | null
+  llm2_chapter_model: string | null
+  llm3_visuals_model: string | null
+  default_outline_model: string
+  default_chapter_model: string
+  default_visuals_model: string
+  known_models: string[]
+}
+
+export interface SetModelConfigInput {
+  llm1_outline_model: string | null
+  llm2_chapter_model: string | null
+  llm3_visuals_model: string | null
+}

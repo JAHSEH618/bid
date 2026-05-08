@@ -28,6 +28,7 @@ from ..schemas.auth import (
     ApiKeyInfoResponse,
     ChangePasswordRequest,
     SetApiKeyRequest,
+    SetModelConfigRequest,
     TokenUsageRow,
     TokenUsageSummary,
 )
@@ -207,6 +208,43 @@ async def delete_api_key(
     if existing is None:
         return {"ok": True}  # 幂等
     await db.delete(existing)
+    await db.commit()
+    return {"ok": True}
+
+
+# ============== 模型配置(§0002) ==============
+
+
+@router.get("/model-config", response_model=dict)  # 用 dict 绕过 pydantic 泛型,实际返回 ModelConfigResponse 字段
+async def get_model_config(
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict[str, object]:
+    """返回当前用户的三类模型配置 + 系统默认值 + 已知模型列表。"""
+    from ..schemas.auth import KNOWN_MODELS
+
+    return {
+        "llm1_outline_model": user.llm1_outline_model,
+        "llm2_chapter_model": user.llm2_chapter_model,
+        "llm3_visuals_model": user.llm3_visuals_model,
+        "default_outline_model": settings.llm1_outline_model,
+        "default_chapter_model": settings.llm2_chapter_model,
+        "default_visuals_model": settings.llm3_visuals_model,
+        "known_models": KNOWN_MODELS,
+    }
+
+
+@router.put("/model-config")
+async def set_model_config(
+    body: SetModelConfigRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, bool]:
+    """更新当前用户的三类模型配置。传 null / 空字符串表示重置为系统默认。"""
+    # 空字符串视为 null(重置)
+    user.llm1_outline_model = body.llm1_outline_model or None
+    user.llm2_chapter_model = body.llm2_chapter_model or None
+    user.llm3_visuals_model = body.llm3_visuals_model or None
+
     await db.commit()
     return {"ok": True}
 

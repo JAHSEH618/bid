@@ -21,3 +21,15 @@ class User(Base, TimestampMixin):
     last_login_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # ⭐ 用户自定义模型配置(§0002):三类任务各自可选模型,NULL 时走 settings 默认值
+    # LiteLLM 格式: "dashscope/qwen3.6-max-preview" 等
+    llm1_outline_model: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    llm2_chapter_model: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    llm3_visuals_model: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )

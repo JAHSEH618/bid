@@ -35,3 +35,15 @@ class Project(Base, TimestampMixin):
     dir_path: Mapped[str] = mapped_column(String(512))
     pages_per_chapter: Mapped[int] = mapped_column(default=3)
     max_retry_per_chapter: Mapped[int] = mapped_column(default=3)
+
+    # ⭐ 模型快照(§0002):/start 时从 User 拷贝,与 D-C ApiKey 快照模式一致
+    # NULL 时工作流回退到 settings 默认模型
+    outline_model_snapshot: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    chapter_model_snapshot: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    visuals_model_snapshot: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )

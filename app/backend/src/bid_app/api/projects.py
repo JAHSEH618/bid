@@ -368,6 +368,11 @@ async def start_workflow(
     project.pages_per_chapter = body.pages_per_chapter
     project.max_retry_per_chapter = body.max_retry_per_chapter
 
+    # ⭐ §0002 模型快照:把用户当前配置(或 None)拷到 Project,工作流从快照读
+    project.outline_model_snapshot = user.llm1_outline_model
+    project.chapter_model_snapshot = user.llm2_chapter_model
+    project.visuals_model_snapshot = user.llm3_visuals_model
+
     thread_id = f"run-{project_id}-{secrets.token_hex(8)}"
     run = Run(
         project_id=project_id,

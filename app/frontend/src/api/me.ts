@@ -13,7 +13,12 @@ import {
   type UseQueryOptions,
 } from '@tanstack/react-query'
 import { ApiError, apiFetch } from '@/lib/apiFetch'
-import type { ApiKeyInfoDTO, MyTokenUsageDTO } from '@/lib/types'
+import type {
+  ApiKeyInfoDTO,
+  ModelConfigDTO,
+  MyTokenUsageDTO,
+  SetModelConfigInput,
+} from '@/lib/types'
 
 // 404 视为未配置(返 null);其它错误正常抛。
 async function fetchApiKeyInfo(): Promise<ApiKeyInfoDTO | null> {
@@ -86,5 +91,34 @@ export function useMyTokenUsage(period: UsagePeriod) {
     queryKey: ['me', 'token-usage', period],
     queryFn: () =>
       apiFetch<MyTokenUsageDTO>(`/api/me/token-usage?period=${period}`),
+  })
+}
+
+// === 模型配置 hooks(§0002) ===
+
+export function useModelConfig(
+  options?: Omit<
+    UseQueryOptions<ModelConfigDTO>,
+    'queryKey' | 'queryFn'
+  >,
+) {
+  return useQuery<ModelConfigDTO>({
+    queryKey: ['me', 'model-config'],
+    queryFn: () => apiFetch<ModelConfigDTO>('/api/me/model-config'),
+    ...options,
+  })
+}
+
+export function useSetModelConfig() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: SetModelConfigInput) =>
+      apiFetch<{ ok: boolean }>('/api/me/model-config', {
+        method: 'PUT',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['me', 'model-config'] })
+    },
   })
 }

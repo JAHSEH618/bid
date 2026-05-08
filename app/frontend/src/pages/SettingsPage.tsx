@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
+  Bot,
   CheckCircle2,
   Eye,
   EyeOff,
@@ -26,13 +27,16 @@ import { confirmDialog } from '@/components/ConfirmDialog'
 import {
   useApiKeyInfo,
   useDeleteApiKey,
+  useModelConfig,
   useMyTokenUsage,
   useSetApiKey,
+  useSetModelConfig,
   useTestApiKey,
   type UsagePeriod,
 } from '@/api/me'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
+import type { ModelConfigDTO } from '@/lib/types'
 
 export function SettingsPage() {
   const { toast } = useToast()
@@ -45,6 +49,68 @@ export function SettingsPage() {
   const [showKey, setShowKey] = useState(false)
   const [period, setPeriod] = useState<UsagePeriod>('month')
   const usage = useMyTokenUsage(period)
+
+  // 模型配置(§0002)
+  const modelConfig = useModelConfig()
+  const setModelConfig = useSetModelConfig()
+  const [outlineModel, setOutlineModel] = useState('')
+  const [chapterModel, setChapterModel] = useState('')
+  const [visualsModel, setVisualsModel] = useState('')
+  const [outlineCustom, setOutlineCustom] = useState(false)
+  const [chapterCustom, setChapterCustom] = useState(false)
+  const [visualsCustom, setVisualsCustom] = useState(false)
+
+  // 同步后端数据到本地 state
+  const syncModelState = (data: ModelConfigDTO) => {
+    const o = data.llm1_outline_model ?? ''
+    const c = data.llm2_chapter_model ?? ''
+    const v = data.llm3_visuals_model ?? ''
+    setOutlineModel(o || data.default_outline_model)
+    setChapterModel(c || data.default_chapter_model)
+    setVisualsModel(v || data.default_visuals_model)
+    setOutlineCustom(!!o && !data.known_models.includes(o))
+    setChapterCustom(!!c && !data.known_models.includes(c))
+    setVisualsCustom(!!v && !data.known_models.includes(v))
+  }
+  useEffect(() => {
+    if (modelConfig.data) syncModelState(modelConfig.data)
+  }, [modelConfig.data])
+
+  const knownModels = modelConfig.data?.known_models ?? []
+  const defaults = modelConfig.data
+    ? {
+        outline: modelConfig.data.default_outline_model,
+        chapter: modelConfig.data.default_chapter_model,
+        visuals: modelConfig.data.default_visuals_model,
+      }
+    : { outline: '', chapter: '', visuals: '' }
+
+  const handleSaveModels = async () => {
+    const payload = {
+      llm1_outline_model: outlineModel
+        ? outlineModel === defaults.outline
+          ? null
+          : outlineModel
+        : null,
+      llm2_chapter_model: chapterModel
+        ? chapterModel === defaults.chapter
+          ? null
+          : chapterModel
+        : null,
+      llm3_visuals_model: visualsModel
+        ? visualsModel === defaults.visuals
+          ? null
+          : visualsModel
+        : null,
+    }
+    try {
+      await setModelConfig.mutateAsync(payload)
+      toast({ title: '模型配置已保存', variant: 'success' })
+    } catch (err) {
+      const msg = readApiError(err, '保存失败')
+      toast({ title: '保存失败', description: msg, variant: 'destructive' })
+    }
+  }
 
   const configured = apiKey.data != null
   const info = apiKey.data
@@ -107,7 +173,7 @@ export function SettingsPage() {
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">个人设置</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          配置 DashScope API Key 与查看 token 消费
+          配置 DashScope API Key、选择调用模型与查看 token 消费
         </p>
       </header>
 
@@ -204,6 +270,80 @@ export function SettingsPage() {
           >
             删除已保存的 Key
           </Button>
+        </CardFooter>
+      </Card>
+
+      {/* ⭐ 模型配置(§0002) */}
+      <Card className="border-border/70 shadow-sm">
+        <CardHeader className="pb-4">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-primary">
+              <Bot className="h-4 w-4" />
+            </span>
+            调用模型
+          </CardTitle>
+          <CardDescription>
+            为三类任务选择模型,留空则使用系统默认。启动项目时快照,运行中不受后续修改影响
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {modelConfig.isLoading ? (
+            <p className="text-sm text-muted-foreground">加载中…</p>
+          ) : (
+            <>
+              {/* 提纲生成 LLM-1 */}
+              <ModelSelector
+                label="提纲生成 (LLM-1)"
+                description="阅读理解招标文档,生成章节级应标提纲"
+                value={outlineModel}
+                onChange={setOutlineModel}
+                isCustom={outlineCustom}
+                onCustomToggle={setOutlineCustom}
+                knownModels={knownModels}
+                defaultModel={defaults.outline}
+              />
+
+              <Separator />
+
+              {/* 正文撰写 LLM-2 */}
+              <ModelSelector
+                label="正文撰写 (LLM-2)"
+                description="流式逐章生成专业应标正文,每章 3000-10000 字"
+                value={chapterModel}
+                onChange={setChapterModel}
+                isCustom={chapterCustom}
+                onCustomToggle={setChapterCustom}
+                knownModels={knownModels}
+                defaultModel={defaults.chapter}
+              />
+
+              <Separator />
+
+              {/* 配图 LLM-3 */}
+              <ModelSelector
+                label="配图 (LLM-3)"
+                description="为章节补充 Mermaid 流程图/架构图(非关键路径,失败不中断)"
+                value={visualsModel}
+                onChange={setVisualsModel}
+                isCustom={visualsCustom}
+                onCustomToggle={setVisualsCustom}
+                knownModels={knownModels}
+                defaultModel={defaults.visuals}
+              />
+            </>
+          )}
+        </CardContent>
+        <CardFooter>
+          <Button
+            onClick={handleSaveModels}
+            disabled={setModelConfig.isPending || modelConfig.isLoading}
+            size="sm"
+          >
+            {setModelConfig.isPending ? '保存中…' : '保存模型配置'}
+          </Button>
+          <span className="ml-3 text-xs text-muted-foreground">
+            修改后新建的项目生效,已在跑的项目不受影响
+          </span>
         </CardFooter>
       </Card>
 
@@ -329,6 +469,94 @@ function Stat({
           {hint}
         </p>
       )}
+    </div>
+  )
+}
+
+// ⭐ 模型选择器(§0002)
+function ModelSelector({
+  label,
+  description,
+  value,
+  onChange,
+  isCustom,
+  onCustomToggle,
+  knownModels,
+  defaultModel,
+}: {
+  label: string
+  description: string
+  value: string
+  onChange: (v: string) => void
+  isCustom: boolean
+  onCustomToggle: (v: boolean) => void
+  knownModels: string[]
+  defaultModel: string
+}) {
+  const isDefault = !value || value === defaultModel
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <Label className="text-sm font-medium">{label}</Label>
+        {isDefault ? (
+          <Badge variant="outline" className="text-[10px]">
+            系统默认
+          </Badge>
+        ) : (
+          <Badge variant="success" className="text-[10px]">
+            自定义
+          </Badge>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">{description}</p>
+      {!isCustom ? (
+        <select
+          className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          value={value || defaultModel}
+          onChange={(e) => {
+            const v = e.target.value
+            if (v === '__custom__') {
+              onCustomToggle(true)
+              onChange('')
+            } else {
+              onChange(v)
+            }
+          }}
+        >
+          {knownModels.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+          <option value="__custom__">自定义输入…</option>
+        </select>
+      ) : (
+        <div className="flex gap-2">
+          <Input
+            placeholder="输入 LiteLLM 模型名,如 dashscope/qwen-max"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            className="flex-1 font-mono text-xs"
+          />
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              onCustomToggle(false)
+              onChange(defaultModel)
+            }}
+          >
+            返回列表
+          </Button>
+        </div>
+      )}
+      <p className="text-[11px] text-muted-foreground">
+        当前生效:{' '}
+        <code className="rounded bg-muted px-1 font-mono text-[11px]">
+          {isDefault ? defaultModel : value || '(空)'}
+        </code>
+        {isDefault && ' (系统默认)'}
+      </p>
     </div>
   )
 }

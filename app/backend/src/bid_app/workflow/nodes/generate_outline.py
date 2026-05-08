@@ -9,10 +9,10 @@ from __future__ import annotations
 import structlog
 from sqlalchemy import select
 
-from ...config import settings
 from ...db import session_factory
 from ...services.llm import call_llm_json
 from ..prompts.outline_prompt import build_messages
+from ..resolve import resolve_models
 from ..state import WorkflowState
 from ..sync import publish_event
 
@@ -102,8 +102,9 @@ async def run(state: WorkflowState) -> dict[str, str]:
     )
 
     await publish_event(project_id, "outline_started")
+    models = await resolve_models(project_id)
     _parsed, sr = await call_llm_json(
-        model=settings.llm1_outline_model,
+        model=models.outline_model,
         messages=messages,
         api_key=api_key,
         user_id=user_id,

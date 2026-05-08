@@ -19,10 +19,10 @@ from typing import Any
 import structlog
 from sqlalchemy import select
 
-from ...config import settings
 from ...db import session_factory
 from ...services.llm import call_llm_json
 from ..prompts.review_chapter_prompt import build_messages
+from ..resolve import resolve_models
 from ..state import WorkflowState
 from ..sync import publish_event
 
@@ -121,9 +121,11 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         chapter_body_md=chapter_text,
     )
 
+    models = await resolve_models(project_id)
+
     try:
         _parsed, sr = await call_llm_json(
-            model=settings.llm3_visuals_model,
+            model=models.visuals_model,
             messages=messages,
             api_key=api_key,
             user_id=user_id,

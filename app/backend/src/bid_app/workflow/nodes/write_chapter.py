@@ -15,7 +15,6 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy import select
 
-from ...config import settings
 from ...db import session_factory
 from ...services.llm import (
     ChapterGenerationFailed,
@@ -24,6 +23,7 @@ from ...services.llm import (
     call_llm_stream,
 )
 from ..prompts.write_chapter_prompt import build_messages
+from ..resolve import resolve_models
 from ..state import WorkflowState
 from ..sync import publish_event, sync_chapter_to_db
 
@@ -246,9 +246,11 @@ async def run(state: WorkflowState) -> dict[str, Any]:
                 index=current,
             )
 
+    models = await resolve_models(project_id)
+
     try:
         result = await call_llm_stream(
-            model=settings.llm2_chapter_model,
+            model=models.chapter_model,
             messages=messages,
             api_key=api_key,
             user_id=await _resolve_user_id(project_id),

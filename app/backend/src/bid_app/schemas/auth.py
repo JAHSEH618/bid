@@ -54,3 +54,42 @@ class TokenUsageSummary(BaseModel):
     rows: list[TokenUsageRow]
     total_prompt: int
     total_completion: int
+
+
+# === 模型配置(§0002) ===
+
+# 已知的百炼模型列表(前端下拉用),LiteLLM provider/model 格式
+KNOWN_MODELS: list[str] = [
+    "dashscope/deepseek-v4-flash",
+    "dashscope/deepseek-v3",
+    "dashscope/deepseek-r1",
+    "dashscope/qwen3.6-max-preview",
+    "dashscope/qwen3.6-flash",
+    "dashscope/qwen-max",
+    "dashscope/qwen-plus",
+    "dashscope/qwen-turbo",
+]
+
+
+class ModelConfigResponse(BaseModel):
+    """当前用户的三类模型配置。为 NULL 的字段表示使用系统默认值。"""
+
+    llm1_outline_model: str | None  # 提纲生成(LLM-1)
+    llm2_chapter_model: str | None  # 正文撰写(LLM-2)
+    llm3_visuals_model: str | None  # 配图(LLM-3)
+
+    # 返回系统默认值,前端可展示"当前生效模型"
+    default_outline_model: str
+    default_chapter_model: str
+    default_visuals_model: str
+
+    # 返回已知模型列表供前端下拉选择
+    known_models: list[str]
+
+
+class SetModelConfigRequest(BaseModel):
+    """更新模型配置。传 null / 空字符串表示重置为系统默认。"""
+
+    llm1_outline_model: str | None = None
+    llm2_chapter_model: str | None = None
+    llm3_visuals_model: str | None = None
