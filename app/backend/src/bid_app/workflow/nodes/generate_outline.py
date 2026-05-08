@@ -9,6 +9,7 @@ from __future__ import annotations
 import structlog
 from sqlalchemy import select
 
+from ...config import settings
 from ...db import session_factory
 from ...services.llm import call_llm_json
 from ..prompts.outline_prompt import build_messages
@@ -110,7 +111,7 @@ async def run(state: WorkflowState) -> dict[str, str]:
         user_id=user_id,
         project_id=project_id,
         run_id=run_id,
-        timeout_seconds=120,
+        timeout_seconds=settings.llm_outline_timeout_seconds,
     )
 
     return {"_outline_json": sr.text}

@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 50
     daily_upload_quota_mb: int = 500
     single_chapter_timeout_seconds: int = 600
+    llm_outline_timeout_seconds: int = 600
     llm_retry_max: int = 2
     llm_retry_backoff_s: str = "2,5"
     global_rate_limit: str = "100/minute"
