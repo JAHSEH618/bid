@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import settings
 from ..core.crypto import decrypt_api_key, encrypt_api_key
 from ..core.security import hash_password, verify_password
 from ..deps import get_current_user, get_current_user_lax, get_db
@@ -27,6 +28,8 @@ from ..models import ApiKey, User
 from ..schemas.auth import (
     ApiKeyInfoResponse,
     ChangePasswordRequest,
+    KNOWN_MODELS,
+    ModelConfigResponse,
     SetApiKeyRequest,
     SetModelConfigRequest,
     TokenUsageRow,
@@ -215,22 +218,56 @@ async def delete_api_key(
 # ============== 模型配置(§0002) ==============
 
 
-@router.get("/model-config", response_model=dict)  # 用 dict 绕过 pydantic 泛型,实际返回 ModelConfigResponse 字段
+def _custom_models_for(user: User) -> list[str]:
+    raw = user.model_catalog or []
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        model = item.strip()
+        if model and model not in seen:
+            out.append(model)
+            seen.add(model)
+    return out
+
+
+def _available_models_for(user: User) -> list[str]:
+    candidates = [
+        settings.llm1_outline_model,
+        settings.llm2_chapter_model,
+        settings.llm3_visuals_model,
+        *KNOWN_MODELS,
+        *_custom_models_for(user),
+    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for model in candidates:
+        if model and model not in seen:
+            out.append(model)
+            seen.add(model)
+    return out
+
+
+@router.get("/model-config", response_model=ModelConfigResponse)
 async def get_model_config(
     user: Annotated[User, Depends(get_current_user)],
-) -> dict[str, object]:
-    """返回当前用户的三类模型配置 + 系统默认值 + 已知模型列表。"""
-    from ..schemas.auth import KNOWN_MODELS
-
-    return {
-        "llm1_outline_model": user.llm1_outline_model,
-        "llm2_chapter_model": user.llm2_chapter_model,
-        "llm3_visuals_model": user.llm3_visuals_model,
-        "default_outline_model": settings.llm1_outline_model,
-        "default_chapter_model": settings.llm2_chapter_model,
-        "default_visuals_model": settings.llm3_visuals_model,
-        "known_models": KNOWN_MODELS,
-    }
+) -> ModelConfigResponse:
+    """返回模型池。具体 LLM-1/2/3 选择移动到生成流程里完成。"""
+    custom_models = _custom_models_for(user)
+    return ModelConfigResponse(
+        llm1_outline_model=user.llm1_outline_model,
+        llm2_chapter_model=user.llm2_chapter_model,
+        llm3_visuals_model=user.llm3_visuals_model,
+        default_outline_model=settings.llm1_outline_model,
+        default_chapter_model=settings.llm2_chapter_model,
+        default_visuals_model=settings.llm3_visuals_model,
+        known_models=KNOWN_MODELS,
+        custom_models=custom_models,
+        available_models=_available_models_for(user),
+    )
 
 
 @router.put("/model-config")
@@ -239,11 +276,11 @@ async def set_model_config(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
-    """更新当前用户的三类模型配置。传 null / 空字符串表示重置为系统默认。"""
-    # 空字符串视为 null(重置)
-    user.llm1_outline_model = body.llm1_outline_model or None
-    user.llm2_chapter_model = body.llm2_chapter_model or None
-    user.llm3_visuals_model = body.llm3_visuals_model or None
+    """更新当前用户的模型池。旧三类默认字段统一清空,避免设置页承担选择语义。"""
+    user.model_catalog = body.custom_models
+    user.llm1_outline_model = None
+    user.llm2_chapter_model = None
+    user.llm3_visuals_model = None
 
     await db.commit()
     return {"ok": True}

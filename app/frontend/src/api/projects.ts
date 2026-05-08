@@ -99,6 +99,9 @@ export function useDeleteProject() {
 export interface StartProjectPayload {
   pages_per_chapter?: number
   max_retry_per_chapter?: number
+  outline_model?: string | null
+  chapter_model?: string | null
+  visuals_model?: string | null
 }
 
 export function useStartProject() {
@@ -116,6 +119,9 @@ export function useStartProject() {
         body: JSON.stringify({
           pages_per_chapter: body.pages_per_chapter ?? 3,
           max_retry_per_chapter: body.max_retry_per_chapter ?? 3,
+          outline_model: body.outline_model ?? null,
+          chapter_model: body.chapter_model ?? null,
+          visuals_model: body.visuals_model ?? null,
         }),
       }),
     onSuccess: (_data, vars) => {

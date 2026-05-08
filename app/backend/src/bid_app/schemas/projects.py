@@ -73,6 +73,9 @@ class ProjectResponse(BaseModel):
 class StartRequest(BaseModel):
     pages_per_chapter: int = Field(3, ge=1, le=10)
     max_retry_per_chapter: int = Field(3, ge=0, le=10)
+    outline_model: str | None = Field(None, max_length=128)
+    chapter_model: str | None = Field(None, max_length=128)
+    visuals_model: str | None = Field(None, max_length=128)
 
 
 class StartResponse(BaseModel):
@@ -89,6 +92,7 @@ class OutlineChapterIn(BaseModel):
     key_points: list[str] = Field(..., min_length=1)
     target_pages: int = Field(..., ge=1, le=10)
     matched_scoring_items: list[str] = Field(default_factory=list)
+    chapter_model: str | None = Field(None, max_length=128)
 
 
 class OutlineConfirmRequest(BaseModel):
@@ -119,6 +123,7 @@ class OutlineChapterDTO(BaseModel):
     target_pages: int
     index: int
     status: ChapterStatusEnum
+    chapter_model: str | None = None
     # ⭐ R-15 配套:R-14 partial / 完整正文从 outline 端点暴露给前端 hydrate
     final_text: str | None = None
 

@@ -70,6 +70,7 @@ export interface OutlineChapterDTO {
   target_pages: number
   index: number
   status: ChapterStatus
+  chapter_model: string | null
   final_text: string | null
 }
 
@@ -84,6 +85,7 @@ export interface ChapterDetailDTO {
   title: string
   status: ChapterStatus
   final_text: string | null
+  chapter_model: string | null
   retry_count: number
   last_error: string | null
   current_version_id: number | null
@@ -106,6 +108,7 @@ export interface OutlineChapterIn {
   key_points: string[]
   target_pages: number
   matched_scoring_items?: string[]
+  chapter_model?: string | null
 }
 
 // 文档 kind 与后端 _VALID_DOC_KINDS 完全一致。
@@ -228,10 +231,13 @@ export interface ModelConfigDTO {
   default_chapter_model: string
   default_visuals_model: string
   known_models: string[]
+  custom_models: string[]
+  available_models: string[]
 }
 
 export interface SetModelConfigInput {
-  llm1_outline_model: string | null
-  llm2_chapter_model: string | null
-  llm3_visuals_model: string | null
+  custom_models: string[]
+  llm1_outline_model?: string | null
+  llm2_chapter_model?: string | null
+  llm3_visuals_model?: string | null
 }

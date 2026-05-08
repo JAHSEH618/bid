@@ -27,6 +27,6 @@ class TokenUsage(Base, TimestampMixin):
     run_id: Mapped[int | None] = mapped_column(
         ForeignKey("runs.id", ondelete="SET NULL"), nullable=True
     )
-    model: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(128))
     prompt_tokens: Mapped[int] = mapped_column(Integer)
     completion_tokens: Mapped[int] = mapped_column(Integer)

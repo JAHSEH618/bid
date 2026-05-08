@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import JSON, Boolean, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, TimestampMixin
@@ -32,4 +32,7 @@ class User(Base, TimestampMixin):
     )
     llm3_visuals_model: Mapped[str | None] = mapped_column(
         String(128), nullable=True
+    )
+    model_catalog: Mapped[list[str] | None] = mapped_column(
+        JSON, nullable=True
     )

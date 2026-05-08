@@ -43,6 +43,9 @@ class Chapter(Base, TimestampMixin):
     summary: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     key_points: Mapped[list[str]] = mapped_column(JSON, default=list)
     target_pages: Mapped[int] = mapped_column(default=3)
+    model_snapshot: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
     final_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     retry_count: Mapped[int] = mapped_column(default=0)

@@ -35,6 +35,7 @@ class ChapterDetailResponse(BaseModel):
         "retrying",
     ]
     final_text: str | None
+    chapter_model: str | None = None
     retry_count: int
     last_error: str | None
     current_version_id: int | None  # latest ChapterVersion.id (for /review path)

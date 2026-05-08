@@ -23,7 +23,7 @@ from ...services.llm import (
     call_llm_stream,
 )
 from ..prompts.write_chapter_prompt import build_messages
-from ..resolve import resolve_models
+from ..resolve import resolve_chapter_model
 from ..state import WorkflowState
 from ..sync import publish_event, sync_chapter_to_db
 
@@ -246,11 +246,13 @@ async def run(state: WorkflowState) -> dict[str, Any]:
                 index=current,
             )
 
-    models = await resolve_models(project_id)
+    chapter_model = await resolve_chapter_model(
+        project_id, run_id, current, chapter
+    )
 
     try:
         result = await call_llm_stream(
-            model=models.chapter_model,
+            model=chapter_model,
             messages=messages,
             api_key=api_key,
             user_id=await _resolve_user_id(project_id),

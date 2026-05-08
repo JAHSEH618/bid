@@ -18,12 +18,14 @@ import {
 } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Label } from '@/components/ui/label'
 import {
   useProject,
   useProjectDocuments,
   useStartProject,
   useUploadDocument,
 } from '@/api/projects'
+import { useModelConfig } from '@/api/me'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
 import { cn } from '@/lib/utils'
@@ -64,6 +66,10 @@ export function DocumentUploadPage() {
   const project = useProject(projectId)
   const documents = useProjectDocuments(projectId)
   const start = useStartProject()
+  const modelConfig = useModelConfig()
+  const [outlineModel, setOutlineModel] = useState('')
+  const [chapterModel, setChapterModel] = useState('')
+  const [visualsModel, setVisualsModel] = useState('')
 
   const uploadedByKind = useMemo<Partial<Record<DocumentKind, DocumentDTO>>>(
     () => {
@@ -82,6 +88,14 @@ export function DocumentUploadPage() {
     }
   }, [project.data, navigate, projectId])
 
+  useEffect(() => {
+    const data = modelConfig.data
+    if (!data) return
+    setOutlineModel((prev) => prev || data.default_outline_model)
+    setChapterModel((prev) => prev || data.default_chapter_model)
+    setVisualsModel((prev) => prev || data.default_visuals_model)
+  }, [modelConfig.data])
+
   const techSpec = uploadedByKind.tech_spec
   const scoring = uploadedByKind.scoring
   const requiredCount = (techSpec ? 1 : 0) + (scoring ? 1 : 0)
@@ -98,6 +112,9 @@ export function DocumentUploadPage() {
         body: {
           pages_per_chapter: project.data.pages_per_chapter,
           max_retry_per_chapter: project.data.max_retry_per_chapter,
+          outline_model: outlineModel || null,
+          chapter_model: chapterModel || null,
+          visuals_model: visualsModel || null,
         },
       })
       if (res.queued) {
@@ -190,6 +207,44 @@ export function DocumentUploadPage() {
         ))}
       </div>
 
+      <Card className="border-border/70 shadow-sm">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">本次生成模型</CardTitle>
+          <CardDescription className="text-xs">
+            正文默认模型会带到每一章,确认提纲时仍可逐章修改
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-3 md:grid-cols-3">
+          <ModelSelect
+            id="outline-model"
+            label="提纲生成"
+            value={outlineModel}
+            onChange={setOutlineModel}
+            models={modelConfig.data?.available_models ?? []}
+            fallback={modelConfig.data?.default_outline_model ?? ''}
+            loading={modelConfig.isLoading}
+          />
+          <ModelSelect
+            id="chapter-model"
+            label="正文默认"
+            value={chapterModel}
+            onChange={setChapterModel}
+            models={modelConfig.data?.available_models ?? []}
+            fallback={modelConfig.data?.default_chapter_model ?? ''}
+            loading={modelConfig.isLoading}
+          />
+          <ModelSelect
+            id="visuals-model"
+            label="配图生成"
+            value={visualsModel}
+            onChange={setVisualsModel}
+            models={modelConfig.data?.available_models ?? []}
+            fallback={modelConfig.data?.default_visuals_model ?? ''}
+            loading={modelConfig.isLoading}
+          />
+        </CardContent>
+      </Card>
+
       <div className="flex items-center justify-end gap-3 rounded-xl border border-border/70 bg-card p-4 shadow-sm">
         {!canStart && (
           <p className="flex-1 text-xs text-muted-foreground">
@@ -199,7 +254,7 @@ export function DocumentUploadPage() {
         <Button
           size="lg"
           onClick={handleStart}
-          disabled={!canStart || start.isPending}
+          disabled={!canStart || start.isPending || modelConfig.isLoading}
           className={cn(canStart && 'shadow-md shadow-primary/15')}
         >
           {start.isPending ? (
@@ -216,6 +271,46 @@ export function DocumentUploadPage() {
           )}
         </Button>
       </div>
+    </div>
+  )
+}
+
+function ModelSelect({
+  id,
+  label,
+  value,
+  onChange,
+  models,
+  fallback,
+  loading,
+}: {
+  id: string
+  label: string
+  value: string
+  onChange: (v: string) => void
+  models: string[]
+  fallback: string
+  loading: boolean
+}) {
+  const options = models.length > 0 ? models : fallback ? [fallback] : []
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id} className="text-xs font-medium">
+        {label}
+      </Label>
+      <select
+        id={id}
+        value={value || fallback}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={loading || options.length === 0}
+        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 font-mono text-xs shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {options.map((model) => (
+          <option key={model} value={model}>
+            {model}
+          </option>
+        ))}
+      </select>
     </div>
   )
 }

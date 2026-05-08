@@ -96,6 +96,15 @@ async def sync_outline_to_db(
     from ..models import Chapter
 
     async with session_factory() as s, s.begin():
+        default_model_row = await s.execute(
+            sa.text(
+                "SELECT p.chapter_model_snapshot "
+                "FROM runs r JOIN projects p ON p.id = r.project_id "
+                "WHERE r.id=:r"
+            ),
+            {"r": run_id},
+        )
+        default_chapter_model = default_model_row.scalar_one_or_none()
         if replace:
             await s.execute(
                 sa.text("DELETE FROM chapters WHERE run_id=:r"),
@@ -111,6 +120,7 @@ async def sync_outline_to_db(
                     summary=c.get("summary"),
                     key_points=c.get("key_points", []),
                     target_pages=c.get("target_pages", 3),
+                    model_snapshot=c.get("chapter_model") or default_chapter_model,
                 )
                 .on_conflict_do_update(
                     index_elements=["run_id", "index"],
@@ -119,6 +129,7 @@ async def sync_outline_to_db(
                         "summary": sa.text("EXCLUDED.summary"),
                         "key_points": sa.text("EXCLUDED.key_points"),
                         "target_pages": sa.text("EXCLUDED.target_pages"),
+                        "model_snapshot": sa.text("EXCLUDED.model_snapshot"),
                     },
                 )
             )

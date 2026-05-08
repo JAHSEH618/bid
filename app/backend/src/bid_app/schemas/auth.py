@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class LoginRequest(BaseModel):
@@ -72,7 +72,11 @@ KNOWN_MODELS: list[str] = [
 
 
 class ModelConfigResponse(BaseModel):
-    """当前用户的三类模型配置。为 NULL 的字段表示使用系统默认值。"""
+    """当前用户的模型池。
+
+    llm1/2/3 字段保留给旧前端兼容;新前端只用 custom_models /
+    available_models,在项目启动与章节确认时再选择具体用途。
+    """
 
     llm1_outline_model: str | None  # 提纲生成(LLM-1)
     llm2_chapter_model: str | None  # 正文撰写(LLM-2)
@@ -85,11 +89,32 @@ class ModelConfigResponse(BaseModel):
 
     # 返回已知模型列表供前端下拉选择
     known_models: list[str]
+    custom_models: list[str]
+    available_models: list[str]
 
 
 class SetModelConfigRequest(BaseModel):
-    """更新模型配置。传 null / 空字符串表示重置为系统默认。"""
+    """更新模型池。
+
+    llm1/2/3 字段保留兼容旧调用;新调用只传 custom_models。
+    """
 
     llm1_outline_model: str | None = None
     llm2_chapter_model: str | None = None
     llm3_visuals_model: str | None = None
+    custom_models: list[str] = Field(default_factory=list, max_length=30)
+
+    @field_validator("custom_models")
+    @classmethod
+    def _normalize_custom_models(cls, v: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in v:
+            model = item.strip()
+            if not model or model in seen:
+                continue
+            if len(model) > 128:
+                raise ValueError("model name must be <= 128 chars")
+            out.append(model)
+            seen.add(model)
+        return out

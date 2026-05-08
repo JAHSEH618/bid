@@ -28,6 +28,15 @@ export { isMockEnabled } from './mock-flag'
 
 const NOW = '2026-05-02T08:00:00+08:00'
 const YESTERDAY = '2026-05-01T15:30:00+08:00'
+const KNOWN_MODELS = [
+  'dashscope/deepseek-v4-flash',
+  'dashscope/deepseek-v3',
+  'dashscope/qwen3.6-max-preview',
+  'dashscope/qwen3.6-flash',
+  'dashscope/qwen-max',
+  'dashscope/qwen-plus',
+]
+let customModels = ['dashscope/qwen-turbo']
 
 const adminUser: UserDTO = {
   id: 1,
@@ -164,6 +173,7 @@ function makeChapter(
     target_pages: 3,
     index: idx,
     status,
+    chapter_model: 'dashscope/qwen3.6-max-preview',
     retry_count: status === 'failed' ? 1 : 0,
     final_text: finalText,
   }
@@ -378,6 +388,33 @@ function route(ctx: ResolveContext): unknown {
     apiKeyLastValidatedAt = new Date().toISOString()
     return { ok: true }
   }
+  if (pathname === '/api/me/model-config' && method === 'GET') {
+    const available = Array.from(
+      new Set([
+        'dashscope/deepseek-v4-flash',
+        'dashscope/qwen3.6-max-preview',
+        'dashscope/qwen3.6-flash',
+        ...KNOWN_MODELS,
+        ...customModels,
+      ]),
+    )
+    return {
+      llm1_outline_model: null,
+      llm2_chapter_model: null,
+      llm3_visuals_model: null,
+      default_outline_model: 'dashscope/deepseek-v4-flash',
+      default_chapter_model: 'dashscope/qwen3.6-max-preview',
+      default_visuals_model: 'dashscope/qwen3.6-flash',
+      known_models: KNOWN_MODELS,
+      custom_models: customModels,
+      available_models: available,
+    }
+  }
+  if (pathname === '/api/me/model-config' && method === 'PUT') {
+    const b = ctx.body as { custom_models?: string[] }
+    customModels = Array.from(new Set(b.custom_models ?? []))
+    return { ok: true }
+  }
   if (pathname === '/api/me/api-key' && method === 'DELETE') {
     apiKeyConfigured = false
     apiKeyLastValidatedAt = null
@@ -532,6 +569,7 @@ function route(ctx: ResolveContext): unknown {
         title: ch.title,
         status: ch.status,
         final_text: ch.final_text,
+        chapter_model: ch.chapter_model,
         retry_count: ch.retry_count,
         last_error: null,
         current_version_id: idx * 1000 + 1,
@@ -608,6 +646,7 @@ function route(ctx: ResolveContext): unknown {
           target_pages: c.target_pages,
           index: c.index,
           status: c.status,
+          chapter_model: c.chapter_model,
           // R-15:final_text 是 R-14 周期 flush 的快照,前端 hydrate 用
           final_text: c.final_text,
         })),
@@ -621,6 +660,7 @@ function route(ctx: ResolveContext): unknown {
           summary?: string | null
           key_points: string[]
           target_pages: number
+          chapter_model?: string | null
         }[]
       }
       if (b?.chapters && b.chapters.length > 0) {
@@ -632,6 +672,7 @@ function route(ctx: ResolveContext): unknown {
           target_pages: c.target_pages,
           index: i,
           status: 'pending',
+          chapter_model: c.chapter_model ?? 'dashscope/qwen3.6-max-preview',
           retry_count: 0,
           final_text: null,
         }))

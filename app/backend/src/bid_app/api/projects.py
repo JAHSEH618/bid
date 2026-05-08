@@ -53,6 +53,7 @@ from ..services.concurrency import (
     try_acquire_project_slot,
 )
 from ..services.document_extractor import extract_file
+from .me import _available_models_for
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 log = structlog.get_logger()
@@ -97,6 +98,18 @@ async def _get_active_run(db: AsyncSession, project_id: int) -> Run:
 def _project_dir_for(project_id: int) -> Path:
     """项目磁盘目录。``settings.projects_dir`` + ``project_id``。"""
     return Path(settings.projects_dir) / str(project_id)
+
+
+def _normalize_selected_model(model: str | None, user: User) -> str | None:
+    selected = (model or "").strip()
+    if not selected:
+        return None
+    if selected not in _available_models_for(user):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"model not in your model catalog: {selected}",
+        )
+    return selected
 
 
 # ========== CRUD ==========
@@ -368,10 +381,17 @@ async def start_workflow(
     project.pages_per_chapter = body.pages_per_chapter
     project.max_retry_per_chapter = body.max_retry_per_chapter
 
-    # ⭐ §0002 模型快照:把用户当前配置(或 None)拷到 Project,工作流从快照读
-    project.outline_model_snapshot = user.llm1_outline_model
-    project.chapter_model_snapshot = user.llm2_chapter_model
-    project.visuals_model_snapshot = user.llm3_visuals_model
+    # 模型选择在生成流程里提交。Project 只存提纲 / 配图 / 章节默认快照;
+    # 每章正文模型会在确认提纲时写 chapters.model_snapshot。
+    project.outline_model_snapshot = _normalize_selected_model(
+        body.outline_model, user
+    )
+    project.chapter_model_snapshot = _normalize_selected_model(
+        body.chapter_model, user
+    )
+    project.visuals_model_snapshot = _normalize_selected_model(
+        body.visuals_model, user
+    )
 
     thread_id = f"run-{project_id}-{secrets.token_hex(8)}"
     run = Run(
@@ -474,6 +494,7 @@ async def get_outline(
                 target_pages=c.target_pages,
                 index=c.index,
                 status=c.status,
+                chapter_model=c.model_snapshot,
                 # ⭐ R-15 配套:R-14 partial / 完整正文都让 outline 端点暴露,
                 # 前端 useProjectOutline 轮询拿到就 hydrate(单端点路径,
                 # 不强制额外调 GET /chapters/{idx})。
@@ -507,7 +528,16 @@ async def confirm_outline(
         )
 
     # body.chapters 已被 pydantic 校验过 title/key_points/target_pages
+    available_models = set(_available_models_for(user))
     edited = [c.model_dump() for c in body.chapters] if body.chapters else []
+    for chapter in edited:
+        model = (chapter.get("chapter_model") or "").strip()
+        chapter["chapter_model"] = model or None
+        if model and model not in available_models:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"chapter model not in your model catalog: {model}",
+            )
 
     run = await _get_active_run(db, project_id)
 

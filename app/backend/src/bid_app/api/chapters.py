@@ -98,6 +98,7 @@ async def get_chapter_detail(
         title=chapter.title,
         status=chapter.status,
         final_text=chapter.final_text,
+        chapter_model=chapter.model_snapshot,
         retry_count=chapter.retry_count,
         last_error=chapter.last_error,
         current_version_id=current_version_id,

@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from ..config import settings
 from ..db import session_factory
-from ..models import Project
+from ..models import Chapter, Project, Run
 
 log = structlog.get_logger()
 
@@ -66,3 +66,48 @@ async def resolve_models(project_id: int) -> ResolvedModels:
         chapter_model=chapter_model,
         visuals_model=visuals_model,
     )
+
+
+async def resolve_chapter_model(
+    project_id: int,
+    run_id: int | None,
+    chapter_index: int,
+    chapter: dict[str, object] | None = None,
+) -> str:
+    """解析当前章节 LLM-2 模型。
+
+    优先级:
+      1. state.chapters[i].chapter_model
+      2. chapters.model_snapshot
+      3. projects.chapter_model_snapshot
+      4. settings.llm2_chapter_model
+    """
+    from_state = ""
+    if chapter:
+        raw = chapter.get("chapter_model")
+        if isinstance(raw, str):
+            from_state = raw.strip()
+    if from_state:
+        return from_state
+
+    fallback = (await resolve_models(project_id)).chapter_model
+    if run_id is None or run_id <= 0:
+        return fallback
+
+    try:
+        async with session_factory() as s:
+            row = await s.execute(
+                select(Chapter.model_snapshot)
+                .join(Run, Run.id == Chapter.run_id)
+                .where(Run.id == run_id, Chapter.index == chapter_index)
+            )
+            selected = row.scalar_one_or_none()
+            return selected or fallback
+    except Exception:
+        log.warning(
+            "resolve_chapter_model_db_failed_fallback",
+            project_id=project_id,
+            run_id=run_id,
+            chapter_index=chapter_index,
+        )
+        return fallback

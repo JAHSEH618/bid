@@ -133,6 +133,11 @@ docker compose logs -f app | jq -c .
 # 重启某个服务
 docker compose restart app
 
+# 更新代码后重建 + 重启 + 健康检查
+./scripts/restart-after-update.sh
+# 或在仓库根目录执行
+./restart.sh
+
 # 查容器状态 + healthcheck
 docker compose ps
 
@@ -146,9 +151,19 @@ docker compose exec app bash
 # 重置 admin 密码
 docker compose exec app python -m bid_app.cli.reset_admin --password new_pass
 
+# 重新部署后 .env 与旧 Postgres 数据卷密码不一致时,同步数据库角色密码
+./scripts/sync-postgres-password.sh
+
 # 测试 LLM 连通(M0)
 docker compose exec app python -m bid_app.cli.test_llm --api-key sk-xxx
 ```
+
+> `sync-postgres-password.sh` 只修复 `POSTGRES_PASSWORD` 差异。若
+> `BID_APP_MASTER_KEY` 变了,历史 API Key 仍无法解密,必须从备份恢复旧 `.env`。
+
+`install.sh` 会把首次部署的 `.env` 备份到 `/var/lib/bid-app/.env`。重新部署到
+同一台服务器时,如果 `app/.env` 不存在会自动从这里恢复;如果检测到
+`BID_APP_MASTER_KEY` 和备份不一致会停止部署,避免把历史 API Key 变成不可解密数据。
 
 ### 备份与恢复(§24.2)
 

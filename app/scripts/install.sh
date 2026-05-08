@@ -18,6 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="${BID_APP_DATA_DIR:-/var/lib/bid-app}"
+ENV_BACKUP="$DATA_DIR/.env"
 
 cd "$APP_DIR"
 
@@ -64,6 +65,16 @@ echo "[2/6] 准备 $DATA_DIR..."
 SUDO_PREFIX=""
 if [[ $EUID -ne 0 ]]; then SUDO_PREFIX="sudo"; fi
 
+env_value() {
+  local key="$1"
+  local file="$2"
+  if [[ -n "$SUDO_PREFIX" && "$file" == "$ENV_BACKUP" ]]; then
+    $SUDO_PREFIX awk -F= -v k="$key" '$1 == k {print substr($0, index($0, "=") + 1)}' "$file" | tail -1
+  else
+    awk -F= -v k="$key" '$1 == k {print substr($0, index($0, "=") + 1)}' "$file" | tail -1
+  fi
+}
+
 $SUDO_PREFIX mkdir -p "$DATA_DIR/postgres-data" "$DATA_DIR/redis-data" \
                      "$DATA_DIR/projects" "$DATA_DIR/backups"
 
@@ -86,6 +97,23 @@ echo ""
 # 3. .env(若不存在则生成)
 echo "[3/6] 检查 .env..."
 if [[ ! -f .env ]]; then
+  if [[ -f "$ENV_BACKUP" ]]; then
+    echo "    .env 不存在,从 $ENV_BACKUP 恢复..."
+    $SUDO_PREFIX cp "$ENV_BACKUP" .env
+    $SUDO_PREFIX chmod 600 .env
+    $SUDO_PREFIX chown "$(id -u):$(id -g)" .env 2>/dev/null || true
+  elif [[ -f "$DATA_DIR/postgres-data/PG_VERSION" ]]; then
+    echo "❌ 检测到已有 Postgres 数据目录,但当前 app/.env 不存在。" >&2
+    echo "   不能自动生成新 .env:新的 POSTGRES_PASSWORD 会连不上旧库," >&2
+    echo "   新的 BID_APP_MASTER_KEY 也会导致已保存的 API Key 无法解密。" >&2
+    echo "" >&2
+    echo "   正确处理:" >&2
+    echo "   1) 从备份/旧服务器恢复原 app/.env 后重跑 install.sh" >&2
+    echo "   2) 若只是不小心改了 POSTGRES_PASSWORD,可先恢复 MASTER_KEY/JWT_SECRET," >&2
+    echo "      再运行 ./scripts/sync-postgres-password.sh 同步数据库密码" >&2
+    echo "   3) 全新部署且确认不要旧数据:先备份后移走 $DATA_DIR/postgres-data" >&2
+    exit 1
+  fi
   if [[ ! -f .env.example ]]; then
     echo "❌ .env.example 缺失,无法生成 .env" >&2
     exit 1
@@ -94,6 +122,28 @@ if [[ ! -f .env ]]; then
   ./scripts/gen-secrets.sh
 else
   echo "    ✅ .env 已存在,跳过(若需重置:mv .env .env.bak && ./scripts/gen-secrets.sh)"
+fi
+
+if [[ -f "$ENV_BACKUP" ]]; then
+  current_master="$(env_value BID_APP_MASTER_KEY .env)"
+  backup_master="$(env_value BID_APP_MASTER_KEY "$ENV_BACKUP")"
+  if [[ -n "$current_master" && -n "$backup_master" && "$current_master" != "$backup_master" ]]; then
+    echo "❌ 当前 app/.env 与 $ENV_BACKUP 的 BID_APP_MASTER_KEY 不一致。" >&2
+    echo "   为避免历史 API Key 永久不可解密,已停止部署。" >&2
+    echo "   请恢复原 .env,或确认全新部署后移走旧数据目录。" >&2
+    exit 1
+  fi
+  current_pg_password="$(env_value POSTGRES_PASSWORD .env)"
+  backup_pg_password="$(env_value POSTGRES_PASSWORD "$ENV_BACKUP")"
+  if [[ -n "$current_pg_password" && -n "$backup_pg_password" && "$current_pg_password" != "$backup_pg_password" ]]; then
+    echo "⚠️  当前 app/.env 与 $ENV_BACKUP 的 POSTGRES_PASSWORD 不一致。" >&2
+    echo "   若 app 日志出现 password authentication failed,运行:" >&2
+    echo "   ./scripts/sync-postgres-password.sh && docker compose restart app" >&2
+  fi
+else
+  echo "    备份 .env 到 $ENV_BACKUP..."
+  $SUDO_PREFIX cp .env "$ENV_BACKUP"
+  $SUDO_PREFIX chmod 600 "$ENV_BACKUP"
 fi
 echo ""
 
