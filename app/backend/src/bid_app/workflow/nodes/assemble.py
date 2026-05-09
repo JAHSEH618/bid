@@ -1,6 +1,7 @@
 """全文整合 + 持久化输出(§10.6c / v10 §4.6)。
 
 所有章节 finalized 后跑;同步:
+- Humanizer-zh 最终全文润色
 - 写 ``{project_dir}/proposal.md``(给 docx 任务读)
 - ``Run.finished_at`` + ``status='done'``
 - ``Project.status='done'``
@@ -8,6 +9,7 @@
 
 ⭐ D-CG + D-CM:重写 proposal.md 后 DOCX 缓存必须失效。
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -18,6 +20,7 @@ import sqlalchemy as sa
 import structlog
 
 from ...db import session_factory
+from ..humanize import humanize_final_proposal
 from ..prompts.assemble_prompt import assemble_proposal
 from ..state import WorkflowState
 from ..sync import publish_event, sync_project_status
@@ -29,9 +32,14 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     pid = state["project_id"]
     run_id = state.get("run_id")
 
-    final_md = assemble_proposal(
+    assembled_md = assemble_proposal(
         list(state.get("finalized_chapters") or []),
         total_chapters=len(state.get("chapters") or []),
+    )
+    final_md = await humanize_final_proposal(
+        project_id=pid,
+        run_id=run_id,
+        proposal_md=assembled_md,
     )
 
     # 取 project_dir,Run 落 done
@@ -49,10 +57,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         if run_id is not None:
             try:
                 await s.execute(
-                    sa.text(
-                        "UPDATE runs SET finished_at=:t, status='done' "
-                        "WHERE id=:r"
-                    ),
+                    sa.text("UPDATE runs SET finished_at=:t, status='done' WHERE id=:r"),
                     {"r": run_id, "t": datetime.now(UTC)},
                 )
                 await s.commit()
@@ -65,9 +70,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             project_dir.mkdir(parents=True, exist_ok=True)
             (project_dir / "proposal.md").write_text(final_md, encoding="utf-8")
         except Exception:
-            log.exception(
-                "assemble_proposal_md_write_failed", project_dir=str(project_dir)
-            )
+            log.exception("assemble_proposal_md_write_failed", project_dir=str(project_dir))
 
         # ⭐ D-CG + D-CM:重写 proposal.md 后 DOCX 缓存必须失效
         docx_path = project_dir / "proposal.docx"

@@ -3,6 +3,7 @@
 从 Project 快照读取用户配置的模型名,未配置时回退到 settings 全局默认值。
 与 D-C ApiKey 快照模式一致:用户改模型不影响已在跑的项目。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -20,9 +21,65 @@ log = structlog.get_logger()
 @dataclass
 class ResolvedModels:
     """三类任务的最终生效模型名(LiteLLM 格式)。"""
+
     outline_model: str
     chapter_model: str
     visuals_model: str
+
+
+async def resolve_api_key(project_id: int, run_id: int | None = None) -> str:
+    """解析项目启动时快照的 ApiKey。
+
+    生产路径严格依赖 ``Project.encrypted_api_key_snapshot``;仅 CLI / 本地路径
+    允许 ``BID_APP_CLI_API_KEY`` fallback。
+    """
+    import os
+
+    is_production = run_id is not None and run_id > 0
+
+    encrypted: bytes | None = None
+    try:
+        from ..core.crypto import decrypt_api_key
+
+        async with session_factory() as s:
+            row = await s.execute(
+                select(Project.encrypted_api_key_snapshot).where(Project.id == project_id)
+            )
+            encrypted = row.scalar_one_or_none()
+    except Exception as e:
+        if is_production:
+            raise RuntimeError(f"db error resolving api_key for project {project_id}: {e}") from e
+
+    if encrypted is not None:
+        try:
+            return decrypt_api_key(encrypted)
+        except Exception as e:
+            if is_production:
+                raise RuntimeError(
+                    f"decrypt api_key failed for project {project_id} "
+                    f"(master_key 与启动时不一致?R10 检查): {e}"
+                ) from e
+
+    if is_production:
+        raise RuntimeError(f"project {project_id} has no api_key snapshot; did /start succeed?")
+
+    cli_key = os.environ.get("BID_APP_CLI_API_KEY")
+    if cli_key:
+        return cli_key
+    raise RuntimeError(
+        f"project {project_id} has no api_key snapshot; did /start succeed? "
+        "(or set BID_APP_CLI_API_KEY for CLI mode)"
+    )
+
+
+async def resolve_user_id(project_id: int) -> int:
+    """token_usage 记账用的用户 ID。缺失时返 0,不阻断工作流。"""
+    try:
+        async with session_factory() as s:
+            row = await s.execute(select(Project.api_key_owner).where(Project.id == project_id))
+            return row.scalar_one_or_none() or 0
+    except Exception:
+        return 0
 
 
 async def resolve_models(project_id: int) -> ResolvedModels:

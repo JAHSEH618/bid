@@ -76,6 +76,12 @@ function ensureMermaidInit(m: MermaidModule) {
     fontFamily:
       '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif',
     // 用户反馈:mermaid 图底色应该是白色(theme:base + 显式 background 白)。
+    // 安全清洗会移除 foreignObject;关闭 htmlLabels 让节点文字走 SVG <text>,
+    // 否则会出现"框和线正常,但中文标签消失"。
+    flowchart: {
+      htmlLabels: false,
+      useMaxWidth: true,
+    },
     themeVariables: {
       background: '#ffffff',
       primaryColor: '#ffffff',
