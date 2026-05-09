@@ -22,7 +22,6 @@ ARG NODE_PACKAGE_REGISTRY
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     PUPPETEER_SKIP_DOWNLOAD=true
 RUN npm config set registry "${NODE_PACKAGE_REGISTRY}" \
-    && npm config set puppeteer_skip_download true \
     && npm install -g @mermaid-js/mermaid-cli@11.4.0 \
     && mmdc --version
 
