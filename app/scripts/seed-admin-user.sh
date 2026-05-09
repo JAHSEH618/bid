@@ -24,7 +24,7 @@ if ! docker compose ps --services --filter status=running | grep -qx app; then
 fi
 
 docker compose exec -T -e SEED_USERNAME="$USERNAME" -e SEED_PASSWORD="$PASSWORD" \
-  app /app/backend/.venv/bin/python -c '
+  app python -c '
 import asyncio, os, sys
 from sqlalchemy import select
 from bid_app.db import session_factory

@@ -40,7 +40,7 @@ done
 # DB Migration 同步执行(D-O:必须在 supervisord 拉起 uvicorn / arq 之前完成)
 echo "[entrypoint] alembic upgrade head"
 cd /app/backend
-/app/backend/.venv/bin/python -m alembic -c /app/backend/alembic.ini upgrade head
+python -m alembic -c /app/backend/alembic.ini upgrade head
 
 # cron 由 supervisord [program:cron] 接管(`/usr/sbin/cron -f` 前台运行),
 # 这里不再 service cron start,避免双进程争抢 pidfile。

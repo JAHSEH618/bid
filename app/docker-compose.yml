@@ -40,7 +40,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
     networks: [bid-net]
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:12123/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:12123/health', timeout=3).read()"]
       interval: 30s
       timeout: 5s
       retries: 5
