@@ -71,15 +71,17 @@ function ensureMermaidInit(m: MermaidModule) {
     startOnLoad: false,
     theme: 'base',
     securityLevel: 'loose',
+    secure: ['securityLevel', 'startOnLoad', 'htmlLabels'],
+    // Mermaid 11 已把 flowchart.htmlLabels 标成 deprecated,根级配置才是
+    // 当前生效优先级。必须关闭 HTML label,否则节点文字会被渲染进
+    // foreignObject,随后被 SVG 清洗移除,页面只剩空框和连线。
+    htmlLabels: false,
     // PingFang SC / Microsoft YaHei:中文 label 优先字体;后端 mermaid-cli
     // 渲染 png 时也用同款字体(docker/mermaid-config.json 一致)。
     fontFamily:
       '-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif',
     // 用户反馈:mermaid 图底色应该是白色(theme:base + 显式 background 白)。
-    // 安全清洗会移除 foreignObject;关闭 htmlLabels 让节点文字走 SVG <text>,
-    // 否则会出现"框和线正常,但中文标签消失"。
     flowchart: {
-      htmlLabels: false,
       useMaxWidth: true,
     },
     themeVariables: {
@@ -274,7 +276,7 @@ function Mermaid({ code }: MermaidProps) {
   return (
     <div
       ref={ref}
-      className="my-4 overflow-x-auto rounded-md border border-slate-200 bg-white p-3"
+      className="mermaid-svg my-4 overflow-x-auto rounded-md border border-slate-200 bg-white p-3"
     />
   )
 }

@@ -7,14 +7,17 @@
 worker task 据此把 project 切 ``awaiting_review`` 而不是 ``failed``——只是
 当前章节失败,工作流暂停等用户 ``/retry``。
 """
+
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy import select
 
+from ...config import settings
 from ...db import session_factory
 from ...services.llm import (
     ChapterGenerationFailed,
@@ -54,16 +57,12 @@ async def _resolve_api_key(project_id: int, run_id: int | None = None) -> str:
 
         async with session_factory() as s:
             row = await s.execute(
-                select(Project.encrypted_api_key_snapshot).where(
-                    Project.id == project_id
-                )
+                select(Project.encrypted_api_key_snapshot).where(Project.id == project_id)
             )
             encrypted = row.scalar_one_or_none()
     except Exception as e:
         if is_production:
-            raise RuntimeError(
-                f"db error resolving api_key for project {project_id}: {e}"
-            ) from e
+            raise RuntimeError(f"db error resolving api_key for project {project_id}: {e}") from e
         # CLI:吞异常,继续走 fallback
 
     if encrypted is not None:
@@ -78,9 +77,7 @@ async def _resolve_api_key(project_id: int, run_id: int | None = None) -> str:
             # CLI 路径才允许 fallback
 
     if is_production:
-        raise RuntimeError(
-            f"project {project_id} has no api_key snapshot; did /start succeed?"
-        )
+        raise RuntimeError(f"project {project_id} has no api_key snapshot; did /start succeed?")
 
     cli_key = os.environ.get("BID_APP_CLI_API_KEY")
     if cli_key:
@@ -102,9 +99,7 @@ async def _resolve_user_id(project_id: int) -> int:
         from ...models import Project
 
         async with session_factory() as s:
-            row = await s.execute(
-                select(Project.api_key_owner).where(Project.id == project_id)
-            )
+            row = await s.execute(select(Project.api_key_owner).where(Project.id == project_id))
             return row.scalar_one_or_none() or 0
     except Exception:
         return 0
@@ -130,9 +125,7 @@ def _real_run(run_id: int | None) -> bool:
     return run_id is not None and run_id > 0
 
 
-async def _safe_sync_chapter(
-    run_id: int | None, index: int, **fields: Any
-) -> None:
+async def _safe_sync_chapter(run_id: int | None, index: int, **fields: Any) -> None:
     """sync_chapter_to_db 包装:run_id <= 0 跳过,DB 异常吞掉(M0 CLI 友好)。"""
     if not _real_run(run_id):
         return
@@ -146,6 +139,182 @@ async def _safe_sync_chapter(
         )
 
 
+def _chapter_generation_limit() -> int:
+    """正文 LLM 并发上限。用户要求最多 3,环境变量可降不可升。"""
+    return max(1, min(3, int(settings.max_concurrent_chapter_generations or 1)))
+
+
+async def _load_prefetched_body(
+    run_id: int | None,
+    index: int,
+    *,
+    retry_count: int,
+    revision_feedback: str,
+) -> str | None:
+    """取提前生成好的正文草稿。
+
+    只服务首次生成(retry_count=0 且无反馈)。重写路径必须重新走 LLM,
+    避免把上一轮用户不满意的内容误当缓存复用。
+    """
+    if not _real_run(run_id) or retry_count > 0 or revision_feedback.strip():
+        return None
+    try:
+        async with session_factory() as s:
+            row = await s.execute(
+                sa.text(
+                    "SELECT final_text FROM chapters "
+                    "WHERE run_id=:r AND index=:i AND status='pending' "
+                    "AND retry_count=0 AND NULLIF(final_text, '') IS NOT NULL"
+                ),
+                {"r": run_id, "i": index},
+            )
+            text = row.scalar_one_or_none()
+            return str(text) if text else None
+    except Exception:
+        import structlog
+
+        structlog.get_logger().exception(
+            "write_chapter_prefetch_read_failed", run_id=run_id, index=index
+        )
+        return None
+
+
+async def _prefetch_candidate_indices(
+    run_id: int | None,
+    *,
+    current: int,
+    total: int,
+    limit: int,
+) -> list[int]:
+    """返回当前章之后最多 limit-1 个可提前生成正文的章节索引。"""
+    if not _real_run(run_id) or limit <= 1:
+        return []
+    upper = min(total, current + limit)
+    if current + 1 >= upper:
+        return []
+    try:
+        async with session_factory() as s:
+            rows = await s.execute(
+                sa.text(
+                    "SELECT index FROM chapters "
+                    "WHERE run_id=:r AND index > :current AND index < :upper "
+                    "AND status='pending' AND retry_count=0 "
+                    "AND NULLIF(final_text, '') IS NULL "
+                    "ORDER BY index ASC"
+                ),
+                {"r": run_id, "current": current, "upper": upper},
+            )
+            return [int(row[0]) for row in rows.fetchall()]
+    except Exception:
+        import structlog
+
+        structlog.get_logger().exception(
+            "write_chapter_prefetch_candidates_failed",
+            run_id=run_id,
+            current=current,
+        )
+        return []
+
+
+async def _prefetch_chapter_body(
+    state: WorkflowState,
+    index: int,
+    *,
+    api_key: str,
+    user_id: int,
+) -> None:
+    """提前生成后续章节正文,缓存到 chapters.final_text / chapter_versions。
+
+    该预生成不进入审核态,也不发布 token,只是让后续章节点击"生成本章"后
+    能跳过 LLM-2 正文阶段,继续补图表并进入人工审核。
+    """
+    run_id = state.get("run_id")
+    project_id = state["project_id"]
+    if not _real_run(run_id):
+        return
+
+    import structlog
+
+    log_local = structlog.get_logger()
+    version_id: int | None = None
+    try:
+        await _safe_sync_chapter(
+            run_id,
+            index,
+            status="generating",
+            processing_started_at=datetime.now(UTC),
+        )
+        from ..sync import save_chapter_version
+
+        version_id = await save_chapter_version(
+            run_id,  # type: ignore[arg-type]
+            index,
+            "",
+        )
+
+        chapter = state["chapters"][index]
+        messages = build_messages(
+            chapter=chapter,
+            tech_spec_md=state.get("tech_spec_md", ""),
+            scoring_md=state.get("scoring_md", ""),
+            revision_feedback="",
+            retry_count=0,
+            previous_text="",
+        )
+        chapter_model = await resolve_chapter_model(project_id, run_id, index, chapter)
+        result = await call_llm_stream(
+            model=chapter_model,
+            messages=messages,
+            api_key=api_key,
+            user_id=user_id,
+            project_id=project_id,
+            run_id=run_id,
+            chapter_index=None,
+            temperature=0.6,
+        )
+
+        from ..postprocess import postprocess_chapter_markdown
+        from ..sync import flush_chapter_partial
+
+        final_text = postprocess_chapter_markdown(result.text)
+        await flush_chapter_partial(
+            run_id,  # type: ignore[arg-type]
+            index,
+            version_id,
+            final_text,
+        )
+        await _safe_sync_chapter(
+            run_id,
+            index,
+            status="pending",
+            processing_started_at=None,
+            last_error=None,
+        )
+        await publish_event(project_id, "chapter_prefetched", chapter_index=index)
+    except asyncio.CancelledError:
+        await _safe_sync_chapter(
+            run_id,
+            index,
+            status="pending",
+            processing_started_at=None,
+        )
+        raise
+    except Exception as e:
+        log_local.exception(
+            "write_chapter_prefetch_failed",
+            project_id=project_id,
+            run_id=run_id,
+            chapter_index=index,
+        )
+        await _safe_sync_chapter(
+            run_id,
+            index,
+            status="pending",
+            processing_started_at=None,
+            last_error=f"prefetch failed: {e}",
+        )
+
+
 async def run(state: WorkflowState) -> dict[str, Any]:
     current = state["current_index"]
     chapter = state["chapters"][current]
@@ -153,6 +322,25 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     project_id = state["project_id"]
 
     api_key = await _resolve_api_key(project_id, run_id=run_id)
+    user_id = await _resolve_user_id(project_id)
+    retry_count = state.get("retry_count", 0)
+    revision_feedback = state.get("revision_feedback") or ""
+
+    cached_body = await _load_prefetched_body(
+        run_id,
+        current,
+        retry_count=retry_count,
+        revision_feedback=revision_feedback,
+    )
+    if cached_body:
+        await _safe_sync_chapter(
+            run_id,
+            current,
+            status="generating",
+            processing_started_at=datetime.now(UTC),
+        )
+        await publish_event(project_id, "chapter_started", chapter_index=current)
+        return {"_pending_chapter_text": cached_body}
 
     # ⭐ D-BF:切 generating 同时写 processing_started_at,让
     # cron `cleanup_stale_chapters` 在 worker 进程被 SIGKILL/OOM 直接死时
@@ -165,9 +353,6 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     )
     await publish_event(project_id, "chapter_started", chapter_index=current)
 
-    retry_count = state.get("retry_count", 0)
-    revision_feedback = state.get("revision_feedback") or ""
-
     # ⭐ R-18:retry / revise 时(retry_count > 0)拉上一轮正文给 LLM 做
     # patch 修订。**必须在 save_chapter_version pre-create 之前查**——
     # 否则查到的"latest"是新创建的空占位行。
@@ -176,10 +361,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         try:
             from ..sync import get_latest_chapter_version_text
 
-            previous_text = (
-                await get_latest_chapter_version_text(run_id, current)
-                or ""
-            )
+            previous_text = await get_latest_chapter_version_text(run_id, current) or ""
         except Exception:
             import structlog
 
@@ -246,16 +428,33 @@ async def run(state: WorkflowState) -> dict[str, Any]:
                 index=current,
             )
 
-    chapter_model = await resolve_chapter_model(
-        project_id, run_id, current, chapter
-    )
+    chapter_model = await resolve_chapter_model(project_id, run_id, current, chapter)
+    prefetch_tasks: list[asyncio.Task[None]] = []
+    if retry_count == 0 and not revision_feedback.strip():
+        prefetch_indices = await _prefetch_candidate_indices(
+            run_id,
+            current=current,
+            total=len(state.get("chapters") or []),
+            limit=_chapter_generation_limit(),
+        )
+        prefetch_tasks = [
+            asyncio.create_task(
+                _prefetch_chapter_body(
+                    state,
+                    index,
+                    api_key=api_key,
+                    user_id=user_id,
+                )
+            )
+            for index in prefetch_indices
+        ]
 
     try:
         result = await call_llm_stream(
             model=chapter_model,
             messages=messages,
             api_key=api_key,
-            user_id=await _resolve_user_id(project_id),
+            user_id=user_id,
             project_id=project_id,
             run_id=run_id,
             chapter_index=current,
@@ -263,6 +462,10 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             on_partial=_on_partial,  # ⭐ R-14
         )
     except (TimeoutError, LLMRetryFailed, LLMTimeoutExceeded) as e:
+        for task in prefetch_tasks:
+            task.cancel()
+        if prefetch_tasks:
+            await asyncio.gather(*prefetch_tasks, return_exceptions=True)
         # D-BG:call_llm_stream 总超时已包成 LLMTimeoutExceeded,这里同时
         # catch asyncio.TimeoutError 是兜底。
         await _safe_sync_chapter(
@@ -272,15 +475,21 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             last_error=str(e),
             processing_started_at=None,
         )
-        await publish_event(
-            project_id, "chapter_failed", chapter_index=current, reason=str(e)
-        )
+        await publish_event(project_id, "chapter_failed", chapter_index=current, reason=str(e))
         # ⭐ D-AU:用语义化异常,worker task 据此把 project 切 awaiting_review
         raise ChapterGenerationFailed(
             str(e),
             chapter_index=current,
             chapter_id=await _resolve_chapter_id(run_id, current),
         ) from e
+    except Exception:
+        for task in prefetch_tasks:
+            task.cancel()
+        if prefetch_tasks:
+            await asyncio.gather(*prefetch_tasks, return_exceptions=True)
+        raise
+    if prefetch_tasks:
+        await asyncio.gather(*prefetch_tasks, return_exceptions=True)
 
     # ⭐ R-17 + R-19:LLM 出来的 markdown 偶尔段落紧挨 / mermaid block 里夹
     # 装饰色 `style X fill:#xxx`(会 override 前端白底主题)。统一过 postprocess

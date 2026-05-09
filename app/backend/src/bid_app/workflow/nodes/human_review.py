@@ -16,6 +16,7 @@ resume payload 形状::
 
 下游 ``update_state`` 节点接 ``_review_decision`` / ``_review_feedback``。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -24,7 +25,12 @@ import structlog
 from langgraph.types import interrupt
 
 from ..state import WorkflowState
-from ..sync import publish_event, sync_chapter_to_db, sync_project_status
+from ..sync import (
+    publish_event,
+    sync_chapter_to_db,
+    sync_project_status,
+    update_latest_chapter_version_text,
+)
 
 log = structlog.get_logger()
 
@@ -46,6 +52,11 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     # processing_started_at(D-AR / D-BF cleanup 不再误回滚)
     if _real_run(run_id):
         try:
+            await update_latest_chapter_version_text(
+                run_id,  # type: ignore[arg-type]
+                idx,
+                full_chapter,
+            )
             await sync_chapter_to_db(
                 run_id,  # type: ignore[arg-type]
                 idx,

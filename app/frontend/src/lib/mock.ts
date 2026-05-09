@@ -771,8 +771,10 @@ function mockChapterVersions(ch: MockChapter): ChapterVersionDTO[] {
       chapter_id: ch.index,
       version: 1,
       body_markdown: `# ${ch.title}\n\n(初版正文)`,
-      feedback:
+      feedback_in:
         ch.retry_count > 0 ? '请补充技术方案的可视化图表与细节' : null,
+      decision: ch.retry_count > 0 ? 'revise' : null,
+      abandoned: false,
       created_at: YESTERDAY,
     },
     ...(ch.retry_count > 0
@@ -782,7 +784,9 @@ function mockChapterVersions(ch: MockChapter): ChapterVersionDTO[] {
             chapter_id: ch.index,
             version: 2,
             body_markdown: ch.final_text ?? `# ${ch.title}\n\n(重写后)`,
-            feedback: null,
+            feedback_in: null,
+            decision: null,
+            abandoned: false,
             created_at: NOW,
           },
         ]

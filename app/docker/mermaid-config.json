@@ -1,10 +1,13 @@
 {
   "theme": "default",
+  "htmlLabels": false,
+  "secure": ["securityLevel", "startOnLoad", "htmlLabels"],
   "themeVariables": {
-    "fontFamily": "Noto Sans CJK SC, sans-serif"
+    "fontFamily": "Noto Sans CJK SC, sans-serif",
+    "primaryTextColor": "#0f172a",
+    "lineColor": "#475569"
   },
   "flowchart": {
-    "useMaxWidth": false,
-    "htmlLabels": true
+    "useMaxWidth": false
   }
 }

@@ -1,4 +1,5 @@
 """Application settings (D-W: DSN composed from components, not read literally)."""
+
 from __future__ import annotations
 
 import re
@@ -46,6 +47,7 @@ class Settings(BaseSettings):
 
     # 业务参数
     max_concurrent_projects: int = 10
+    max_concurrent_chapter_generations: int = 3
     max_file_size_mb: int = 50
     daily_upload_quota_mb: int = 500
     single_chapter_timeout_seconds: int = 600
@@ -81,9 +83,7 @@ class Settings(BaseSettings):
     @classmethod
     def _not_placeholder(cls, v: str) -> str:
         if not v or v == "__GENERATE_ME__":
-            raise ValueError(
-                "POSTGRES_PASSWORD must be set (run scripts/gen-secrets.sh)"
-            )
+            raise ValueError("POSTGRES_PASSWORD must be set (run scripts/gen-secrets.sh)")
         return v
 
     @property

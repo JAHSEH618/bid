@@ -147,7 +147,9 @@ export interface ChapterVersionDTO {
   chapter_id: number
   version: number
   body_markdown: string
-  feedback: string | null
+  feedback_in: string | null
+  decision: string | null
+  abandoned: boolean
   created_at: string
 }
 

@@ -2,6 +2,7 @@
 //
 // 端点:
 //   - GET  /api/projects/{id}/chapters/{idx}          ChapterDetailResponse(R-15 commit 7dfc2fe)
+//   - GET  /api/projects/{id}/chapters/{idx}/versions 历史版本列表
 //   - PATCH /api/projects/{id}/chapters/{idx}/model   {chapter_model} → {ok}
 //   - POST /api/projects/{id}/chapters/{idx}/generate → {ok}
 //   - POST /api/projects/{id}/chapters/{idx}/review   {decision, feedback?} → {ok}
@@ -9,8 +10,6 @@
 //
 // 注意:
 //   - revise 必须有非空 feedback,否则 400(后端校验)
-//   - 后端没有 GET /chapters/{idx}/versions(M2/M3 未规划),历史 Tab
-//     在真实 API 模式下展示「暂无历史版本」;mock 模式照常生成 fixture。
 import {
   useMutation,
   useQuery,
@@ -18,7 +17,11 @@ import {
   type Query,
 } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/apiFetch'
-import type { ChapterDetailDTO, ReviewDecision } from '@/lib/types'
+import type {
+  ChapterDetailDTO,
+  ChapterVersionDTO,
+  ReviewDecision,
+} from '@/lib/types'
 
 // R-15:hydrate ChapterReviewPage 用。状态决定轮询节奏:
 //   generating / retrying / reviewing → 2s polling(R-14 partial 每 1s flush)
@@ -49,6 +52,20 @@ export function useChapter(
             }
             return false
           },
+  })
+}
+
+export function useChapterVersions(
+  projectId: number | null,
+  index: number | null,
+) {
+  return useQuery<ChapterVersionDTO[], Error>({
+    queryKey: ['projects', projectId, 'chapters', index, 'versions'],
+    queryFn: () =>
+      apiFetch<ChapterVersionDTO[]>(
+        `/api/projects/${projectId}/chapters/${index}/versions`,
+      ),
+    enabled: projectId != null && index != null,
   })
 }
 
@@ -139,6 +156,12 @@ export function useReviewChapter() {
       ),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })
+      qc.invalidateQueries({
+        queryKey: ['projects', vars.projectId, 'chapters', vars.index],
+      })
+      qc.invalidateQueries({
+        queryKey: ['projects', vars.projectId, 'chapters', vars.index, 'versions'],
+      })
     },
   })
 }
@@ -159,6 +182,12 @@ export function useRetryChapter() {
       ),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })
+      qc.invalidateQueries({
+        queryKey: ['projects', vars.projectId, 'chapters', vars.index],
+      })
+      qc.invalidateQueries({
+        queryKey: ['projects', vars.projectId, 'chapters', vars.index, 'versions'],
+      })
     },
   })
 }

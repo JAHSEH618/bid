@@ -142,6 +142,19 @@
   @apply bg-slate-50;
 }
 
+.mermaid-svg svg {
+  max-width: 100%;
+  height: auto;
+}
+.mermaid-svg text,
+.mermaid-svg tspan {
+  fill: #0f172a;
+  color: #0f172a;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei',
+    sans-serif;
+}
+
 /* === 公用动效 === */
 @keyframes shake {
   0%,

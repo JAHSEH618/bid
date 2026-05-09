@@ -9,6 +9,7 @@ import { ReviewActions } from '@/components/ReviewActions'
 import { useProject, useProjectOutline } from '@/api/projects'
 import {
   useChapter,
+  useChapterVersions,
   useGenerateChapter,
   useReviewChapter,
   useRetryChapter,
@@ -19,7 +20,11 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useProjectStream, type ProjectEvent } from '@/hooks/useSSE'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
-import type { ChapterStatus, ReviewDecision } from '@/lib/types'
+import type {
+  ChapterStatus,
+  ChapterVersionDTO,
+  ReviewDecision,
+} from '@/lib/types'
 
 export function ChapterReviewPage() {
   const { id } = useParams<{ id: string }>()
@@ -56,6 +61,7 @@ export function ChapterReviewPage() {
   // useChapter 内部 refetchInterval 智能策略:generating/retrying/reviewing
   // → 2s polling(R-14 backend 每 1s flush partial),终态停轮询。
   const chapterDetail = useChapter(projectId, activeIndex)
+  const chapterVersions = useChapterVersions(projectId, activeIndex)
   const detail = chapterDetail.data
   const finalTextDb = detail?.final_text ?? ''
 
@@ -96,6 +102,9 @@ export function ChapterReviewPage() {
       qc.invalidateQueries({
         queryKey: ['projects', projectId, 'chapters', idx],
       })
+      qc.invalidateQueries({
+        queryKey: ['projects', projectId, 'chapters', idx, 'versions'],
+      })
       toast({
         title: `第 ${idx + 1} 章待审核`,
         variant: 'info',
@@ -109,6 +118,9 @@ export function ChapterReviewPage() {
       outline.refetch()
       qc.invalidateQueries({
         queryKey: ['projects', projectId, 'chapters'],
+      })
+      qc.invalidateQueries({
+        queryKey: ['projects', projectId, 'chapters', e.chapter_index, 'versions'],
       })
     } else if (e.type === 'chapter_failed') {
       setStreaming({ index: -1, text: '' })
@@ -362,9 +374,10 @@ export function ChapterReviewPage() {
                 )}
               </TabsContent>
               <TabsContent value="versions">
-                <Card>
-                  本期后端尚未提供历史版本端点。重写后请等待新内容自然涌入
-                </Card>
+                <ChapterVersionsPanel
+                  versions={chapterVersions.data ?? []}
+                  loading={chapterVersions.isLoading}
+                />
               </TabsContent>
             </Tabs>
           ) : (
@@ -382,13 +395,89 @@ export function ChapterReviewPage() {
   )
 }
 
-// 简化的占位 Card 标签(只在 versions tab 用)
-function Card({ children }: { children: React.ReactNode }) {
+function ChapterVersionsPanel({
+  versions,
+  loading,
+}: {
+  versions: ChapterVersionDTO[]
+  loading: boolean
+}) {
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (versions.length === 0) {
+      setSelectedId(null)
+      return
+    }
+    if (!versions.some((item) => item.id === selectedId)) {
+      setSelectedId(versions[0].id)
+    }
+  }, [selectedId, versions])
+
+  if (loading) {
+    return (
+      <div
+        role="status"
+        className="flex min-h-40 items-center justify-center rounded-lg border border-dashed border-border bg-muted/30 text-sm text-muted-foreground"
+      >
+        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+        加载历史版本…
+      </div>
+    )
+  }
+
+  if (versions.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed border-border bg-muted/30 p-6 text-center text-sm text-muted-foreground">
+        本章还没有可回溯的历史版本
+      </div>
+    )
+  }
+
+  const selected = versions.find((item) => item.id === selectedId) ?? versions[0]
+
   return (
-    <div className="rounded-lg border border-dashed border-border bg-muted/30 p-6 text-center text-sm text-muted-foreground">
-      {children}
+    <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
+      <div className="overflow-hidden rounded-lg border border-border bg-background">
+        {versions.map((version) => (
+          <button
+            key={version.id}
+            type="button"
+            onClick={() => setSelectedId(version.id)}
+            className={`flex w-full flex-col items-start gap-1 border-b border-border px-4 py-3 text-left text-sm last:border-b-0 hover:bg-muted/50 ${
+              version.id === selected.id ? 'bg-muted' : ''
+            }`}
+          >
+            <span className="flex w-full items-center justify-between gap-2">
+              <span className="font-medium text-foreground">
+                版本 {version.version}
+              </span>
+              {version.abandoned && (
+                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-800">
+                  已废弃
+                </span>
+              )}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {formatVersionTime(version.created_at)}
+            </span>
+            {version.feedback_in && (
+              <span className="line-clamp-2 text-xs text-muted-foreground">
+                {version.feedback_in}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+      <ChapterPreview markdown={selected.body_markdown} />
     </div>
   )
+}
+
+function formatVersionTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', { hour12: false })
 }
 
 function ChapterModelPicker({

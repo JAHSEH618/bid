@@ -10,6 +10,7 @@
       → retry_failed_chapter_task;chapter failed → retrying 中间态;
         失败补偿全包(回 failed,释放 slot)。retry_count=0 / abandoned 由 worker 做。
 """
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -21,10 +22,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import get_current_user, get_db
-from ..models import Chapter, Run, User
+from ..models import Chapter, ChapterVersion, Run, User
 from ..schemas.chapters import (
     ChapterDetailResponse,
     ChapterModelUpdateRequest,
+    ChapterVersionResponse,
     ReviewRequest,
 )
 from ..services.concurrency import (
@@ -51,10 +53,7 @@ def _normalize_selected_model(model: str | None, user: User) -> str | None:
 
 async def _get_active_run(db: AsyncSession, project_id: int) -> Run:
     row = await db.execute(
-        select(Run)
-        .where(Run.project_id == project_id)
-        .order_by(Run.started_at.desc())
-        .limit(1)
+        select(Run).where(Run.project_id == project_id).order_by(Run.started_at.desc()).limit(1)
     )
     run = row.scalar_one_or_none()
     if run is None:
@@ -91,11 +90,7 @@ async def get_chapter_detail(
     run = await _get_active_run(db, project_id)
 
     chapter = (
-        await db.execute(
-            select(Chapter).where(
-                Chapter.run_id == run.id, Chapter.index == idx
-            )
-        )
+        await db.execute(select(Chapter).where(Chapter.run_id == run.id, Chapter.index == idx))
     ).scalar_one_or_none()
     if chapter is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
@@ -103,9 +98,7 @@ async def get_chapter_detail(
     # current_version_id:取该 chapter 最新 ChapterVersion 行(MAX(version))
     cv_row = await db.execute(
         sa.text(
-            "SELECT id FROM chapter_versions "
-            "WHERE chapter_id=:c "
-            "ORDER BY version DESC LIMIT 1"
+            "SELECT id FROM chapter_versions WHERE chapter_id=:c ORDER BY version DESC LIMIT 1"
         ),
         {"c": chapter.id},
     )
@@ -123,6 +116,33 @@ async def get_chapter_detail(
         current_version_id=current_version_id,
         updated_at=chapter.created_at,  # 没有 onupdate;暂用 created_at
     )
+
+
+@router.get(
+    "/{project_id}/chapters/{idx}/versions",
+    response_model=list[ChapterVersionResponse],
+)
+async def list_chapter_versions(
+    project_id: int,
+    idx: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> list[ChapterVersion]:
+    """返回单章历史版本,供 P5 历史版本模式查看与回溯。"""
+    run = await _get_active_run(db, project_id)
+
+    chapter = (
+        await db.execute(select(Chapter).where(Chapter.run_id == run.id, Chapter.index == idx))
+    ).scalar_one_or_none()
+    if chapter is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
+
+    rows = await db.execute(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter.id)
+        .order_by(ChapterVersion.version.desc())
+    )
+    return list(rows.scalars().all())
 
 
 @router.patch("/{project_id}/chapters/{idx}/model")
@@ -144,14 +164,18 @@ async def update_chapter_model(
     run = await _get_active_run(db, project_id)
 
     chapter = (
-        await db.execute(
-            sa.text(
-                "SELECT id, status FROM chapters "
-                "WHERE run_id=:r AND index=:i FOR UPDATE"
-            ),
-            {"r": run.id, "i": idx},
+        (
+            await db.execute(
+                sa.text(
+                    "SELECT id, status, model_snapshot FROM chapters "
+                    "WHERE run_id=:r AND index=:i FOR UPDATE"
+                ),
+                {"r": run.id, "i": idx},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if chapter is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
     if chapter["status"] not in ("pending", "awaiting_review", "failed"):
@@ -160,10 +184,23 @@ async def update_chapter_model(
             f"chapter is {chapter['status']}, model can only be changed before generation or rewrite",
         )
 
+    clear_prefetch = chapter["status"] == "pending" and selected != chapter["model_snapshot"]
     await db.execute(
-        sa.text("UPDATE chapters SET model_snapshot=:m WHERE id=:c"),
-        {"m": selected, "c": chapter["id"]},
+        sa.text(
+            "UPDATE chapters SET model_snapshot=:m, "
+            "final_text=CASE WHEN :clear_prefetch THEN NULL ELSE final_text END "
+            "WHERE id=:c"
+        ),
+        {"m": selected, "clear_prefetch": clear_prefetch, "c": chapter["id"]},
     )
+    if clear_prefetch:
+        await db.execute(
+            sa.text(
+                "UPDATE chapter_versions SET abandoned=true "
+                "WHERE chapter_id=:c AND decision IS NULL AND abandoned=false"
+            ),
+            {"c": chapter["id"]},
+        )
     await db.commit()
     return {"ok": True, "chapter_model": selected}
 
@@ -183,19 +220,21 @@ async def generate_chapter(
     run = await _get_active_run(db, project_id)
 
     current = (
-        await db.execute(
-            sa.text(
-                "SELECT id, index, status FROM chapters "
-                "WHERE run_id=:r AND status NOT IN ('approved','skipped') "
-                "ORDER BY index ASC LIMIT 1"
-            ),
-            {"r": run.id},
+        (
+            await db.execute(
+                sa.text(
+                    "SELECT id, index, status FROM chapters "
+                    "WHERE run_id=:r AND status NOT IN ('approved','skipped') "
+                    "ORDER BY index ASC LIMIT 1"
+                ),
+                {"r": run.id},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if current is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "no pending chapter to generate"
-        )
+        raise HTTPException(status.HTTP_409_CONFLICT, "no pending chapter to generate")
     if current["index"] != idx:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -211,9 +250,7 @@ async def generate_chapter(
     try:
         result = await try_acquire_project_slot(project_id)
         if result.reason == "already_active":
-            raise HTTPException(
-                status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试"
-            )
+            raise HTTPException(status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试")
         if not result.acquired:
             raise HTTPException(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -224,9 +261,7 @@ async def generate_chapter(
 
         arq_pool = getattr(request.app.state, "arq_pool", None)
         if arq_pool is None:
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
-            )
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化")
 
         await arq_pool.enqueue_job(
             "resume_review_task",
@@ -269,22 +304,21 @@ async def review_chapter(
 ) -> dict[str, bool]:
     """⭐ D-I + D-AD + D-AO + D-AR + D-AC。"""
     if body.decision == "revise" and not (body.feedback or "").strip():
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "revise must include feedback"
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "revise must include feedback")
 
     run = await _get_active_run(db, project_id)
 
     # 行锁 + 状态校验
     chapter = (
-        await db.execute(
-            sa.text(
-                "SELECT id, status FROM chapters "
-                "WHERE run_id=:r AND index=:i FOR UPDATE"
-            ),
-            {"r": run.id, "i": idx},
+        (
+            await db.execute(
+                sa.text("SELECT id, status FROM chapters WHERE run_id=:r AND index=:i FOR UPDATE"),
+                {"r": run.id, "i": idx},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if chapter is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
     if chapter["status"] != "awaiting_review":
@@ -296,10 +330,7 @@ async def review_chapter(
     chapter_id = chapter["id"]
     # ⭐ D-AD 中间态 + D-AR processing_started_at
     await db.execute(
-        sa.text(
-            "UPDATE chapters SET status='reviewing', "
-            "processing_started_at=NOW() WHERE id=:c"
-        ),
+        sa.text("UPDATE chapters SET status='reviewing', processing_started_at=NOW() WHERE id=:c"),
         {"c": chapter_id},
     )
     await db.commit()
@@ -308,9 +339,7 @@ async def review_chapter(
     try:
         result = await try_acquire_project_slot(project_id)
         if result.reason == "already_active":
-            raise HTTPException(
-                status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试"
-            )
+            raise HTTPException(status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试")
         if not result.acquired:
             raise HTTPException(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -321,9 +350,7 @@ async def review_chapter(
 
         arq_pool = getattr(request.app.state, "arq_pool", None)
         if arq_pool is None:
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
-            )
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化")
 
         await arq_pool.enqueue_job(
             "resume_review_task",
@@ -369,9 +396,7 @@ async def review_chapter(
             {"c": chapter_id},
         )
         await db.commit()
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "审核处理异常,请稍后重试"
-        ) from e
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "审核处理异常,请稍后重试") from e
 
     # ⭐ D-AC:ReviewEvent 由 worker 入口写,API 不再写
     return {"ok": True}
@@ -392,14 +417,15 @@ async def retry_chapter(
     run = await _get_active_run(db, project_id)
 
     chapter = (
-        await db.execute(
-            sa.text(
-                "SELECT id, status FROM chapters "
-                "WHERE run_id=:r AND index=:i FOR UPDATE"
-            ),
-            {"r": run.id, "i": idx},
+        (
+            await db.execute(
+                sa.text("SELECT id, status FROM chapters WHERE run_id=:r AND index=:i FOR UPDATE"),
+                {"r": run.id, "i": idx},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if chapter is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
     if chapter["status"] != "failed":
@@ -410,10 +436,7 @@ async def retry_chapter(
 
     chapter_id = chapter["id"]
     await db.execute(
-        sa.text(
-            "UPDATE chapters SET status='retrying', "
-            "processing_started_at=NOW() WHERE id=:c"
-        ),
+        sa.text("UPDATE chapters SET status='retrying', processing_started_at=NOW() WHERE id=:c"),
         {"c": chapter_id},
     )
     await db.commit()
@@ -422,9 +445,7 @@ async def retry_chapter(
     try:
         result = await try_acquire_project_slot(project_id)
         if result.reason == "already_active":
-            raise HTTPException(
-                status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试"
-            )
+            raise HTTPException(status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试")
         if not result.acquired:
             raise HTTPException(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -435,9 +456,7 @@ async def retry_chapter(
 
         arq_pool = getattr(request.app.state, "arq_pool", None)
         if arq_pool is None:
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
-            )
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化")
 
         await arq_pool.enqueue_job(
             "retry_failed_chapter_task",
@@ -479,8 +498,6 @@ async def retry_chapter(
             {"c": chapter_id},
         )
         await db.commit()
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "重试处理异常,请稍后重试"
-        ) from e
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "重试处理异常,请稍后重试") from e
 
     return {"ok": True}

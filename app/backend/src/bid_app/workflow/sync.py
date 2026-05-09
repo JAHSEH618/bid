@@ -16,6 +16,7 @@ API:
   写 ReviewEvent
 - ``publish_event(project_id, type_, **payload)`` — SSE 包装,失败不传播
 """
+
 from __future__ import annotations
 
 from typing import Any, cast
@@ -51,11 +52,7 @@ def _build_update_sql(fields: dict[str, Any]) -> str:
 
     白名单限制 + 字典 key 必须是 Python 标识符(防异常字符)。
     """
-    bad = [
-        k
-        for k in fields
-        if k not in _CHAPTER_SYNC_ALLOWED or not k.isidentifier()
-    ]
+    bad = [k for k in fields if k not in _CHAPTER_SYNC_ALLOWED or not k.isidentifier()]
     if bad:
         raise ValueError(f"sync_chapter_to_db: disallowed fields: {bad}")
     set_clause = ", ".join(f"{k}=:{k}" for k in fields)
@@ -197,9 +194,7 @@ async def get_latest_chapter_version_text(
 
     async with session_factory() as s:
         chapter_id_row = await s.execute(
-            select(Chapter.id).where(
-                Chapter.run_id == run_id, Chapter.index == index
-            )
+            select(Chapter.id).where(Chapter.run_id == run_id, Chapter.index == index)
         )
         chapter_id = chapter_id_row.scalar_one_or_none()
         if chapter_id is None:
@@ -212,6 +207,48 @@ async def get_latest_chapter_version_text(
             .limit(1)
         )
         return row.scalar_one_or_none()
+
+
+async def update_latest_chapter_version_text(
+    run_id: int,
+    index: int,
+    body_markdown: str,
+) -> None:
+    """把已合并后的完整章节写回章节快照和最新版本。
+
+    write_chapter 只能拿到 LLM-2 正文;可视化图表由后续 merge_chapter 插入。
+    P5 审核页和历史版本都应该看到合并后的完整 Markdown,所以在
+    human_review interrupt 前用本 helper 覆盖最新版本内容。
+    """
+    from sqlalchemy import select, update
+
+    from ..models import Chapter, ChapterVersion
+
+    async with session_factory() as s, s.begin():
+        chapter_id_row = await s.execute(
+            select(Chapter.id).where(Chapter.run_id == run_id, Chapter.index == index)
+        )
+        chapter_id = chapter_id_row.scalar_one_or_none()
+        if chapter_id is None:
+            return
+
+        await s.execute(
+            update(Chapter).where(Chapter.id == chapter_id).values(final_text=body_markdown)
+        )
+
+        version_id_row = await s.execute(
+            select(ChapterVersion.id)
+            .where(ChapterVersion.chapter_id == chapter_id)
+            .order_by(ChapterVersion.version.desc())
+            .limit(1)
+        )
+        version_id = version_id_row.scalar_one_or_none()
+        if version_id is not None:
+            await s.execute(
+                update(ChapterVersion)
+                .where(ChapterVersion.id == version_id)
+                .values(body_markdown=body_markdown)
+            )
 
 
 async def save_chapter_version(
@@ -230,21 +267,16 @@ async def save_chapter_version(
 
     async with session_factory() as s, s.begin():
         chapter_id_row = await s.execute(
-            sa.select(Chapter.id).where(
-                Chapter.run_id == run_id, Chapter.index == index
-            )
+            sa.select(Chapter.id).where(Chapter.run_id == run_id, Chapter.index == index)
         )
         chapter_id = chapter_id_row.scalar_one_or_none()
         if chapter_id is None:
-            log.warning(
-                "save_chapter_version_chapter_missing", run_id=run_id, index=index
-            )
+            log.warning("save_chapter_version_chapter_missing", run_id=run_id, index=index)
             return None
 
         next_version_row = await s.execute(
             sa.text(
-                "SELECT COALESCE(MAX(version), 0) + 1 "
-                "FROM chapter_versions WHERE chapter_id=:c"
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM chapter_versions WHERE chapter_id=:c"
             ),
             {"c": chapter_id},
         )
@@ -266,8 +298,7 @@ async def save_chapter_version(
 # ``worker/tasks.py:retry_failed_chapter_task``(嵌入 ReviewEvent + chapter status
 # 同事务)使用,WHERE 子句保持一致以避免语义漂移。
 _MARK_VERSIONS_ABANDONED_SQL = (
-    "UPDATE chapter_versions SET abandoned=true "
-    "WHERE chapter_id=:c AND abandoned=false"
+    "UPDATE chapter_versions SET abandoned=true WHERE chapter_id=:c AND abandoned=false"
 )
 
 
@@ -275,9 +306,7 @@ async def _mark_chapter_versions_abandoned_in_session(
     session: AsyncSession, chapter_id: int
 ) -> int:
     """在调用方提供的 session 内执行 abandon SQL(不 commit,不开 transaction)。"""
-    result = await session.execute(
-        sa.text(_MARK_VERSIONS_ABANDONED_SQL), {"c": chapter_id}
-    )
+    result = await session.execute(sa.text(_MARK_VERSIONS_ABANDONED_SQL), {"c": chapter_id})
     # AsyncSession.execute 在 stub 里返 ``Result[Any]``;DML 实际是 CursorResult,
     # 有 rowcount。cast 一下让 mypy 收敛。
     return cast(CursorResult[Any], result).rowcount or 0

@@ -1,4 +1,5 @@
 """Pydantic v2 IO schemas — chapters 相关。"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -14,6 +15,19 @@ class ReviewRequest(BaseModel):
 
 class ChapterModelUpdateRequest(BaseModel):
     chapter_model: str | None = Field(None, max_length=128)
+
+
+class ChapterVersionResponse(BaseModel):
+    id: int
+    chapter_id: int
+    version: int
+    body_markdown: str
+    feedback_in: str | None
+    decision: str | None
+    abandoned: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class ChapterDetailResponse(BaseModel):
