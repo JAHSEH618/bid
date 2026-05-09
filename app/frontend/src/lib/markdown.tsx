@@ -134,11 +134,7 @@ export function MarkdownRenderer({
             const content = String(children ?? '').replace(/\n$/, '')
             if (lang === 'mermaid') {
               if (!renderMermaid) {
-                return (
-                  <code className={codeClassName} {...props}>
-                    {children}
-                  </code>
-                )
+                return <DeferredMermaid />
               }
               return <Mermaid code={content.trim()} />
             }
@@ -152,6 +148,17 @@ export function MarkdownRenderer({
       >
         {markdown}
       </ReactMarkdown>
+    </div>
+  )
+}
+
+function DeferredMermaid() {
+  return (
+    <div
+      role="status"
+      className="my-4 rounded-md border border-dashed border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-600"
+    >
+      图表正在生成,完整输出后自动渲染
     </div>
   )
 }
