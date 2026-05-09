@@ -29,7 +29,8 @@ RUN npm config set registry "${NODE_PACKAGE_REGISTRY}" \
 # ──── Stage 3: 后端运行时 ────
 FROM python:3.12-slim-bookworm AS runtime
 
-ARG DEBIAN_APT_MIRROR=https://mirrors.aliyun.com/debian
+ARG DEBIAN_APT_MIRROR=http://mirrors.cloud.tencent.com/debian
+ARG DEBIAN_SECURITY_APT_MIRROR=http://mirrors.cloud.tencent.com/debian-security
 ARG PYTHON_PACKAGE_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 
 ENV TZ=Asia/Shanghai \
@@ -42,8 +43,12 @@ ENV TZ=Asia/Shanghai \
     UV_DEFAULT_INDEX=${PYTHON_PACKAGE_INDEX_URL}
 
 RUN sed -i \
+        -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_APT_MIRROR}|g" \
+        -e "s|https://deb.debian.org/debian-security|${DEBIAN_SECURITY_APT_MIRROR}|g" \
+        -e "s|http://security.debian.org/debian-security|${DEBIAN_SECURITY_APT_MIRROR}|g" \
+        -e "s|https://security.debian.org/debian-security|${DEBIAN_SECURITY_APT_MIRROR}|g" \
         -e "s|http://deb.debian.org/debian|${DEBIAN_APT_MIRROR}|g" \
-        -e "s|http://security.debian.org/debian-security|${DEBIAN_APT_MIRROR}-security|g" \
+        -e "s|https://deb.debian.org/debian|${DEBIAN_APT_MIRROR}|g" \
         /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
