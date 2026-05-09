@@ -19,8 +19,10 @@ RUN pnpm build
 # ──── Stage 2: Mermaid CLI(Node 22) ────
 FROM node:22-bookworm-slim AS mermaid-cli
 ARG NODE_PACKAGE_REGISTRY
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_SKIP_DOWNLOAD=true
 RUN npm config set registry "${NODE_PACKAGE_REGISTRY}" \
+    && npm config set puppeteer_skip_download true \
     && npm install -g @mermaid-js/mermaid-cli@11.4.0 \
     && mmdc --version
 
@@ -34,6 +36,7 @@ ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_SKIP_DOWNLOAD=true \
     PIP_INDEX_URL=${PYTHON_PACKAGE_INDEX_URL} \
     UV_INDEX_URL=${PYTHON_PACKAGE_INDEX_URL} \
     UV_DEFAULT_INDEX=${PYTHON_PACKAGE_INDEX_URL}
