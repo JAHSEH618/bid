@@ -4,7 +4,7 @@
 //   - GET  /api/projects/{id}/chapters/{idx}          ChapterDetailResponse(R-15 commit 7dfc2fe)
 //   - GET  /api/projects/{id}/chapters/{idx}/versions 历史版本列表
 //   - PATCH /api/projects/{id}/chapters/{idx}/model   {chapter_model} → {ok}
-//   - POST /api/projects/{id}/chapters/{idx}/generate {parallel?} → {ok}
+//   - POST /api/projects/{id}/chapters/{idx}/generate → {ok}
 //   - POST /api/projects/{id}/chapters/{idx}/review   {decision, feedback?} → {ok}
 //   - POST /api/projects/{id}/chapters/{idx}/retry    failed → retrying      → {ok}
 //
@@ -115,17 +115,14 @@ export function useGenerateChapter() {
     mutationFn: ({
       projectId,
       index,
-      parallel,
     }: {
       projectId: number
       index: number
-      parallel?: boolean
     }) =>
       apiFetch<{ ok: boolean }>(
         `/api/projects/${projectId}/chapters/${index}/generate`,
         {
           method: 'POST',
-          body: JSON.stringify({ parallel: Boolean(parallel) }),
         },
       ),
     onSuccess: (_data, vars) => {

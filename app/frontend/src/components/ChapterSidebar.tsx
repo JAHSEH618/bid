@@ -117,6 +117,10 @@ export function ChapterSidebar({
         {chapters.map((ch) => {
           const active = ch.index === currentIndex
           const isActive = ACTIVE_STATUSES.has(ch.status)
+          const statusLabel =
+            ch.status === 'pending' && ch.final_text
+              ? '正文已生成'
+              : STATUS_LABEL[ch.status]
           return (
             <li key={ch.id}>
               <button
@@ -165,7 +169,7 @@ export function ChapterSidebar({
                           className="inline-block h-1 w-1 animate-pulse-soft rounded-full bg-current"
                         />
                       )}
-                      {STATUS_LABEL[ch.status]}
+                      {statusLabel}
                     </Badge>
                     {ch.retry_count != null && ch.retry_count > 0 && (
                       <span className="text-[10px] text-muted-foreground">

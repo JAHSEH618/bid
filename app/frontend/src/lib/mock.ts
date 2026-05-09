@@ -597,18 +597,13 @@ function route(ctx: ResolveContext): unknown {
       if (ch.status !== 'pending') {
         throw apiError(409, { detail: `chapter is ${ch.status}` })
       }
-      const b = ctx.body as { parallel?: boolean } | null
-      ch.status = 'generating'
-      if (b?.parallel) {
-        let started = 1
-        for (const next of list.slice(idx + 1)) {
-          if (started >= 3) break
-          if (next.status === 'pending') {
-            next.status = 'generating'
-            started += 1
-          }
-        }
+      const active = list.filter(
+        (item) => item.status === 'generating' || item.status === 'retrying',
+      ).length
+      if (active >= 3) {
+        throw apiError(409, { detail: `正文生成中的章节已达上限(${active}/3)` })
       }
+      ch.status = 'generating'
       return { ok: true }
     }
     if (sub === '/retry' && method === 'POST') {
@@ -663,6 +658,7 @@ function route(ctx: ResolveContext): unknown {
         project_id: pid,
         run_id: chs.length > 0 ? pid * 10 : null,
         status: proj.status,
+        max_concurrent_chapter_generations: 3,
         chapters: chs.map((c) => ({
           id: c.id,
           title: c.title,

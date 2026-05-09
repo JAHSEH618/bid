@@ -21,6 +21,7 @@ export type ProjectEventType =
   | 'chapter_started'
   | 'chapter_picked'
   | 'chapter_ready_to_generate'
+  | 'chapter_prefetched'
   | 'chapter_token'
   | 'chapter_visuals_ready'
   | 'awaiting_review'

@@ -17,17 +17,17 @@ from typing import Annotated
 
 import sqlalchemy as sa
 import structlog
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import settings
 from ..deps import get_current_user, get_db
 from ..models import Chapter, ChapterVersion, Run, User
 from ..schemas.chapters import (
     ChapterDetailResponse,
     ChapterModelUpdateRequest,
     ChapterVersionResponse,
-    GenerateChapterRequest,
     ReviewRequest,
 )
 from ..services.concurrency import (
@@ -50,6 +50,14 @@ def _normalize_selected_model(model: str | None, user: User) -> str | None:
             f"model not in your model catalog: {selected}",
         )
     return selected
+
+
+def _chapter_generation_limit() -> int:
+    """单项目正文生成并发上限,环境变量可降不可升。"""
+    return max(1, min(3, int(settings.max_concurrent_chapter_generations or 1)))
+
+
+_GENERATION_SLOT_STATUSES = {"generating", "retrying"}
 
 
 async def _get_active_run(db: AsyncSession, project_id: int) -> Run:
@@ -216,73 +224,111 @@ async def generate_chapter(
     request: Request,
     _: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    body: Annotated[GenerateChapterRequest | None, Body()] = None,
 ) -> dict[str, bool]:
-    """从“本章模型已确认”暂停点恢复,触发当前 pending 章节正文生成。
+    """触发某个 pending 章节的正文生成。
 
-    ``parallel=true`` 只由用户点击"并行生成"时传入;普通生成不自动预生成后续章。
+    当前工作流章节继续走 LangGraph,生成完进入人工审核;非当前章节只生成
+    正文缓存,等流程推进到该章时复用。任意时刻同一项目占用正文生成槽的
+    章节数不能超过 ``max_concurrent_chapter_generations``。
     """
     run = await _get_active_run(db, project_id)
 
-    current = (
+    rows = (
         (
             await db.execute(
                 sa.text(
                     "SELECT id, index, status FROM chapters "
-                    "WHERE run_id=:r AND status NOT IN ('approved','skipped') "
-                    "ORDER BY index ASC LIMIT 1"
+                    "WHERE run_id=:r ORDER BY index ASC FOR UPDATE"
                 ),
                 {"r": run.id},
             )
         )
         .mappings()
-        .one_or_none()
+        .all()
     )
-    if current is None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "no pending chapter to generate")
-    if current["index"] != idx:
+    target = next((row for row in rows if row["index"] == idx), None)
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
+    if target["status"] != "pending":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"chapter {idx} is not current chapter; current is {current['index']}",
+            f"chapter is {target['status']}, only pending can be generated",
         )
-    if current["status"] != "pending":
+
+    active_count = sum(1 for row in rows if row["status"] in _GENERATION_SLOT_STATUSES)
+    limit = _chapter_generation_limit()
+    if active_count >= limit:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"chapter is {current['status']}, only pending can be generated",
+            f"正文生成中的章节已达上限({active_count}/{limit})",
         )
+
+    current = next(
+        (row for row in rows if row["status"] not in ("approved", "skipped")),
+        None,
+    )
+    is_current = current is not None and current["index"] == idx
+    chapter_id = int(target["id"])
+
+    # API 层先占用章节生成槽,避免多个快速点击在 worker 真正切 generating 前
+    # 同时通过阈值校验。
+    await db.execute(
+        sa.text(
+            "UPDATE chapters SET status='generating', "
+            "processing_started_at=NOW(), last_error=NULL "
+            "WHERE id=:c"
+        ),
+        {"c": chapter_id},
+    )
+    await db.commit()
 
     acquired_token: str | None = None
     try:
-        result = await try_acquire_project_slot(project_id)
-        if result.reason == "already_active":
-            raise HTTPException(status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试")
-        if not result.acquired:
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="系统繁忙(并发上限已达),请稍后重试",
-                headers={"Retry-After": "60"},
-            )
-        acquired_token = result.token
-
         arq_pool = getattr(request.app.state, "arq_pool", None)
         if arq_pool is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化")
 
-        await arq_pool.enqueue_job(
-            "resume_review_task",
-            project_id=project_id,
-            run_id=run.id,
-            thread_id=run.langgraph_thread_id,
-            resume_payload={
-                "kind": "chapter_generate",
-                "chapter_index": idx,
-                "parallel": bool(body.parallel) if body else False,
-            },
-            slot_token=acquired_token,
-        )
+        if is_current:
+            result = await try_acquire_project_slot(project_id)
+            if result.reason == "already_active":
+                raise HTTPException(status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试")
+            if not result.acquired:
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="系统繁忙(并发上限已达),请稍后重试",
+                    headers={"Retry-After": "60"},
+                )
+            acquired_token = result.token
+
+            await arq_pool.enqueue_job(
+                "resume_review_task",
+                project_id=project_id,
+                run_id=run.id,
+                thread_id=run.langgraph_thread_id,
+                resume_payload={
+                    "kind": "chapter_generate",
+                    "chapter_index": idx,
+                },
+                slot_token=acquired_token,
+            )
+        else:
+            await arq_pool.enqueue_job(
+                "generate_chapter_body_task",
+                project_id=project_id,
+                run_id=run.id,
+                chapter_index=idx,
+            )
     except HTTPException:
         if acquired_token:
             await release_project_slot(project_id, acquired_token)
+        await db.execute(
+            sa.text(
+                "UPDATE chapters SET status='pending', processing_started_at=NULL "
+                "WHERE id=:c AND status='generating'"
+            ),
+            {"c": chapter_id},
+        )
+        await db.commit()
         raise
     except Exception as e:
         log.exception(
@@ -292,6 +338,14 @@ async def generate_chapter(
         )
         if acquired_token:
             await release_project_slot(project_id, acquired_token)
+        await db.execute(
+            sa.text(
+                "UPDATE chapters SET status='pending', processing_started_at=NULL "
+                "WHERE id=:c AND status='generating'"
+            ),
+            {"c": chapter_id},
+        )
+        await db.commit()
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, "章节生成入队异常,请稍后重试"
         ) from e
@@ -422,16 +476,20 @@ async def retry_chapter(
     """⭐ FR-4.7 + D-AD + D-AO + D-AR。仅 ``status='failed'`` 章节可触发。"""
     run = await _get_active_run(db, project_id)
 
-    chapter = (
+    rows = (
         (
             await db.execute(
-                sa.text("SELECT id, status FROM chapters WHERE run_id=:r AND index=:i FOR UPDATE"),
-                {"r": run.id, "i": idx},
+                sa.text(
+                    "SELECT id, index, status FROM chapters "
+                    "WHERE run_id=:r ORDER BY index ASC FOR UPDATE"
+                ),
+                {"r": run.id},
             )
         )
         .mappings()
-        .one_or_none()
+        .all()
     )
+    chapter = next((row for row in rows if row["index"] == idx), None)
     if chapter is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
     if chapter["status"] != "failed":
@@ -440,7 +498,72 @@ async def retry_chapter(
             f"chapter is {chapter['status']}, not failed",
         )
 
+    active_count = sum(1 for row in rows if row["status"] in _GENERATION_SLOT_STATUSES)
+    limit = _chapter_generation_limit()
+    if active_count >= limit:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"正文生成中的章节已达上限({active_count}/{limit})",
+        )
+
+    current = next(
+        (row for row in rows if row["status"] not in ("approved", "skipped")),
+        None,
+    )
+    is_current = current is not None and current["index"] == idx
     chapter_id = chapter["id"]
+
+    if not is_current:
+        await db.execute(
+            sa.text(
+                "UPDATE chapters SET status='generating', "
+                "processing_started_at=NOW(), last_error=NULL "
+                "WHERE id=:c"
+            ),
+            {"c": chapter_id},
+        )
+        await db.commit()
+
+        try:
+            arq_pool = getattr(request.app.state, "arq_pool", None)
+            if arq_pool is None:
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化")
+            await arq_pool.enqueue_job(
+                "generate_chapter_body_task",
+                project_id=project_id,
+                run_id=run.id,
+                chapter_index=idx,
+                reviewer_id=user.id,
+                chapter_id=chapter_id,
+            )
+        except HTTPException:
+            await db.execute(
+                sa.text(
+                    "UPDATE chapters SET status='failed', processing_started_at=NULL "
+                    "WHERE id=:c AND status='generating'"
+                ),
+                {"c": chapter_id},
+            )
+            await db.commit()
+            raise
+        except Exception as e:
+            log.exception(
+                "retry_body_generation_unexpected_error",
+                project_id=project_id,
+                chapter_id=chapter_id,
+            )
+            await db.execute(
+                sa.text(
+                    "UPDATE chapters SET status='failed', processing_started_at=NULL "
+                    "WHERE id=:c AND status='generating'"
+                ),
+                {"c": chapter_id},
+            )
+            await db.commit()
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "重试处理异常,请稍后重试") from e
+
+        return {"ok": True}
+
     await db.execute(
         sa.text("UPDATE chapters SET status='retrying', processing_started_at=NOW() WHERE id=:c"),
         {"c": chapter_id},

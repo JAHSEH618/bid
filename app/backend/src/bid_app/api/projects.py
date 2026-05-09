@@ -507,6 +507,9 @@ async def get_outline(
         project_id=project.id,
         run_id=run.id if run else None,
         status=project.status,
+        max_concurrent_chapter_generations=max(
+            1, min(3, int(settings.max_concurrent_chapter_generations or 1))
+        ),
         chapters=chapters,
     )
 

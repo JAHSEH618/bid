@@ -183,6 +183,94 @@ async def build_initial_state(project_id: int, run_id: int) -> WorkflowState:
     }
 
 
+async def build_chapter_body_state(project_id: int, run_id: int) -> WorkflowState:
+    """构造单章正文预生成所需的最小 WorkflowState。"""
+    async with session_factory() as s:
+        project_row = await s.execute(
+            sa.text(
+                "SELECT pages_per_chapter, max_retry_per_chapter "
+                "FROM projects WHERE id=:p"
+            ),
+            {"p": project_id},
+        )
+        prj = project_row.one()
+
+        chapter_rows = (
+            await s.execute(
+                sa.text(
+                    "SELECT index, title, summary, key_points, target_pages, model_snapshot "
+                    "FROM chapters WHERE run_id=:r ORDER BY index ASC"
+                ),
+                {"r": run_id},
+            )
+        ).mappings().all()
+
+    docs = await extract_for_project(project_id)
+    chapters = [
+        {
+            "title": row["title"],
+            "summary": row["summary"],
+            "key_points": row["key_points"] or [],
+            "target_pages": int(row["target_pages"] or 3),
+            "chapter_model": row["model_snapshot"],
+        }
+        for row in chapter_rows
+    ]
+    return {
+        "project_id": project_id,
+        "run_id": run_id,
+        "tech_spec_md": docs.get("tech_spec_md", ""),
+        "scoring_md": docs.get("scoring_md", ""),
+        "template_md": docs.get("template_md", ""),
+        "pages_per_chapter": int(prj.pages_per_chapter or 3),
+        "max_retry_per_chapter": int(prj.max_retry_per_chapter or 3),
+        "chapters": chapters,
+        "current_index": 0,
+        "retry_count": 0,
+        "finalized_chapters": [],
+        "revision_feedback": "",
+    }
+
+
+async def _prepare_chapter_body_generation(run_id: int, chapter_index: int) -> int | None:
+    """确认章节仍占用 generation slot,并废弃旧的未审正文版本。"""
+    from ..workflow.sync import _mark_chapter_versions_abandoned_in_session
+
+    async with session_factory() as s:
+        row = (
+            await s.execute(
+                sa.text(
+                    "SELECT id, status FROM chapters "
+                    "WHERE run_id=:r AND index=:i FOR UPDATE"
+                ),
+                {"r": run_id, "i": chapter_index},
+            )
+        ).mappings().one_or_none()
+        if row is None:
+            return None
+        if row["status"] != "generating":
+            log.info(
+                "chapter_body_generation_no_longer_needed",
+                run_id=run_id,
+                chapter_index=chapter_index,
+                status=row["status"],
+            )
+            await s.commit()
+            return None
+
+        chapter_id = int(row["id"])
+        await _mark_chapter_versions_abandoned_in_session(s, chapter_id)
+        await s.execute(
+            sa.text(
+                "UPDATE chapters SET final_text=NULL, last_error=NULL "
+                "WHERE id=:c"
+            ),
+            {"c": chapter_id},
+        )
+        await s.commit()
+        return chapter_id
+
+
 async def _slot_lost_compensation(
     project_id: int,
     run_id: int,
@@ -454,6 +542,84 @@ async def resume_review_task(
         await wake_queued_projects(arq_pool)
 
 
+async def generate_chapter_body_task(
+    ctx: dict[str, Any],
+    *,
+    project_id: int,
+    run_id: int,
+    chapter_index: int,
+    reviewer_id: int | None = None,
+    chapter_id: int | None = None,
+) -> None:
+    """用户点选非当前章节时,只生成 LLM-2 正文缓存。"""
+    del ctx
+    try:
+        prepared_chapter_id = await _prepare_chapter_body_generation(
+            run_id, chapter_index
+        )
+        if prepared_chapter_id is None:
+            return
+
+        if reviewer_id is not None:
+            async with session_factory() as s:
+                s.add(
+                    ReviewEvent(
+                        chapter_id=chapter_id or prepared_chapter_id,
+                        reviewer_id=reviewer_id,
+                        decision="retry_body_generation",
+                    )
+                )
+                await s.commit()
+
+        from ..workflow.nodes.write_chapter import _prefetch_chapter_body
+        from ..workflow.resolve import resolve_api_key, resolve_user_id
+
+        state = await build_chapter_body_state(project_id, run_id)
+        if chapter_index >= len(state.get("chapters") or []):
+            raise RuntimeError(f"chapter index out of range: {chapter_index}")
+
+        api_key = await resolve_api_key(project_id, run_id=run_id)
+        user_id = await resolve_user_id(project_id)
+        await _prefetch_chapter_body(
+            state,
+            chapter_index,
+            api_key=api_key,
+            user_id=user_id,
+            failure_status="failed",
+        )
+    except Exception as e:
+        log.exception(
+            "generate_chapter_body_task_failed",
+            project_id=project_id,
+            run_id=run_id,
+            chapter_index=chapter_index,
+        )
+        try:
+            from ..workflow.sync import publish_event, sync_chapter_to_db
+
+            await sync_chapter_to_db(
+                run_id,
+                chapter_index,
+                status="failed",
+                processing_started_at=None,
+                last_error=str(e)[:4000],
+            )
+            await publish_event(
+                project_id,
+                "chapter_failed",
+                chapter_index=chapter_index,
+                reason=str(e),
+            )
+        except Exception:
+            log.exception(
+                "generate_chapter_body_task_compensation_failed",
+                project_id=project_id,
+                run_id=run_id,
+                chapter_index=chapter_index,
+            )
+        raise
+
+
 async def retry_failed_chapter_task(
     ctx: dict[str, Any],
     *,
@@ -477,7 +643,7 @@ async def retry_failed_chapter_task(
         return
 
     try:
-        # ⭐ D-AC + D-AD + FR-4.7:写 ReviewEvent + 把章节从 retrying → pending +
+        # ⭐ D-AC + D-AD + FR-4.7:写 ReviewEvent + 保持生成槽占用 +
         # 章节所有非 abandoned 版本标 abandoned=true(走 sync helper 单一信源)
         from ..workflow.sync import _mark_chapter_versions_abandoned_in_session
 
@@ -490,11 +656,12 @@ async def retry_failed_chapter_task(
                 )
             )
             await _mark_chapter_versions_abandoned_in_session(s, chapter_id)
-            # ⭐ D-BS:切 pending 同时写 processing_started_at
+            # ⭐ D-BS:重试接管后继续占用 generating slot,直到 write_chapter
+            # / human_review 闭合状态。
             await s.execute(
                 sa.text(
-                    "UPDATE chapters SET status='pending', retry_count=0, "
-                    "last_error=NULL, processing_started_at=NOW() "
+                    "UPDATE chapters SET status='generating', retry_count=0, "
+                    "final_text=NULL, last_error=NULL, processing_started_at=NOW() "
                     "WHERE id=:c AND status='retrying'"
                 ),
                 {"c": chapter_id},

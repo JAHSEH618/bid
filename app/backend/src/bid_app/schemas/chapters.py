@@ -17,10 +17,6 @@ class ChapterModelUpdateRequest(BaseModel):
     chapter_model: str | None = Field(None, max_length=128)
 
 
-class GenerateChapterRequest(BaseModel):
-    parallel: bool = False
-
-
 class ChapterVersionResponse(BaseModel):
     id: int
     chapter_id: int

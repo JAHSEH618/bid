@@ -29,6 +29,7 @@ from ..services.concurrency import (
 )
 from .lifecycle import on_shutdown, on_startup
 from .tasks import (
+    generate_chapter_body_task,
     generate_docx_task,
     resume_review_task,
     retry_failed_chapter_task,
@@ -45,6 +46,7 @@ class WorkerSettings:
         func(start_workflow_task, max_tries=1),
         func(resume_review_task, max_tries=1),
         func(retry_failed_chapter_task, max_tries=1),
+        func(generate_chapter_body_task, max_tries=1),
         func(generate_docx_task, max_tries=1),
     ]
 

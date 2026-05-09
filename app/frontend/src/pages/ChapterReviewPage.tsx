@@ -3,7 +3,6 @@ import { Link, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
   Bot,
-  ChevronsRight,
   FileCheck,
   History,
   Loader2,
@@ -48,6 +47,11 @@ export function ChapterReviewPage() {
   const qc = useQueryClient()
 
   const chapters = outline.data?.chapters ?? []
+  const maxChapterGenerations =
+    outline.data?.max_concurrent_chapter_generations ?? 3
+  const generatingCount = chapters.filter(
+    (c) => c.status === 'generating' || c.status === 'retrying',
+  ).length
 
   const [activeIndex, setActiveIndex] = useState<number>(0)
   useEffect(() => {
@@ -142,6 +146,21 @@ export function ChapterReviewPage() {
       })
     } else if (e.type === 'chapter_visuals_ready') {
       // 可视化建议已就绪,这里不做特殊处理
+    } else if (e.type === 'chapter_prefetched') {
+      const idx = e.chapter_index ?? -1
+      outline.refetch()
+      if (idx >= 0) {
+        qc.invalidateQueries({
+          queryKey: ['projects', projectId, 'chapters', idx],
+        })
+        qc.invalidateQueries({
+          queryKey: ['projects', projectId, 'chapters', idx, 'versions'],
+        })
+        toast({
+          title: `第 ${idx + 1} 章正文已生成`,
+          variant: 'success',
+        })
+      }
     } else if (e.type === 'chapter_ready_to_generate') {
       const idx = e.chapter_index ?? -1
       if (idx >= 0) setActiveIndex(idx)
@@ -160,6 +179,22 @@ export function ChapterReviewPage() {
   const activeChapter = chapters.find((c) => c.index === activeIndex)
   const activeChapterModel =
     detail?.chapter_model ?? activeChapter?.chapter_model ?? ''
+  const workflowCurrent = chapters.find(
+    (c) => c.status !== 'approved' && c.status !== 'skipped',
+  )
+  const isWorkflowCurrent = workflowCurrent?.index === activeChapter?.index
+  const hasGeneratedBody = Boolean(activeChapter?.final_text || finalTextDb)
+  const generationLimitReached = generatingCount >= maxChapterGenerations
+  const generateButtonLabel = hasGeneratedBody
+    ? isWorkflowCurrent
+      ? '进入审核'
+      : '重新生成正文'
+    : '生成正文'
+  const generateButtonTitle = generationLimitReached
+    ? `生成中章节已达上限 ${generatingCount}/${maxChapterGenerations}`
+    : isWorkflowCurrent
+      ? '生成当前章节正文并进入审核'
+      : '生成所选章节正文缓存'
   const [selectedModel, setSelectedModel] = useState('')
 
   useEffect(() => {
@@ -186,16 +221,15 @@ export function ChapterReviewPage() {
     }
   }
 
-  const submitGenerate = async (parallel = false) => {
+  const submitGenerate = async () => {
     if (!projectId || !activeChapter) return
     try {
       await generate.mutateAsync({
         projectId,
         index: activeChapter.index,
-        parallel,
       })
       toast({
-        title: parallel ? '已开始并行生成' : '已开始生成本章',
+        title: '已开始生成正文',
         variant: 'success',
       })
     } catch (err) {
@@ -217,6 +251,7 @@ export function ChapterReviewPage() {
   const candidates = [
     isStreaming ? streaming.text : '',
     readyText[activeIndex] ?? '',
+    activeChapter?.final_text ?? '',
     finalTextDb,
   ]
   const previewMarkdown = candidates.reduce(
@@ -328,6 +363,9 @@ export function ChapterReviewPage() {
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <span className="hidden rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-muted-foreground sm:inline-flex">
+              生成中 {generatingCount}/{maxChapterGenerations}
+            </span>
             {activeChapter && (
               <ChapterModelPicker
                 value={selectedModel}
@@ -340,36 +378,24 @@ export function ChapterReviewPage() {
               />
             )}
             {activeChapter?.status === 'pending' && (
-              <>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void submitGenerate(true)}
-                  disabled={generate.isPending || setChapterModel.isPending}
-                  className="shadow-sm"
-                  title="同时生成本章及后续待生成章节,最多 3 章"
-                >
-                  {generate.isPending ? (
-                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                  ) : (
-                    <ChevronsRight className="mr-1.5 h-4 w-4" />
-                  )}
-                  并行生成
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() => void submitGenerate(false)}
-                  disabled={generate.isPending || setChapterModel.isPending}
-                  className="shadow-sm"
-                >
-                  {generate.isPending ? (
-                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Play className="mr-1.5 h-4 w-4" />
-                  )}
-                  生成本章
-                </Button>
-              </>
+              <Button
+                size="sm"
+                onClick={() => void submitGenerate()}
+                disabled={
+                  generate.isPending ||
+                  setChapterModel.isPending ||
+                  generationLimitReached
+                }
+                className="shadow-sm"
+                title={generateButtonTitle}
+              >
+                {generate.isPending ? (
+                  <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="mr-1.5 h-4 w-4" />
+                )}
+                {generateButtonLabel}
+              </Button>
             )}
             {project.data.status === 'done' && (
               <Button asChild size="sm" className="shadow-sm">
@@ -590,7 +616,7 @@ function ChapterEmptyHint({ status }: { status: ChapterStatus }) {
         </span>
         <p className="text-sm font-medium text-foreground">等待生成</p>
         <p className="max-w-xs text-xs text-muted-foreground">
-          选择或沿用当前正文模型后,点击右上角「生成本章」
+          选择或沿用当前正文模型后,点击右上角「生成正文」
         </p>
       </div>
     )

@@ -132,6 +132,7 @@ class OutlineResponse(BaseModel):
     project_id: int
     run_id: int | None
     status: ProjectStatus
+    max_concurrent_chapter_generations: int
     chapters: list[OutlineChapterDTO]
 
 

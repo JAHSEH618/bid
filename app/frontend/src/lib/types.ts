@@ -97,6 +97,7 @@ export interface OutlineResponseDTO {
   project_id: number
   run_id: number | null
   status: ProjectStatus
+  max_concurrent_chapter_generations: number
   chapters: OutlineChapterDTO[]
 }
 
