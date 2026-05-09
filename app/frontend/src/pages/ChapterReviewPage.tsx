@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, Bot, FileCheck, History, Loader2, Play } from 'lucide-react'
+import {
+  ArrowLeft,
+  Bot,
+  ChevronsRight,
+  FileCheck,
+  History,
+  Loader2,
+  Play,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ChapterSidebar } from '@/components/ChapterSidebar'
@@ -178,14 +186,18 @@ export function ChapterReviewPage() {
     }
   }
 
-  const submitGenerate = async () => {
+  const submitGenerate = async (parallel = false) => {
     if (!projectId || !activeChapter) return
     try {
       await generate.mutateAsync({
         projectId,
         index: activeChapter.index,
+        parallel,
       })
-      toast({ title: '已开始生成本章', variant: 'success' })
+      toast({
+        title: parallel ? '已开始并行生成' : '已开始生成本章',
+        variant: 'success',
+      })
     } catch (err) {
       toast({
         title: '触发生成失败',
@@ -328,19 +340,36 @@ export function ChapterReviewPage() {
               />
             )}
             {activeChapter?.status === 'pending' && (
-              <Button
-                size="sm"
-                onClick={submitGenerate}
-                disabled={generate.isPending || setChapterModel.isPending}
-                className="shadow-sm"
-              >
-                {generate.isPending ? (
-                  <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                ) : (
-                  <Play className="mr-1.5 h-4 w-4" />
-                )}
-                生成本章
-              </Button>
+              <>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void submitGenerate(true)}
+                  disabled={generate.isPending || setChapterModel.isPending}
+                  className="shadow-sm"
+                  title="同时生成本章及后续待生成章节,最多 3 章"
+                >
+                  {generate.isPending ? (
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  ) : (
+                    <ChevronsRight className="mr-1.5 h-4 w-4" />
+                  )}
+                  并行生成
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => void submitGenerate(false)}
+                  disabled={generate.isPending || setChapterModel.isPending}
+                  className="shadow-sm"
+                >
+                  {generate.isPending ? (
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Play className="mr-1.5 h-4 w-4" />
+                  )}
+                  生成本章
+                </Button>
+              </>
             )}
             {project.data.status === 'done' && (
               <Button asChild size="sm" className="shadow-sm">

@@ -47,4 +47,4 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         )
 
     await sync_project_status(pid, "running")
-    return {}
+    return {"_prefetch_chapters": bool((payload or {}).get("parallel"))}

@@ -41,6 +41,8 @@ class WorkflowState(TypedDict, total=False):
     # update_state 写完成后清空。
     _pending_chapter_text: str
     _pending_visuals_json: str
+    # 仅用户明确选择"并行生成"时为 true,write_chapter 才预生成后续章节。
+    _prefetch_chapters: bool
 
     # === 输出 ===
     final_proposal: str | None

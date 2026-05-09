@@ -597,7 +597,18 @@ function route(ctx: ResolveContext): unknown {
       if (ch.status !== 'pending') {
         throw apiError(409, { detail: `chapter is ${ch.status}` })
       }
+      const b = ctx.body as { parallel?: boolean } | null
       ch.status = 'generating'
+      if (b?.parallel) {
+        let started = 1
+        for (const next of list.slice(idx + 1)) {
+          if (started >= 3) break
+          if (next.status === 'pending') {
+            next.status = 'generating'
+            started += 1
+          }
+        }
+      }
       return { ok: true }
     }
     if (sub === '/retry' && method === 'POST') {

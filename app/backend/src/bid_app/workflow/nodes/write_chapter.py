@@ -225,8 +225,8 @@ async def _prefetch_chapter_body(
 ) -> None:
     """提前生成后续章节正文,缓存到 chapters.final_text / chapter_versions。
 
-    该预生成不进入审核态,也不发布 token,只是让后续章节点击"生成本章"后
-    能跳过 LLM-2 正文阶段,继续补图表并进入人工审核。
+    该预生成只在用户明确点击"并行生成"时触发,不进入审核态,也不发布 token。
+    后续章节点击"生成本章"后会复用缓存正文,继续补图表并进入人工审核。
     """
     run_id = state.get("run_id")
     project_id = state["project_id"]
@@ -325,6 +325,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     user_id = await _resolve_user_id(project_id)
     retry_count = state.get("retry_count", 0)
     revision_feedback = state.get("revision_feedback") or ""
+    prefetch_requested = bool(state.get("_prefetch_chapters"))
 
     cached_body = await _load_prefetched_body(
         run_id,
@@ -340,7 +341,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             processing_started_at=datetime.now(UTC),
         )
         await publish_event(project_id, "chapter_started", chapter_index=current)
-        return {"_pending_chapter_text": cached_body}
+        return {"_pending_chapter_text": cached_body, "_prefetch_chapters": False}
 
     # ⭐ D-BF:切 generating 同时写 processing_started_at,让
     # cron `cleanup_stale_chapters` 在 worker 进程被 SIGKILL/OOM 直接死时
@@ -430,7 +431,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
 
     chapter_model = await resolve_chapter_model(project_id, run_id, current, chapter)
     prefetch_tasks: list[asyncio.Task[None]] = []
-    if retry_count == 0 and not revision_feedback.strip():
+    if prefetch_requested and retry_count == 0 and not revision_feedback.strip():
         prefetch_indices = await _prefetch_candidate_indices(
             run_id,
             current=current,
@@ -520,4 +521,4 @@ async def run(state: WorkflowState) -> dict[str, Any]:
                 index=current,
             )
 
-    return {"_pending_chapter_text": final_text}
+    return {"_pending_chapter_text": final_text, "_prefetch_chapters": False}

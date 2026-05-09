@@ -17,7 +17,7 @@ from typing import Annotated
 
 import sqlalchemy as sa
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ from ..schemas.chapters import (
     ChapterDetailResponse,
     ChapterModelUpdateRequest,
     ChapterVersionResponse,
+    GenerateChapterRequest,
     ReviewRequest,
 )
 from ..services.concurrency import (
@@ -215,8 +216,12 @@ async def generate_chapter(
     request: Request,
     _: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    body: Annotated[GenerateChapterRequest | None, Body()] = None,
 ) -> dict[str, bool]:
-    """从“本章模型已确认”暂停点恢复,触发当前 pending 章节正文生成。"""
+    """从“本章模型已确认”暂停点恢复,触发当前 pending 章节正文生成。
+
+    ``parallel=true`` 只由用户点击"并行生成"时传入;普通生成不自动预生成后续章。
+    """
     run = await _get_active_run(db, project_id)
 
     current = (
@@ -271,6 +276,7 @@ async def generate_chapter(
             resume_payload={
                 "kind": "chapter_generate",
                 "chapter_index": idx,
+                "parallel": bool(body.parallel) if body else False,
             },
             slot_token=acquired_token,
         )
