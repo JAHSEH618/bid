@@ -13,10 +13,15 @@ RUN pnpm build
 # ──── Stage 2: 后端运行时 ────
 FROM python:3.12-slim-bookworm AS runtime
 
+ARG PYTHON_PACKAGE_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+
 ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PIP_INDEX_URL=${PYTHON_PACKAGE_INDEX_URL} \
+    UV_INDEX_URL=${PYTHON_PACKAGE_INDEX_URL} \
+    UV_DEFAULT_INDEX=${PYTHON_PACKAGE_INDEX_URL}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pandoc \
@@ -50,7 +55,7 @@ COPY docker/mermaid-config.json /etc/mermaid-config.json
 COPY docker/puppeteer-config.json /etc/puppeteer-config.json
 COPY docker/mermaid.css /etc/mermaid.css
 
-RUN pip install --no-cache-dir uv
+RUN python -m pip install --no-cache-dir uv
 
 WORKDIR /app
 # Phase 1:仅装第三方依赖,缓存这一层(只在 pyproject.toml / uv.lock 变化时失效)。
