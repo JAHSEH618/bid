@@ -128,7 +128,9 @@ export function ReviewActions({
 
       <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
         <span className="text-xs text-muted-foreground">
-          {writing
+          {status === 'pending'
+            ? '章节等待生成,请先确认正文模型'
+            : writing
             ? '章节生成中,请等待…'
             : canReview
               ? '请审核内容后选择 通过 / 不通过 / 跳过'

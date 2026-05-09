@@ -20,6 +20,7 @@ export type ProjectEventType =
   // 章节循环
   | 'chapter_started'
   | 'chapter_picked'
+  | 'chapter_ready_to_generate'
   | 'chapter_token'
   | 'chapter_visuals_ready'
   | 'awaiting_review'
@@ -34,6 +35,7 @@ export type ProjectEventType =
 export interface ProjectEvent {
   type: ProjectEventType
   chapter_index?: number
+  chapter_title?: string
   delta?: string
   chapter_text?: string
   payload?: unknown

@@ -38,7 +38,7 @@ export function ChapterPreview({ markdown, isStreaming }: ChapterPreviewProps) {
       )}
       <div className="rounded-xl border border-border/70 bg-card px-6 py-5 shadow-sm">
         <div className="relative">
-          <MarkdownRenderer markdown={markdown} />
+          <MarkdownRenderer markdown={markdown} renderMermaid={!isStreaming} />
           {isStreaming && (
             <span
               aria-hidden="true"

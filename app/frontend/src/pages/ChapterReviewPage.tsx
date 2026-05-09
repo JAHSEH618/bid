@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, Bot, FileCheck, History, Loader2 } from 'lucide-react'
+import { ArrowLeft, Bot, FileCheck, History, Loader2, Play } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ChapterSidebar } from '@/components/ChapterSidebar'
@@ -9,6 +9,7 @@ import { ReviewActions } from '@/components/ReviewActions'
 import { useProject, useProjectOutline } from '@/api/projects'
 import {
   useChapter,
+  useGenerateChapter,
   useReviewChapter,
   useRetryChapter,
   useSetChapterModel,
@@ -27,6 +28,7 @@ export function ChapterReviewPage() {
   const outline = useProjectOutline(projectId)
   const review = useReviewChapter()
   const retry = useRetryChapter()
+  const generate = useGenerateChapter()
   const setChapterModel = useSetChapterModel()
   const modelConfig = useModelConfig()
   const { toast } = useToast()
@@ -69,6 +71,7 @@ export function ChapterReviewPage() {
     if (e.type === 'chapter_started' || e.type === 'chapter_picked') {
       // 流开始:buffer 用 DB 已有 partial 作种子(若已 hydrate)
       const idx = e.chapter_index ?? -1
+      if (idx >= 0) setActiveIndex(idx)
       const seed = idx === activeIndex ? finalTextDb : ''
       setStreaming({ index: idx, text: seed })
       project.refetch()
@@ -84,6 +87,7 @@ export function ChapterReviewPage() {
       )
     } else if (e.type === 'awaiting_review') {
       const idx = e.chapter_index ?? -1
+      if (idx >= 0) setActiveIndex(idx)
       if (e.chapter_text) {
         setReadyText((prev) => ({ ...prev, [idx]: e.chapter_text! }))
       }
@@ -118,6 +122,13 @@ export function ChapterReviewPage() {
       })
     } else if (e.type === 'chapter_visuals_ready') {
       // 可视化建议已就绪,这里不做特殊处理
+    } else if (e.type === 'chapter_ready_to_generate') {
+      const idx = e.chapter_index ?? -1
+      if (idx >= 0) setActiveIndex(idx)
+      outline.refetch()
+      qc.invalidateQueries({
+        queryKey: ['projects', projectId, 'chapters', idx],
+      })
     } else if (e.type === 'proposal_ready') {
       project.refetch()
       toast({ title: '全文已生成', variant: 'success' })
@@ -150,6 +161,23 @@ export function ChapterReviewPage() {
       toast({
         title: '模型保存失败',
         description: readApiError(err, '模型保存失败'),
+        variant: 'destructive',
+      })
+    }
+  }
+
+  const submitGenerate = async () => {
+    if (!projectId || !activeChapter) return
+    try {
+      await generate.mutateAsync({
+        projectId,
+        index: activeChapter.index,
+      })
+      toast({ title: '已开始生成本章', variant: 'success' })
+    } catch (err) {
+      toast({
+        title: '触发生成失败',
+        description: readApiError(err, '触发生成失败'),
         variant: 'destructive',
       })
     }
@@ -287,6 +315,21 @@ export function ChapterReviewPage() {
                 onChange={submitModelChange}
               />
             )}
+            {activeChapter?.status === 'pending' && (
+              <Button
+                size="sm"
+                onClick={submitGenerate}
+                disabled={generate.isPending || setChapterModel.isPending}
+                className="shadow-sm"
+              >
+                {generate.isPending ? (
+                  <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="mr-1.5 h-4 w-4" />
+                )}
+                生成本章
+              </Button>
+            )}
             {project.data.status === 'done' && (
               <Button asChild size="sm" className="shadow-sm">
                 <Link to={`/projects/${projectId}/proposal`}>
@@ -381,14 +424,14 @@ function ChapterModelPicker({
           : options[0] || ''
 
   return (
-    <label className="hidden items-center gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-xs shadow-sm lg:flex">
+    <label className="flex items-center gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-xs shadow-sm">
       <Bot className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
       <span className="whitespace-nowrap text-muted-foreground">正文模型</span>
       <select
         value={selected}
         onChange={(e) => void onChange(e.target.value)}
         disabled={!canChange || loading || options.length === 0}
-        className="h-7 w-[260px] rounded border border-input bg-background px-2 font-mono text-[11px] text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+        className="h-7 w-[180px] rounded border border-input bg-background px-2 font-mono text-[11px] text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60 sm:w-[260px]"
         aria-label="选择本章正文生成模型"
         title={
           canChange
@@ -429,7 +472,7 @@ function ChapterEmptyHint({ status }: { status: ChapterStatus }) {
         </span>
         <p className="text-sm font-medium text-foreground">等待生成</p>
         <p className="max-w-xs text-xs text-muted-foreground">
-          本章尚未轮到生成,请等待前序章节完成
+          选择或沿用当前正文模型后,点击右上角「生成本章」
         </p>
       </div>
     )

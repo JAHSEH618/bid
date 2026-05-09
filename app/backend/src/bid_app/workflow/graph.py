@@ -7,6 +7,7 @@ DAG 结构(11 节点 + END,与 §10.2 严格对齐)::
         → parse_outline
         → outline_review (interrupt — D-K)
         → pick_chapter
+        → chapter_generate_gate (interrupt — choose chapter model)
         → write_chapter (LLM-2)
         → gen_visuals (LLM-3)
         → merge_chapter (template only)
@@ -37,6 +38,7 @@ from langgraph.graph import END, StateGraph
 
 from .nodes import (
     assemble,
+    chapter_generate_gate,
     extract_documents,
     gen_visuals,
     generate_outline,
@@ -82,6 +84,7 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     g.add_node("parse_outline", parse_outline.run)
     g.add_node("outline_review", outline_review.run)  # ⭐ P4 interrupt(D-K)
     g.add_node("pick_chapter", pick_chapter.run)
+    g.add_node("chapter_generate_gate", chapter_generate_gate.run)
     g.add_node("write_chapter", write_chapter.run)
     g.add_node("gen_visuals", gen_visuals.run)
     g.add_node("merge_chapter", merge_chapter.run)
@@ -94,7 +97,8 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     g.add_edge("generate_outline", "parse_outline")
     g.add_edge("parse_outline", "outline_review")
     g.add_edge("outline_review", "pick_chapter")
-    g.add_edge("pick_chapter", "write_chapter")
+    g.add_edge("pick_chapter", "chapter_generate_gate")
+    g.add_edge("chapter_generate_gate", "write_chapter")
     g.add_edge("write_chapter", "gen_visuals")
     g.add_edge("gen_visuals", "merge_chapter")
     g.add_edge("merge_chapter", "human_review")

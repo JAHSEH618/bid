@@ -109,12 +109,17 @@ async function getMermaid(): Promise<MermaidModule> {
 export interface MarkdownRendererProps {
   markdown: string
   className?: string
+  renderMermaid?: boolean
 }
 
 // react-markdown wrapper:GFM 表格 + 原始 HTML(rehype-raw,经 rehype-sanitize 白名单清洗) +
 // mermaid 自渲(svg 经 DOMPurify SVG profile 清洗)。
 // IMPLEMENTATION_SPEC §16.4。
-export function MarkdownRenderer({ markdown, className }: MarkdownRendererProps) {
+export function MarkdownRenderer({
+  markdown,
+  className,
+  renderMermaid = true,
+}: MarkdownRendererProps) {
   return (
     <div className={cn('prose prose-slate max-w-none', className)}>
       <ReactMarkdown
@@ -128,6 +133,13 @@ export function MarkdownRenderer({ markdown, className }: MarkdownRendererProps)
             const lang = match?.[1]
             const content = String(children ?? '').replace(/\n$/, '')
             if (lang === 'mermaid') {
+              if (!renderMermaid) {
+                return (
+                  <code className={codeClassName} {...props}>
+                    {children}
+                  </code>
+                )
+              }
               return <Mermaid code={content.trim()} />
             }
             return (

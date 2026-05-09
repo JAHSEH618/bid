@@ -4,6 +4,8 @@
   · POST /api/projects/{id}/chapters/{idx}/review
       → resume_review_task(D-I);chapter awaiting_review → reviewing 中间态;
         失败补偿全包(回 awaiting_review,释放 slot)。ReviewEvent 由 worker 写。
+  · POST /api/projects/{id}/chapters/{idx}/generate
+      → resume_review_task;从章节生成确认 interrupt 恢复,进入 LLM-2。
   · POST /api/projects/{id}/chapters/{idx}/retry
       → retry_failed_chapter_task;chapter failed → retrying 中间态;
         失败补偿全包(回 failed,释放 slot)。retry_count=0 / abandoned 由 worker 做。
@@ -167,6 +169,93 @@ async def update_chapter_model(
 
 
 # ============== /review ==============
+
+
+@router.post("/{project_id}/chapters/{idx}/generate")
+async def generate_chapter(
+    project_id: int,
+    idx: int,
+    request: Request,
+    _: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, bool]:
+    """从“本章模型已确认”暂停点恢复,触发当前 pending 章节正文生成。"""
+    run = await _get_active_run(db, project_id)
+
+    current = (
+        await db.execute(
+            sa.text(
+                "SELECT id, index, status FROM chapters "
+                "WHERE run_id=:r AND status NOT IN ('approved','skipped') "
+                "ORDER BY index ASC LIMIT 1"
+            ),
+            {"r": run.id},
+        )
+    ).mappings().one_or_none()
+    if current is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "no pending chapter to generate"
+        )
+    if current["index"] != idx:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"chapter {idx} is not current chapter; current is {current['index']}",
+        )
+    if current["status"] != "pending":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"chapter is {current['status']}, only pending can be generated",
+        )
+
+    acquired_token: str | None = None
+    try:
+        result = await try_acquire_project_slot(project_id)
+        if result.reason == "already_active":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "该项目已有任务在执行,请稍后重试"
+            )
+        if not result.acquired:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="系统繁忙(并发上限已达),请稍后重试",
+                headers={"Retry-After": "60"},
+            )
+        acquired_token = result.token
+
+        arq_pool = getattr(request.app.state, "arq_pool", None)
+        if arq_pool is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
+            )
+
+        await arq_pool.enqueue_job(
+            "resume_review_task",
+            project_id=project_id,
+            run_id=run.id,
+            thread_id=run.langgraph_thread_id,
+            resume_payload={
+                "kind": "chapter_generate",
+                "chapter_index": idx,
+            },
+            slot_token=acquired_token,
+        )
+    except HTTPException:
+        if acquired_token:
+            await release_project_slot(project_id, acquired_token)
+        raise
+    except Exception as e:
+        log.exception(
+            "generate_chapter_unexpected_error",
+            project_id=project_id,
+            chapter_index=idx,
+        )
+        if acquired_token:
+            await release_project_slot(project_id, acquired_token)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "章节生成入队异常,请稍后重试"
+        ) from e
+
+    return {"ok": True}
 
 
 @router.post("/{project_id}/chapters/{idx}/review")

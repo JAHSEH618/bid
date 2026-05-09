@@ -593,6 +593,13 @@ function route(ctx: ResolveContext): unknown {
       ch.chapter_model = b.chapter_model ?? null
       return { ok: true, chapter_model: ch.chapter_model }
     }
+    if (sub === '/generate' && method === 'POST') {
+      if (ch.status !== 'pending') {
+        throw apiError(409, { detail: `chapter is ${ch.status}` })
+      }
+      ch.status = 'generating'
+      return { ok: true }
+    }
     if (sub === '/retry' && method === 'POST') {
       ch.status = 'pending'
       ch.retry_count = 0
@@ -839,10 +846,7 @@ export class MockProjectEventSource {
     const list = projectChapters[pid] ?? []
     // 拿第一个非 approved/skipped 的章节 idx 作为流目标
     const target = list.find(
-      (c) =>
-        c.status === 'awaiting_review' ||
-        c.status === 'generating' ||
-        c.status === 'pending',
+      (c) => c.status === 'awaiting_review' || c.status === 'generating',
     )
     if (!target) return
     const idx = target.index

@@ -399,16 +399,6 @@ async def resume_review_task(
                     s.add(rev)
                     await s.flush()  # ⭐ D-BT:flush 拿 PK
                     review_event_id = rev.id
-                    if review_decision == "revise":
-                        # ⭐ D-BK:revise 切 generating 同时写 processing_started_at
-                        await s.execute(
-                            sa.text(
-                                "UPDATE chapters SET status='generating', "
-                                "processing_started_at=NOW() "
-                                "WHERE id=:c AND status='reviewing'"
-                            ),
-                            {"c": chapter_id},
-                        )
                     await s.commit()
 
         async with project_heartbeat(project_id, token) as lost_event:

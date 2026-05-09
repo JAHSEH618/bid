@@ -12,7 +12,6 @@
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -98,14 +97,15 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             "revision_feedback": "",
         }
 
-    # 正常重写:current_index 不变,retry_count+1,带反馈
-    # ⭐ D-BK:每个切 generating 的位置都同步写 processing_started_at
+    # 正常重写:current_index 不变,retry_count+1,带反馈。
+    # 先回 pending,下游 chapter_generate_gate 等用户确认本章模型后再进
+    # write_chapter 切 generating。
     await _safe_sync(
         run_id,
         current,
-        status="generating",
+        status="pending",
         retry_count=new_retry,
-        processing_started_at=datetime.now(UTC),
+        processing_started_at=None,
     )
     return {
         "current_index": current,

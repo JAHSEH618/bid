@@ -3,6 +3,7 @@
 // 端点:
 //   - GET  /api/projects/{id}/chapters/{idx}          ChapterDetailResponse(R-15 commit 7dfc2fe)
 //   - PATCH /api/projects/{id}/chapters/{idx}/model   {chapter_model} → {ok}
+//   - POST /api/projects/{id}/chapters/{idx}/generate → {ok}
 //   - POST /api/projects/{id}/chapters/{idx}/review   {decision, feedback?} → {ok}
 //   - POST /api/projects/{id}/chapters/{idx}/retry    failed → retrying      → {ok}
 //
@@ -78,6 +79,32 @@ export function useSetChapterModel() {
           method: 'PATCH',
           body: JSON.stringify(body),
         },
+      ),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })
+      qc.invalidateQueries({
+        queryKey: ['projects', vars.projectId, 'chapters', vars.index],
+      })
+      qc.invalidateQueries({
+        queryKey: ['projects', vars.projectId, 'outline'],
+      })
+    },
+  })
+}
+
+export function useGenerateChapter() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      projectId,
+      index,
+    }: {
+      projectId: number
+      index: number
+    }) =>
+      apiFetch<{ ok: boolean }>(
+        `/api/projects/${projectId}/chapters/${index}/generate`,
+        { method: 'POST' },
       ),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })
