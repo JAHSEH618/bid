@@ -1,16 +1,30 @@
 # bid-app 单镜像(前端构建 + 后端运行时合并)
 # 参考 IMPLEMENTATION_SPEC §17.1
 
+ARG NODE_PACKAGE_REGISTRY=https://registry.npmmirror.com
+
 # ──── Stage 1: 前端构建 ────
 FROM node:20-alpine AS frontend-builder
+ARG NODE_PACKAGE_REGISTRY
 WORKDIR /frontend
-RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+RUN npm config set registry "${NODE_PACKAGE_REGISTRY}" \
+    && corepack enable \
+    && corepack prepare pnpm@9.15.0 --activate \
+    && pnpm config set registry "${NODE_PACKAGE_REGISTRY}"
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm build
 
-# ──── Stage 2: 后端运行时 ────
+# ──── Stage 2: Mermaid CLI(Node 22) ────
+FROM node:22-bookworm-slim AS mermaid-cli
+ARG NODE_PACKAGE_REGISTRY
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+RUN npm config set registry "${NODE_PACKAGE_REGISTRY}" \
+    && npm install -g @mermaid-js/mermaid-cli@11.4.0 \
+    && mmdc --version
+
+# ──── Stage 3: 后端运行时 ────
 FROM python:3.12-slim-bookworm AS runtime
 
 ARG PYTHON_PACKAGE_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
@@ -28,8 +42,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         chromium \
         fonts-noto-cjk \
         fonts-noto-cjk-extra \
-        nodejs \
-        npm \
         curl \
         gnupg \
         lsb-release \
@@ -49,7 +61,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "Asia/Shanghai" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @mermaid-js/mermaid-cli@11.4.0
+COPY --from=mermaid-cli /usr/local/bin/node /usr/local/bin/node
+COPY --from=mermaid-cli /usr/local/bin/mmdc /usr/local/bin/mmdc
+COPY --from=mermaid-cli /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 COPY docker/mermaid-config.json /etc/mermaid-config.json
 COPY docker/puppeteer-config.json /etc/puppeteer-config.json
