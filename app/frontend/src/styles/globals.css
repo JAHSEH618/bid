@@ -123,7 +123,7 @@
 
 /* prose 调整(react-markdown 章节预览) */
 .prose pre {
-  @apply rounded-lg bg-slate-900 text-slate-100 p-4 overflow-x-auto shadow-sm;
+  @apply rounded-lg border border-slate-200 bg-white text-slate-900 p-4 overflow-x-auto shadow-sm;
 }
 .prose code {
   @apply font-mono text-sm;

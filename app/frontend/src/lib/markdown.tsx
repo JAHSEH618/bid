@@ -265,5 +265,10 @@ function Mermaid({ code }: MermaidProps) {
       </div>
     )
   }
-  return <div ref={ref} className="my-4 overflow-x-auto" />
+  return (
+    <div
+      ref={ref}
+      className="my-4 overflow-x-auto rounded-md border border-slate-200 bg-white p-3"
+    />
+  )
 }
