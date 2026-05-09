@@ -16,16 +16,7 @@ RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm build
 
-# ──── Stage 2: Mermaid CLI(Node 22) ────
-FROM node:22-bookworm-slim AS mermaid-cli
-ARG NODE_PACKAGE_REGISTRY
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
-    PUPPETEER_SKIP_DOWNLOAD=true
-RUN npm config set registry "${NODE_PACKAGE_REGISTRY}" \
-    && npm install -g @mermaid-js/mermaid-cli@11.4.0 \
-    && mmdc --version
-
-# ──── Stage 3: 后端运行时 ────
+# ──── Stage 2: 后端运行时 ────
 FROM python:3.12-slim-bookworm AS runtime
 
 ARG DEBIAN_APT_MIRROR=http://mirrors.cloud.tencent.com/debian
@@ -52,7 +43,6 @@ RUN sed -i \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         pandoc \
-        chromium \
         fonts-noto-cjk \
         fonts-noto-cjk-extra \
         tzdata \
@@ -65,10 +55,6 @@ RUN sed -i \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && echo "Asia/Shanghai" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
-
-COPY --from=mermaid-cli /usr/local/bin/node /usr/local/bin/node
-COPY --from=mermaid-cli /usr/local/bin/mmdc /usr/local/bin/mmdc
-COPY --from=mermaid-cli /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 COPY docker/mermaid-config.json /etc/mermaid-config.json
 COPY docker/puppeteer-config.json /etc/puppeteer-config.json

@@ -12,10 +12,12 @@ mermaid 预渲染 + pandoc 直转,全局串行(D-H):asyncio.Lock + Redis Lock �
   UPDATE 之后 atomic rename 成 ``proposal.docx``
 - D-BR:``_module_lock`` 加 timeout=120s,防 DOCX 拥塞饿死 workflow task
 """
+
 from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -59,13 +61,9 @@ async def export_docx(
     on_stage 抛 ``_StaleJob`` 之类的信号必须透传到 task 顶层。
     """
     try:
-        await asyncio.wait_for(
-            _module_lock.acquire(), timeout=_MODULE_LOCK_TIMEOUT
-        )
+        await asyncio.wait_for(_module_lock.acquire(), timeout=_MODULE_LOCK_TIMEOUT)
     except TimeoutError as te:
-        raise TimeoutError(
-            f"docx module lock timeout after {_MODULE_LOCK_TIMEOUT}s"
-        ) from te
+        raise TimeoutError(f"docx module lock timeout after {_MODULE_LOCK_TIMEOUT}s") from te
     try:
         async with _redis_lock(redis_url):
             return await _export_docx_inner(
@@ -95,9 +93,7 @@ async def _redis_lock(redis_url: str) -> AsyncIterator[None]:
     acquired = await lock.acquire()
     if not acquired:
         await r.aclose()
-        raise TimeoutError(
-            f"docx export lock timeout after {_REDIS_LOCK_BLOCKING_TIMEOUT}s"
-        )
+        raise TimeoutError(f"docx export lock timeout after {_REDIS_LOCK_BLOCKING_TIMEOUT}s")
     try:
         yield
     finally:
@@ -167,6 +163,13 @@ async def _render_mermaid(markdown: str, work: Path) -> str:
     matches = list(MERMAID_RE.finditer(markdown))
     if not matches:
         return markdown
+    if shutil.which("mmdc") is None:
+        log.warning(
+            "mermaid_cli_not_installed",
+            blocks=len(matches),
+            hint="keeping mermaid fences in DOCX markdown",
+        )
+        return markdown
 
     rendered: list[Path | None] = []
     for i, m in enumerate(matches):
@@ -174,23 +177,31 @@ async def _render_mermaid(markdown: str, work: Path) -> str:
         src = work / f"mmd_{i}.mmd"
         png = work / f"mmd_{i}.png"
         src.write_text(code, encoding="utf-8")
-        proc = await asyncio.create_subprocess_exec(
-            "mmdc",
-            "-i",
-            str(src),
-            "-o",
-            str(png),
-            "-b",
-            "transparent",
-            "-c",
-            "/etc/mermaid-config.json",
-            "-p",
-            "/etc/puppeteer-config.json",
-            "--cssFile",
-            "/etc/mermaid.css",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "mmdc",
+                "-i",
+                str(src),
+                "-o",
+                str(png),
+                "-b",
+                "transparent",
+                "-c",
+                "/etc/mermaid-config.json",
+                "-p",
+                "/etc/puppeteer-config.json",
+                "--cssFile",
+                "/etc/mermaid.css",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            log.warning(
+                "mermaid_cli_not_found_during_render",
+                blocks=len(matches),
+                hint="keeping remaining mermaid fences",
+            )
+            return markdown
         _, err = await proc.communicate()
         if proc.returncode == 0 and png.exists():
             rendered.append(png)
