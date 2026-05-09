@@ -21,7 +21,7 @@ FROM python:3.12-slim-bookworm AS runtime
 
 ARG DEBIAN_APT_MIRROR=http://mirrors.cloud.tencent.com/debian
 ARG DEBIAN_SECURITY_APT_MIRROR=http://mirrors.cloud.tencent.com/debian-security
-ARG PYTHON_PACKAGE_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+ARG PYTHON_PACKAGE_INDEX_URL=https://mirrors.cloud.tencent.com/pypi/simple
 
 ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
@@ -60,20 +60,11 @@ COPY docker/mermaid-config.json /etc/mermaid-config.json
 COPY docker/puppeteer-config.json /etc/puppeteer-config.json
 COPY docker/mermaid.css /etc/mermaid.css
 
-RUN python -m pip install --no-cache-dir uv
-
 WORKDIR /app
-# Phase 1:仅装第三方依赖,缓存这一层(只在 pyproject.toml / uv.lock 变化时失效)。
-# `--no-install-project` 跳过 bid-app 自身,因为此时 src/ 还没 COPY 进来 —
-# Hatchling 的 editable wheel 需要源路径存在才能写 .pth 让 import 生效;
-# 提前装会写一个空 dist-info,运行时 ModuleNotFoundError: No module named 'bid_app'。
-COPY backend/pyproject.toml backend/uv.lock /app/backend/
-RUN cd /app/backend && uv sync --frozen --no-dev --no-install-project
-
-# Phase 2:COPY 源码后再装 bid-app 本身(editable .pth 由 Hatchling 写入),
-# 这一层在源码变化时才失效。
 COPY backend/ /app/backend/
-RUN cd /app/backend && uv sync --frozen --no-dev
+RUN cd /app/backend \
+    && python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir .
 
 COPY --from=frontend-builder /frontend/dist /app/frontend/dist
 
