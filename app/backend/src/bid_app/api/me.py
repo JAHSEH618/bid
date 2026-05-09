@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 import sqlalchemy as sa
 import structlog
@@ -218,8 +218,7 @@ async def delete_api_key(
 # ============== 模型配置(§0002) ==============
 
 
-def _custom_models_for(user: User) -> list[str]:
-    raw = user.model_catalog or []
+def _normalize_model_list(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
     out: list[str] = []
@@ -234,21 +233,35 @@ def _custom_models_for(user: User) -> list[str]:
     return out
 
 
+def _default_model_catalog() -> list[str]:
+    return _normalize_model_list(
+        [
+            settings.llm1_outline_model,
+            settings.llm2_chapter_model,
+            settings.llm3_visuals_model,
+            *KNOWN_MODELS,
+        ]
+    )
+
+
+def _catalog_models_for(user: User) -> list[str]:
+    raw = user.model_catalog
+    if isinstance(raw, dict):
+        return _normalize_model_list(raw.get("models", []))
+    if raw is None:
+        return _default_model_catalog()
+    # 兼容旧版本:旧 model_catalog 只保存用户新增模型,系统模型隐式加入。
+    return _normalize_model_list(
+        [*_default_model_catalog(), *_normalize_model_list(raw)]
+    )
+
+
+def _custom_models_for(user: User) -> list[str]:
+    return _catalog_models_for(user)
+
+
 def _available_models_for(user: User) -> list[str]:
-    candidates = [
-        settings.llm1_outline_model,
-        settings.llm2_chapter_model,
-        settings.llm3_visuals_model,
-        *KNOWN_MODELS,
-        *_custom_models_for(user),
-    ]
-    out: list[str] = []
-    seen: set[str] = set()
-    for model in candidates:
-        if model and model not in seen:
-            out.append(model)
-            seen.add(model)
-    return out
+    return _catalog_models_for(user)
 
 
 @router.get("/model-config", response_model=ModelConfigResponse)
@@ -256,7 +269,7 @@ async def get_model_config(
     user: Annotated[User, Depends(get_current_user)],
 ) -> ModelConfigResponse:
     """返回模型池。具体 LLM-1/2/3 选择移动到生成流程里完成。"""
-    custom_models = _custom_models_for(user)
+    custom_models = _catalog_models_for(user)
     return ModelConfigResponse(
         llm1_outline_model=user.llm1_outline_model,
         llm2_chapter_model=user.llm2_chapter_model,
@@ -277,7 +290,7 @@ async def set_model_config(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
     """更新当前用户的模型池。旧三类默认字段统一清空,避免设置页承担选择语义。"""
-    user.model_catalog = body.custom_models
+    user.model_catalog = {"version": 2, "models": body.custom_models}
     user.llm1_outline_model = None
     user.llm2_chapter_model = None
     user.llm3_visuals_model = None

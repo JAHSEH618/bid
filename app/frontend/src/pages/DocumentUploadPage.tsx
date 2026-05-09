@@ -68,7 +68,6 @@ export function DocumentUploadPage() {
   const start = useStartProject()
   const modelConfig = useModelConfig()
   const [outlineModel, setOutlineModel] = useState('')
-  const [chapterModel, setChapterModel] = useState('')
   const [visualsModel, setVisualsModel] = useState('')
 
   const uploadedByKind = useMemo<Partial<Record<DocumentKind, DocumentDTO>>>(
@@ -91,9 +90,12 @@ export function DocumentUploadPage() {
   useEffect(() => {
     const data = modelConfig.data
     if (!data) return
-    setOutlineModel((prev) => prev || data.default_outline_model)
-    setChapterModel((prev) => prev || data.default_chapter_model)
-    setVisualsModel((prev) => prev || data.default_visuals_model)
+    setOutlineModel((prev) =>
+      pickModel(data.available_models, data.default_outline_model, prev),
+    )
+    setVisualsModel((prev) =>
+      pickModel(data.available_models, data.default_visuals_model, prev),
+    )
   }, [modelConfig.data])
 
   const techSpec = uploadedByKind.tech_spec
@@ -101,7 +103,11 @@ export function DocumentUploadPage() {
   const requiredCount = (techSpec ? 1 : 0) + (scoring ? 1 : 0)
 
   const canStart = Boolean(
-    techSpec && scoring && project.data && project.data.status === 'init',
+    techSpec &&
+      scoring &&
+      project.data &&
+      project.data.status === 'init' &&
+      (modelConfig.data?.available_models.length ?? 0) > 0,
   )
 
   const handleStart = async () => {
@@ -113,7 +119,10 @@ export function DocumentUploadPage() {
           pages_per_chapter: project.data.pages_per_chapter,
           max_retry_per_chapter: project.data.max_retry_per_chapter,
           outline_model: outlineModel || null,
-          chapter_model: chapterModel || null,
+          chapter_model: pickModel(
+            modelConfig.data?.available_models ?? [],
+            modelConfig.data?.default_chapter_model ?? '',
+          ) || null,
           visuals_model: visualsModel || null,
         },
       })
@@ -211,10 +220,10 @@ export function DocumentUploadPage() {
         <CardHeader className="pb-3">
           <CardTitle className="text-sm">本次生成模型</CardTitle>
           <CardDescription className="text-xs">
-            正文默认模型会带到每一章,确认提纲时仍可逐章修改
+            正文模型在章节审核页按章节选择
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-3">
+        <CardContent className="grid gap-3 md:grid-cols-2">
           <ModelSelect
             id="outline-model"
             label="提纲生成"
@@ -222,15 +231,6 @@ export function DocumentUploadPage() {
             onChange={setOutlineModel}
             models={modelConfig.data?.available_models ?? []}
             fallback={modelConfig.data?.default_outline_model ?? ''}
-            loading={modelConfig.isLoading}
-          />
-          <ModelSelect
-            id="chapter-model"
-            label="正文默认"
-            value={chapterModel}
-            onChange={setChapterModel}
-            models={modelConfig.data?.available_models ?? []}
-            fallback={modelConfig.data?.default_chapter_model ?? ''}
             loading={modelConfig.isLoading}
           />
           <ModelSelect
@@ -248,7 +248,7 @@ export function DocumentUploadPage() {
       <div className="flex items-center justify-end gap-3 rounded-xl border border-border/70 bg-card p-4 shadow-sm">
         {!canStart && (
           <p className="flex-1 text-xs text-muted-foreground">
-            上传「技术需求书」与「评分细则」后可启动 AI 工作流
+            上传「技术需求书」与「评分细则」并至少配置一个模型后可启动 AI 工作流
           </p>
         )}
         <Button
@@ -292,7 +292,8 @@ function ModelSelect({
   fallback: string
   loading: boolean
 }) {
-  const options = models.length > 0 ? models : fallback ? [fallback] : []
+  const options = models
+  const selected = pickModel(options, fallback, value)
   return (
     <div className="space-y-1.5">
       <Label htmlFor={id} className="text-xs font-medium">
@@ -300,7 +301,7 @@ function ModelSelect({
       </Label>
       <select
         id={id}
-        value={value || fallback}
+        value={selected}
         onChange={(e) => onChange(e.target.value)}
         disabled={loading || options.length === 0}
         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 font-mono text-xs shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
@@ -313,6 +314,12 @@ function ModelSelect({
       </select>
     </div>
   )
+}
+
+function pickModel(models: string[], preferred: string, current = '') {
+  if (current && models.includes(current)) return current
+  if (preferred && models.includes(preferred)) return preferred
+  return models[0] ?? ''
 }
 
 function UploadSlot({

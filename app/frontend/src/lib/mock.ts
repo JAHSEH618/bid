@@ -36,7 +36,12 @@ const KNOWN_MODELS = [
   'dashscope/qwen-max',
   'dashscope/qwen-plus',
 ]
-let customModels = ['dashscope/qwen-turbo']
+let customModels = [
+  'dashscope/deepseek-v4-flash',
+  'dashscope/qwen3.6-max-preview',
+  'dashscope/qwen3.6-flash',
+  ...KNOWN_MODELS,
+]
 
 const adminUser: UserDTO = {
   id: 1,
@@ -389,15 +394,7 @@ function route(ctx: ResolveContext): unknown {
     return { ok: true }
   }
   if (pathname === '/api/me/model-config' && method === 'GET') {
-    const available = Array.from(
-      new Set([
-        'dashscope/deepseek-v4-flash',
-        'dashscope/qwen3.6-max-preview',
-        'dashscope/qwen3.6-flash',
-        ...KNOWN_MODELS,
-        ...customModels,
-      ]),
-    )
+    const available = Array.from(new Set(customModels))
     return {
       llm1_outline_model: null,
       llm2_chapter_model: null,
@@ -585,6 +582,16 @@ function route(ctx: ResolveContext): unknown {
         ch.retry_count += 1
       }
       return { ok: true }
+    }
+    if (sub === '/model' && method === 'PATCH') {
+      const b = ctx.body as { chapter_model?: string | null }
+      if (!['pending', 'awaiting_review', 'failed'].includes(ch.status)) {
+        throw apiError(409, {
+          detail: `chapter is ${ch.status}, model can only be changed before generation or rewrite`,
+        })
+      }
+      ch.chapter_model = b.chapter_model ?? null
+      return { ok: true, chapter_model: ch.chapter_model }
     }
     if (sub === '/retry' && method === 'POST') {
       ch.status = 'pending'

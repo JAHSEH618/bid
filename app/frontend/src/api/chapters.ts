@@ -2,6 +2,7 @@
 //
 // 端点:
 //   - GET  /api/projects/{id}/chapters/{idx}          ChapterDetailResponse(R-15 commit 7dfc2fe)
+//   - PATCH /api/projects/{id}/chapters/{idx}/model   {chapter_model} → {ok}
 //   - POST /api/projects/{id}/chapters/{idx}/review   {decision, feedback?} → {ok}
 //   - POST /api/projects/{id}/chapters/{idx}/retry    failed → retrying      → {ok}
 //
@@ -53,6 +54,41 @@ export function useChapter(
 export interface ReviewChapterPayload {
   decision: ReviewDecision
   feedback?: string
+}
+
+export interface SetChapterModelPayload {
+  chapter_model: string | null
+}
+
+export function useSetChapterModel() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      projectId,
+      index,
+      body,
+    }: {
+      projectId: number
+      index: number
+      body: SetChapterModelPayload
+    }) =>
+      apiFetch<{ ok: boolean; chapter_model: string | null }>(
+        `/api/projects/${projectId}/chapters/${index}/model`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(body),
+        },
+      ),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })
+      qc.invalidateQueries({
+        queryKey: ['projects', vars.projectId, 'chapters', vars.index],
+      })
+      qc.invalidateQueries({
+        queryKey: ['projects', vars.projectId, 'outline'],
+      })
+    },
+  })
 }
 
 export function useReviewChapter() {

@@ -20,14 +20,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import get_current_user, get_db
 from ..models import Chapter, Run, User
-from ..schemas.chapters import ChapterDetailResponse, ReviewRequest
+from ..schemas.chapters import (
+    ChapterDetailResponse,
+    ChapterModelUpdateRequest,
+    ReviewRequest,
+)
 from ..services.concurrency import (
     release_project_slot,
     try_acquire_project_slot,
 )
+from .me import _available_models_for
 
 router = APIRouter(prefix="/api/projects", tags=["chapters"])
 log = structlog.get_logger()
+
+
+def _normalize_selected_model(model: str | None, user: User) -> str | None:
+    selected = (model or "").strip()
+    if not selected:
+        return None
+    if selected not in _available_models_for(user):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"model not in your model catalog: {selected}",
+        )
+    return selected
 
 
 async def _get_active_run(db: AsyncSession, project_id: int) -> Run:
@@ -104,6 +121,49 @@ async def get_chapter_detail(
         current_version_id=current_version_id,
         updated_at=chapter.created_at,  # 没有 onupdate;暂用 created_at
     )
+
+
+@router.patch("/{project_id}/chapters/{idx}/model")
+async def update_chapter_model(
+    project_id: int,
+    idx: int,
+    body: ChapterModelUpdateRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, str | bool | None]:
+    """更新单章正文生成模型。
+
+    只允许在章节未进入当前生成链路时修改:
+    - pending:首次生成前
+    - awaiting_review:提交“不通过/重写”前
+    - failed:重新生成前
+    """
+    selected = _normalize_selected_model(body.chapter_model, user)
+    run = await _get_active_run(db, project_id)
+
+    chapter = (
+        await db.execute(
+            sa.text(
+                "SELECT id, status FROM chapters "
+                "WHERE run_id=:r AND index=:i FOR UPDATE"
+            ),
+            {"r": run.id, "i": idx},
+        )
+    ).mappings().one_or_none()
+    if chapter is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
+    if chapter["status"] not in ("pending", "awaiting_review", "failed"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"chapter is {chapter['status']}, model can only be changed before generation or rewrite",
+        )
+
+    await db.execute(
+        sa.text("UPDATE chapters SET model_snapshot=:m WHERE id=:c"),
+        {"m": selected, "c": chapter["id"]},
+    )
+    await db.commit()
+    return {"ok": True, "chapter_model": selected}
 
 
 # ============== /review ==============

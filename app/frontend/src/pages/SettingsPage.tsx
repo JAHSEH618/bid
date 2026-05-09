@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Bot,
   CheckCircle2,
@@ -55,27 +55,13 @@ export function SettingsPage() {
   const modelConfig = useModelConfig()
   const setModelConfig = useSetModelConfig()
   const [modelInput, setModelInput] = useState('')
-  const [customModels, setCustomModels] = useState<string[]>([])
+  const [modelCatalog, setModelCatalog] = useState<string[]>([])
 
   useEffect(() => {
-    if (modelConfig.data) setCustomModels(modelConfig.data.custom_models ?? [])
+    if (modelConfig.data) {
+      setModelCatalog(modelConfig.data.available_models ?? [])
+    }
   }, [modelConfig.data])
-
-  const builtInModels = useMemo(() => {
-    const data = modelConfig.data
-    if (!data) return []
-    return uniqueModels([
-      data.default_outline_model,
-      data.default_chapter_model,
-      data.default_visuals_model,
-      ...data.known_models,
-    ])
-  }, [modelConfig.data])
-
-  const allModels = useMemo(
-    () => uniqueModels([...builtInModels, ...customModels]),
-    [builtInModels, customModels],
-  )
 
   const handleAddModel = () => {
     const model = modelInput.trim()
@@ -87,17 +73,37 @@ export function SettingsPage() {
       toast({ title: '模型名不能超过 128 字符', variant: 'warning' })
       return
     }
-    if (allModels.includes(model)) {
+    if (modelCatalog.includes(model)) {
       toast({ title: '模型已在列表中', variant: 'warning' })
       return
     }
-    setCustomModels((prev) => [...prev, model])
+    setModelCatalog((prev) => [...prev, model])
     setModelInput('')
   }
 
+  const updateModelAt = (index: number, value: string) => {
+    setModelCatalog((prev) =>
+      prev.map((model, i) => (i === index ? value : model)),
+    )
+  }
+
+  const removeModelAt = (index: number) => {
+    setModelCatalog((prev) => prev.filter((_, i) => i !== index))
+  }
+
   const handleSaveModels = async () => {
+    const normalized = modelCatalog.map((m) => m.trim()).filter(Boolean)
+    if (normalized.some((m) => m.length > 128)) {
+      toast({ title: '模型名不能超过 128 字符', variant: 'warning' })
+      return
+    }
+    if (new Set(normalized).size !== normalized.length) {
+      toast({ title: '模型名不能重复', variant: 'warning' })
+      return
+    }
     try {
-      await setModelConfig.mutateAsync({ custom_models: customModels })
+      await setModelConfig.mutateAsync({ custom_models: normalized })
+      setModelCatalog(normalized)
       toast({ title: '模型库已保存', variant: 'success' })
     } catch (err) {
       const msg = readApiError(err, '保存失败')
@@ -276,7 +282,7 @@ export function SettingsPage() {
             模型库
           </CardTitle>
           <CardDescription>
-            这里只维护可选模型,启动项目与确认章节时再选择具体用途
+            维护当前账号可使用的模型列表,不同用户互不影响
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -316,35 +322,34 @@ export function SettingsPage() {
 
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <Label className="text-sm font-medium">已添加模型</Label>
+                  <Label className="text-sm font-medium">已配置模型</Label>
                   <Badge variant="outline" className="text-[10px]">
-                    {customModels.length}
+                    {modelCatalog.length}
                   </Badge>
                 </div>
-                {customModels.length === 0 ? (
+                {modelCatalog.length === 0 ? (
                   <p className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-4 text-sm text-muted-foreground">
-                    暂无自定义模型
+                    暂无模型。添加并保存后,启动流程和章节审核页才会出现可选项
                   </p>
                 ) : (
                   <div className="space-y-2">
-                    {customModels.map((model) => (
+                    {modelCatalog.map((model, index) => (
                       <div
-                        key={model}
+                        key={`${model}-${index}`}
                         className="flex items-center gap-2 rounded-md border border-border/70 bg-background px-3 py-2"
                       >
-                        <code className="min-w-0 flex-1 truncate font-mono text-xs">
-                          {model}
-                        </code>
+                        <Input
+                          value={model}
+                          onChange={(e) => updateModelAt(index, e.target.value)}
+                          className="h-8 min-w-0 flex-1 font-mono text-xs"
+                          aria-label={`模型 ${index + 1}`}
+                        />
                         <Button
                           type="button"
                           variant="ghost"
                           size="iconSm"
                           className="text-muted-foreground hover:text-destructive"
-                          onClick={() =>
-                            setCustomModels((prev) =>
-                              prev.filter((m) => m !== model),
-                            )
-                          }
+                          onClick={() => removeModelAt(index)}
                           aria-label={`删除模型 ${model}`}
                           title="删除模型"
                         >
@@ -354,23 +359,6 @@ export function SettingsPage() {
                     ))}
                   </div>
                 )}
-              </div>
-
-              <Separator />
-
-              <div className="space-y-2">
-                <Label className="text-sm font-medium">启动流程可选模型</Label>
-                <div className="flex flex-wrap gap-2">
-                  {allModels.map((model) => (
-                    <Badge
-                      key={model}
-                      variant="muted"
-                      className="max-w-full font-mono text-[10px]"
-                    >
-                      <span className="truncate">{model}</span>
-                    </Badge>
-                  ))}
-                </div>
               </div>
             </>
           )}
@@ -384,7 +372,7 @@ export function SettingsPage() {
             {setModelConfig.isPending ? '保存中…' : '保存模型库'}
           </Button>
           <span className="ml-3 text-xs text-muted-foreground">
-            修改后启动项目和确认章节时可选择
+            修改后启动项目和章节审核页可选择
           </span>
         </CardFooter>
       </Card>
@@ -513,16 +501,4 @@ function Stat({
       )}
     </div>
   )
-}
-
-function uniqueModels(models: string[]) {
-  const out: string[] = []
-  const seen = new Set<string>()
-  for (const raw of models) {
-    const model = raw.trim()
-    if (!model || seen.has(model)) continue
-    out.push(model)
-    seen.add(model)
-  }
-  return out
 }

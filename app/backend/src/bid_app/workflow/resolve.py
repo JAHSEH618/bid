@@ -77,11 +77,32 @@ async def resolve_chapter_model(
     """解析当前章节 LLM-2 模型。
 
     优先级:
-      1. state.chapters[i].chapter_model
-      2. chapters.model_snapshot
+      1. chapters.model_snapshot(审核页可在生成/重写前修改)
+      2. state.chapters[i].chapter_model(CLI / 旧 checkpoint 兼容)
       3. projects.chapter_model_snapshot
       4. settings.llm2_chapter_model
     """
+    fallback = (await resolve_models(project_id)).chapter_model
+
+    if run_id is not None and run_id > 0:
+        try:
+            async with session_factory() as s:
+                row = await s.execute(
+                    select(Chapter.model_snapshot)
+                    .join(Run, Run.id == Chapter.run_id)
+                    .where(Run.id == run_id, Chapter.index == chapter_index)
+                )
+                selected = row.scalar_one_or_none()
+                if selected:
+                    return selected
+        except Exception:
+            log.warning(
+                "resolve_chapter_model_db_failed_fallback",
+                project_id=project_id,
+                run_id=run_id,
+                chapter_index=chapter_index,
+            )
+
     from_state = ""
     if chapter:
         raw = chapter.get("chapter_model")
@@ -90,24 +111,4 @@ async def resolve_chapter_model(
     if from_state:
         return from_state
 
-    fallback = (await resolve_models(project_id)).chapter_model
-    if run_id is None or run_id <= 0:
-        return fallback
-
-    try:
-        async with session_factory() as s:
-            row = await s.execute(
-                select(Chapter.model_snapshot)
-                .join(Run, Run.id == Chapter.run_id)
-                .where(Run.id == run_id, Chapter.index == chapter_index)
-            )
-            selected = row.scalar_one_or_none()
-            return selected or fallback
-    except Exception:
-        log.warning(
-            "resolve_chapter_model_db_failed_fallback",
-            project_id=project_id,
-            run_id=run_id,
-            chapter_index=chapter_index,
-        )
-        return fallback
+    return fallback

@@ -1,13 +1,19 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, FileCheck, History, Loader2 } from 'lucide-react'
+import { ArrowLeft, Bot, FileCheck, History, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ChapterSidebar } from '@/components/ChapterSidebar'
 import { ChapterPreview } from '@/components/ChapterPreview'
 import { ReviewActions } from '@/components/ReviewActions'
 import { useProject, useProjectOutline } from '@/api/projects'
-import { useChapter, useReviewChapter, useRetryChapter } from '@/api/chapters'
+import {
+  useChapter,
+  useReviewChapter,
+  useRetryChapter,
+  useSetChapterModel,
+} from '@/api/chapters'
+import { useModelConfig } from '@/api/me'
 import { useQueryClient } from '@tanstack/react-query'
 import { useProjectStream, type ProjectEvent } from '@/hooks/useSSE'
 import { useToast } from '@/hooks/useToast'
@@ -21,6 +27,8 @@ export function ChapterReviewPage() {
   const outline = useProjectOutline(projectId)
   const review = useReviewChapter()
   const retry = useRetryChapter()
+  const setChapterModel = useSetChapterModel()
+  const modelConfig = useModelConfig()
   const { toast } = useToast()
   const qc = useQueryClient()
 
@@ -119,6 +127,33 @@ export function ChapterReviewPage() {
   })
 
   const activeChapter = chapters.find((c) => c.index === activeIndex)
+  const activeChapterModel =
+    detail?.chapter_model ?? activeChapter?.chapter_model ?? ''
+  const [selectedModel, setSelectedModel] = useState('')
+
+  useEffect(() => {
+    setSelectedModel(activeChapterModel)
+  }, [activeChapterModel, activeIndex])
+
+  const submitModelChange = async (model: string) => {
+    if (!projectId || !activeChapter) return
+    setSelectedModel(model)
+    try {
+      await setChapterModel.mutateAsync({
+        projectId,
+        index: activeChapter.index,
+        body: { chapter_model: model || null },
+      })
+      toast({ title: '本章正文模型已保存', variant: 'success' })
+    } catch (err) {
+      setSelectedModel(activeChapterModel)
+      toast({
+        title: '模型保存失败',
+        description: readApiError(err, '模型保存失败'),
+        variant: 'destructive',
+      })
+    }
+  }
 
   // 显示优先级(单调增):
   //   1. SSE 实时 buffer(active streaming 期长度持续上升)
@@ -240,14 +275,27 @@ export function ChapterReviewPage() {
               </p>
             </div>
           </div>
-          {project.data.status === 'done' && (
-            <Button asChild size="sm" className="shadow-sm">
-              <Link to={`/projects/${projectId}/proposal`}>
-                <FileCheck className="mr-1.5 h-4 w-4" />
-                查看全文
-              </Link>
-            </Button>
-          )}
+          <div className="flex shrink-0 items-center gap-2">
+            {activeChapter && (
+              <ChapterModelPicker
+                value={selectedModel}
+                currentModel={activeChapterModel}
+                models={modelConfig.data?.available_models ?? []}
+                fallback={modelConfig.data?.default_chapter_model ?? ''}
+                status={activeChapter.status}
+                loading={modelConfig.isLoading || setChapterModel.isPending}
+                onChange={submitModelChange}
+              />
+            )}
+            {project.data.status === 'done' && (
+              <Button asChild size="sm" className="shadow-sm">
+                <Link to={`/projects/${projectId}/proposal`}>
+                  <FileCheck className="mr-1.5 h-4 w-4" />
+                  查看全文
+                </Link>
+              </Button>
+            )}
+          </div>
         </div>
 
         <div className="flex-1 overflow-auto px-6 py-6">
@@ -298,6 +346,74 @@ function Card({ children }: { children: React.ReactNode }) {
       {children}
     </div>
   )
+}
+
+function ChapterModelPicker({
+  value,
+  currentModel,
+  models,
+  fallback,
+  status,
+  loading,
+  onChange,
+}: {
+  value: string
+  currentModel: string
+  models: string[]
+  fallback: string
+  status: ChapterStatus
+  loading: boolean
+  onChange: (model: string) => Promise<void>
+}) {
+  const canChange =
+    status === 'pending' || status === 'awaiting_review' || status === 'failed'
+  const options = uniqueModels([
+    currentModel,
+    ...models,
+  ]).filter(Boolean)
+  const selected =
+    value && options.includes(value)
+      ? value
+      : currentModel && options.includes(currentModel)
+        ? currentModel
+        : fallback && options.includes(fallback)
+          ? fallback
+          : options[0] || ''
+
+  return (
+    <label className="hidden items-center gap-2 rounded-md border border-border bg-background px-2 py-1.5 text-xs shadow-sm lg:flex">
+      <Bot className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+      <span className="whitespace-nowrap text-muted-foreground">正文模型</span>
+      <select
+        value={selected}
+        onChange={(e) => void onChange(e.target.value)}
+        disabled={!canChange || loading || options.length === 0}
+        className="h-7 w-[260px] rounded border border-input bg-background px-2 font-mono text-[11px] text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+        aria-label="选择本章正文生成模型"
+        title={
+          canChange
+            ? '选择本章正文生成模型'
+            : '章节正在处理或已结束,不能修改模型'
+        }
+      >
+        {options.map((model) => (
+          <option key={model} value={model}>
+            {model}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function uniqueModels(models: string[]) {
+  const seen = new Set<string>()
+  return models.filter((model) => {
+    const normalized = model.trim()
+    if (!normalized || seen.has(normalized)) return false
+    seen.add(normalized)
+    return true
+  })
 }
 
 // 当前 chapter 没有可显示的 markdown 时,根据状态给用户合适的提示。

@@ -28,7 +28,6 @@ import {
   useProject,
   useProjectOutline,
 } from '@/api/projects'
-import { useModelConfig } from '@/api/me'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
 import type { OutlineChapterIn } from '@/lib/types'
@@ -39,7 +38,6 @@ interface EditableChapter {
   summary: string
   key_points: string[]
   target_pages: number
-  chapter_model: string
 }
 
 export function OutlineConfirmPage() {
@@ -49,7 +47,6 @@ export function OutlineConfirmPage() {
   const { toast } = useToast()
   const project = useProject(projectId)
   const outline = useProjectOutline(projectId)
-  const modelConfig = useModelConfig()
   const confirm = useConfirmOutline()
   const [chapters, setChapters] = useState<EditableChapter[]>([])
   const [edited, setEdited] = useState(false)
@@ -63,7 +60,6 @@ export function OutlineConfirmPage() {
         summary: c.summary ?? '',
         key_points: c.key_points,
         target_pages: c.target_pages,
-        chapter_model: c.chapter_model ?? '',
       })),
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -92,7 +88,6 @@ export function OutlineConfirmPage() {
         summary: '',
         key_points: ['要点 1'],
         target_pages: 3,
-        chapter_model: modelConfig.data?.default_chapter_model ?? '',
       },
     ])
   }
@@ -126,7 +121,6 @@ export function OutlineConfirmPage() {
           summary: c.summary.trim() || null,
           key_points: c.key_points.map((p) => p.trim()).filter(Boolean),
           target_pages: c.target_pages,
-          chapter_model: c.chapter_model || null,
         }))
       : []
     try {
@@ -274,41 +268,7 @@ export function OutlineConfirmPage() {
                     }
                   />
                 </div>
-                <div className="grid gap-3 sm:w-64 sm:grid-cols-1">
-                  <div>
-                    <label
-                      htmlFor={`chapter-model-${i}`}
-                      className="text-xs font-medium text-muted-foreground"
-                    >
-                      正文模型
-                    </label>
-                    <select
-                      id={`chapter-model-${i}`}
-                      value={
-                        c.chapter_model ||
-                        modelConfig.data?.default_chapter_model ||
-                        ''
-                      }
-                      disabled={
-                        modelConfig.isLoading ||
-                        (modelConfig.data?.available_models.length ?? 0) === 0
-                      }
-                      className="mt-1 flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 font-mono text-xs shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
-                      onChange={(e) =>
-                        updateChapter(i, {
-                          chapter_model: e.target.value,
-                        })
-                      }
-                    >
-                      {(modelConfig.data?.available_models ?? []).map(
-                        (model) => (
-                          <option key={model} value={model}>
-                            {model}
-                          </option>
-                        ),
-                      )}
-                    </select>
-                  </div>
+                <div className="grid gap-3 sm:w-40 sm:grid-cols-1">
                   <div>
                     <label
                       htmlFor={`chapter-target-pages-${i}`}

@@ -12,6 +12,10 @@ class ReviewRequest(BaseModel):
     feedback: str | None = Field(None, max_length=4000)
 
 
+class ChapterModelUpdateRequest(BaseModel):
+    chapter_model: str | None = Field(None, max_length=128)
+
+
 class ChapterDetailResponse(BaseModel):
     """⭐ R-14 配套:GET /api/projects/{id}/chapters/{idx} 单章详情。
 
