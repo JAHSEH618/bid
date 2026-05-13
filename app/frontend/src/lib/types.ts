@@ -113,16 +113,23 @@ export interface OutlineChapterIn {
 }
 
 // 文档 kind 与后端 _VALID_DOC_KINDS 完全一致。
+// PR-M7-2:v2 起 kind 不再强制三选一,改用 tags 自定义分类。
 export type DocumentKind = 'tech_spec' | 'scoring' | 'template'
+
+export type DocumentExtractStatus = 'pending' | 'done' | 'failed'
 
 // 后端 DocumentUploadResponse;list 端点暂未提供(等 backend 补,见 ListDocs 注释)。
 export interface DocumentDTO {
   id: number
   project_id: number
-  kind: DocumentKind
+  kind: DocumentKind | null
   original_filename: string
   file_size: number
+  byte_size?: number | null
+  mime_type?: string | null
+  tags?: string[] | null
   extract_error: string | null
+  extract_status: DocumentExtractStatus
 }
 
 // /proposal 返回。

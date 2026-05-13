@@ -221,6 +221,7 @@ const projectDocuments: Record<number, DocumentDTO[]> = {
       original_filename: '技术需求书.docx',
       file_size: 2_456_032,
       extract_error: null,
+      extract_status: 'done',
     },
     {
       id: 1002,
@@ -229,6 +230,7 @@ const projectDocuments: Record<number, DocumentDTO[]> = {
       original_filename: '评分细则.docx',
       file_size: 158_320,
       extract_error: null,
+      extract_status: 'done',
     },
     {
       id: 1003,
@@ -237,6 +239,7 @@ const projectDocuments: Record<number, DocumentDTO[]> = {
       original_filename: '历史方案模板.docx',
       file_size: 4_891_120,
       extract_error: null,
+      extract_status: 'done',
     },
   ],
   102: [],
@@ -648,6 +651,7 @@ function route(ctx: ResolveContext): unknown {
         original_filename: file?._file ?? 'unknown',
         file_size: file?.size ?? 0,
         extract_error: null,
+        extract_status: 'done',
       }
       projectDocuments[pid] = [...(projectDocuments[pid] ?? []), doc]
       return doc

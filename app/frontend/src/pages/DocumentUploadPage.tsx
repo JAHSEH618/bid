@@ -74,7 +74,11 @@ export function DocumentUploadPage() {
     () => {
       const acc: Partial<Record<DocumentKind, DocumentDTO>> = {}
       for (const d of documents.data ?? []) {
-        acc[d.kind] = d
+        // PR-M7-2:kind 现在可空;无 kind 的文档不进 by-kind 桶,
+        // 但仍在 documents.data 完整列表里显示。
+        if (d.kind) {
+          acc[d.kind] = d
+        }
       }
       return acc
     },

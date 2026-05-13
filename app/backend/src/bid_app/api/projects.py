@@ -17,7 +17,7 @@ import secrets
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import sqlalchemy as sa
 import structlog
@@ -207,12 +207,14 @@ async def list_documents(
     project_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[User, Depends(get_current_user)],
-) -> list[Document]:
+) -> list[DocumentUploadResponse]:
     """列出项目已上传的文档(给 DocumentUploadPage 跨会话回看用)。
 
     NOTE:不在 REQUIREMENTS §9 显式列出,但 backend ↔ frontend 契约对账时
     确认:用户刷新 / 跨会话回看时需要恢复"已上传记录"。返回顺序按
     ``id ASC``,前端可在 client-side 按 ``kind`` 分桶。
+
+    PR-M7-2:返回字段加 ``extract_status``,前端轮询用。
     """
     await _get_project_or_404(db, project_id)
     rows = await db.execute(
@@ -220,28 +222,41 @@ async def list_documents(
         .where(Document.project_id == project_id)
         .order_by(Document.id.asc())
     )
-    return list(rows.scalars().all())
+    return [_document_to_response(d) for d in rows.scalars().all()]
 
 
 @router.post(
     "/{project_id}/documents",
     response_model=DocumentUploadResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def upload_document(
     project_id: int,
+    request: Request,
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    kind: Annotated[str, Form(..., description="tech_spec / scoring / template")],
     file: Annotated[UploadFile, File(...)],
-) -> Document:
-    """上传一份 .docx/.doc/.md/.txt/.pdf,markitdown 抽取后入库。
+    kind: Annotated[
+        str | None,
+        Form(description="可选;v1 三选一保留做向后兼容,v2 起以 tags 为主"),
+    ] = None,
+    tags: Annotated[
+        str | None,
+        Form(
+            description=(
+                "用户自定义标签,逗号分隔。例如 'tech_spec, draft'。"
+            ),
+        ),
+    ] = None,
+) -> DocumentUploadResponse:
+    """上传一份文档。PR-M7-2 / D5:
 
-    校验:
-    - kind ∈ {tech_spec, scoring, template}
-    - 文件后缀白名单(``_ALLOWED_UPLOAD_EXT``)
-    - 单文件 ≤ ``settings.max_file_size_mb``
-    - 单用户当日累计 ≤ ``settings.daily_upload_quota_mb``(NFR-4)
+    - kind 可选;v1 三选一不再强制,改用 ``tags`` 自定义分类。
+    - 单文件 ≤ ``settings.max_file_upload_bytes`` (默认 200MB)。
+    - 项目总和 ≤ ``settings.max_project_upload_bytes`` (默认 500MB)。
+    - 写盘后立即 202 返回 + ``extract_status='pending'``;
+      抽取由 ``extract_document_task`` 后台处理,前端轮询 ``GET /documents``
+      看 ``extract_status`` 翻 done / failed。
     """
     project = await _get_project_or_404(db, project_id)
     if project.status not in ("init", "extracting", "outlining", "outline_ready"):
@@ -250,10 +265,11 @@ async def upload_document(
             f"project status '{project.status}' does not accept document uploads",
         )
 
-    if kind not in _VALID_DOC_KINDS:
+    if kind is not None and kind not in _VALID_DOC_KINDS:
+        # ⭐ PR-M7-2:kind 仍允许传入(老 UI 兼容),但只校验取值集合
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            f"kind must be one of {sorted(_VALID_DOC_KINDS)}",
+            f"kind must be one of {sorted(_VALID_DOC_KINDS)} or omitted",
         )
 
     if not file.filename:
@@ -270,77 +286,119 @@ async def upload_document(
     # 不一定准;以读完后的字节数为准)
     raw = await file.read()
     file_size = len(raw)
-    max_bytes = settings.max_file_size_mb * 1024 * 1024
-    if file_size > max_bytes:
+    # ⭐ PR-M7-2 / D5:单文件 200MB
+    if file_size > settings.max_file_upload_bytes:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             f"file too large: {file_size // 1024 // 1024}MB > "
-            f"{settings.max_file_size_mb}MB",
+            f"{settings.max_file_upload_bytes // 1024 // 1024}MB",
         )
 
-    # 日配额聚合(本用户、当日、按 settings.tz)
-    today_used = (
+    # ⭐ PR-M7-2 / D5:项目总和 500MB
+    project_total = (
         await db.execute(
             sa.text(
-                "SELECT COALESCE(SUM(d.file_size), 0) FROM documents d "
-                "JOIN projects p ON p.id = d.project_id "
-                "WHERE p.created_by = :u "
-                "AND d.created_at >= "
-                "    date_trunc('day', NOW() AT TIME ZONE :tz)"
+                "SELECT COALESCE(SUM(COALESCE(byte_size, file_size)), 0) "
+                "FROM documents WHERE project_id=:p"
             ),
-            {"u": user.id, "tz": settings.tz},
+            {"p": project_id},
         )
     ).scalar_one()
-    daily_quota_bytes = settings.daily_upload_quota_mb * 1024 * 1024
-    if int(today_used) + file_size > daily_quota_bytes:
+    if int(project_total) + file_size > settings.max_project_upload_bytes:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            f"今日上传配额已用 {int(today_used) // 1024 // 1024}MB,"
-            f"上限 {settings.daily_upload_quota_mb}MB",
+            f"项目总上传 {int(project_total) // 1024 // 1024}MB 已接近上限,"
+            f"再传本文件 ({file_size // 1024 // 1024}MB) 会超过 "
+            f"{settings.max_project_upload_bytes // 1024 // 1024}MB",
         )
 
     # 落盘
-    # ⭐ M1 perf:50MB 文件 write_bytes / Office 抽取(LibreOffice headless
-    # subprocess)是同步阻塞 IO,直接跑会卡死整个 Uvicorn event loop ——
-    # 所有 SSE / 其他请求会一起冻几十秒。包 asyncio.to_thread 让 IO 重活
-    # 走 default thread pool,event loop 仍能 serve 别的请求。
-    # 注:不需要建 arq queue 异步化(那是 M2 的 docx 路径才需要的更大改动);
-    # 上传是用户同步请求,UI 等响应,to_thread 已足够。
     project_dir = Path(project.dir_path)
     uploads_dir = project_dir / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = f"{kind}_{secrets.token_hex(4)}{suffix}"
+    name_prefix = kind or "doc"
+    safe_name = f"{name_prefix}_{secrets.token_hex(4)}{suffix}"
     stored_path = uploads_dir / safe_name
     await asyncio.to_thread(stored_path.write_bytes, raw)
 
-    # markitdown 抽取(失败容忍,记 extract_error 字段)
-    md_path: Path | None = None
-    extract_error: str | None = None
-    try:
-        md_text = await asyncio.to_thread(extract_file, stored_path)
-        md_path = uploads_dir / f"{kind}.md"
-        await asyncio.to_thread(md_path.write_text, md_text, encoding="utf-8")
-    except Exception as e:
-        log.exception(
-            "document_extract_failed",
-            project_id=project_id,
-            kind=kind,
-            path=str(stored_path),
-        )
-        extract_error = f"{type(e).__name__}: {e}"
+    parsed_tags: list[str] | None = None
+    if tags:
+        parsed_tags = [t.strip() for t in tags.split(",") if t.strip()] or None
 
     doc = Document(
         project_id=project_id,
         kind=kind,
         original_filename=file.filename,
-        markdown_path=str(md_path) if md_path else None,
+        markdown_path=None,
         file_size=file_size,
-        extract_error=extract_error,
+        byte_size=file_size,
+        mime_type=file.content_type or None,
+        tags=parsed_tags,
+        extract_error=None,
     )
     db.add(doc)
     await db.commit()
     await db.refresh(doc)
-    return doc
+
+    # ⭐ PR-M7-2:把抽取异步化,不阻塞 HTTP 响应
+    arq_pool = getattr(request.app.state, "arq_pool", None)
+    if arq_pool is not None:
+        try:
+            await arq_pool.enqueue_job(
+                "extract_document_task",
+                document_id=doc.id,
+                stored_path=str(stored_path),
+            )
+        except Exception:
+            # 入队失败不阻挡 201 — 用户可手动 retry(后续 PR 加端点)
+            log.exception(
+                "extract_document_enqueue_failed",
+                document_id=doc.id,
+                project_id=project_id,
+            )
+    else:
+        # arq_pool 缺失时退化:原地同步抽取一次,保证向后兼容
+        try:
+            md_text = await asyncio.to_thread(extract_file, stored_path)
+            md_path = uploads_dir / f"{name_prefix}_{doc.id}.md"
+            await asyncio.to_thread(md_path.write_text, md_text, encoding="utf-8")
+            doc.markdown_path = str(md_path)
+            doc.structured_html = md_text
+        except Exception as e:
+            log.exception(
+                "document_extract_failed_inline",
+                project_id=project_id,
+                document_id=doc.id,
+            )
+            doc.extract_error = f"{type(e).__name__}: {e}"
+        await db.commit()
+        await db.refresh(doc)
+
+    _ = user
+    return _document_to_response(doc)
+
+
+def _document_to_response(doc: Document) -> DocumentUploadResponse:
+    """计算 ``extract_status``:有 markdown_path 或 structured_html → done;
+    有 extract_error → failed;否则 pending(task 还在跑)。"""
+    if doc.extract_error:
+        extract_status: Literal["pending", "done", "failed"] = "failed"
+    elif doc.markdown_path or doc.structured_html:
+        extract_status = "done"
+    else:
+        extract_status = "pending"
+    return DocumentUploadResponse(
+        id=doc.id,
+        project_id=doc.project_id,
+        kind=doc.kind,
+        original_filename=doc.original_filename,
+        file_size=doc.file_size,
+        byte_size=doc.byte_size,
+        mime_type=doc.mime_type,
+        tags=doc.tags,
+        extract_error=doc.extract_error,
+        extract_status=extract_status,
+    )
 
 
 # ========== /start ==========

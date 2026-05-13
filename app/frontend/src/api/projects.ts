@@ -145,14 +145,18 @@ export function useUploadDocument() {
     mutationFn: ({
       projectId,
       kind,
+      tags,
       file,
     }: {
       projectId: number
-      kind: DocumentKind
+      // PR-M7-2:kind 可选,旧 UI 传值则保留;新 UI 用 tags
+      kind?: DocumentKind | null
+      tags?: string[]
       file: File
     }) => {
       const fd = new FormData()
-      fd.append('kind', kind)
+      if (kind) fd.append('kind', kind)
+      if (tags && tags.length > 0) fd.append('tags', tags.join(','))
       fd.append('file', file)
       return apiFetch<DocumentDTO>(`/api/projects/${projectId}/documents`, {
         method: 'POST',

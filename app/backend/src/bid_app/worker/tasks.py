@@ -39,7 +39,7 @@ from ..services.concurrency import (
     try_acquire_project_slot,
     wake_queued_projects,
 )
-from ..services.document_extractor import extract_for_project
+from ..services.document_extractor import extract_file, extract_for_project
 from ..services.docx_export import export_chapter_docx, export_docx
 from ..services.llm import ChapterGenerationFailed
 from ..workflow.graph import build_graph
@@ -1338,3 +1338,84 @@ async def _run_chapter_docx_pipeline(
         raise
 
     return await _commit_docx_done(docx_job_id, final_path)
+
+
+# ----- document extract (PR-M7-2) ---------------------------------------
+
+
+async def extract_document_task(
+    ctx: dict[str, Any],
+    *,
+    document_id: int,
+    stored_path: str,
+) -> dict[str, Any]:
+    """异步抽取上传文档为 markdown + structured_html。
+
+    D-AY:``max_tries=1``——失败后 Document.extract_error 字段记错,UI 提示
+    用户重传(不静默重试)。
+    """
+    del ctx
+    path = Path(stored_path)
+    if not path.exists():
+        async with session_factory() as s:
+            await s.execute(
+                sa.text(
+                    "UPDATE documents SET extract_error=:e "
+                    "WHERE id=:i AND markdown_path IS NULL"
+                ),
+                {"e": "stored file missing on disk", "i": document_id},
+            )
+            await s.commit()
+        return {"status": "failed", "error": "stored file missing"}
+
+    try:
+        # 抽取是同步阻塞 IO(LibreOffice + markitdown),用 to_thread 拿出
+        # event loop;arq worker 单 task 跑也不会卡其他 task。
+        import asyncio as _asyncio
+
+        md_text = await _asyncio.to_thread(extract_file, path)
+    except Exception as e:
+        log.exception(
+            "extract_document_task_failed",
+            document_id=document_id,
+            stored_path=stored_path,
+        )
+        async with session_factory() as s:
+            await s.execute(
+                sa.text(
+                    "UPDATE documents SET extract_error=:e WHERE id=:i"
+                ),
+                {
+                    "e": f"{type(e).__name__}: {e}"[:2000],
+                    "i": document_id,
+                },
+            )
+            await s.commit()
+        return {"status": "failed", "error": f"{type(e).__name__}"}
+
+    # 写 .md 文件与 DB 双轨。structured_html 字段拿 markdown 文本兜底,
+    # PR-M7-3 在 blackboard 节点会把它转 HTML 后聚合到磁盘黑板。
+    md_path = path.with_suffix(".md")
+    try:
+        import asyncio as _asyncio
+
+        await _asyncio.to_thread(
+            md_path.write_text, md_text, encoding="utf-8"
+        )
+    except Exception:
+        log.exception(
+            "extract_document_md_write_failed",
+            document_id=document_id,
+            md_path=str(md_path),
+        )
+
+    async with session_factory() as s:
+        await s.execute(
+            sa.text(
+                "UPDATE documents SET markdown_path=:p, structured_html=:h, "
+                "extract_error=NULL WHERE id=:i"
+            ),
+            {"p": str(md_path), "h": md_text, "i": document_id},
+        )
+        await s.commit()
+    return {"status": "done", "document_id": document_id}

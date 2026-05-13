@@ -139,7 +139,13 @@ class OutlineResponse(BaseModel):
 class DocumentUploadResponse(BaseModel):
     id: int
     project_id: int
-    kind: Literal["tech_spec", "scoring", "template"]
+    # PR-M7-2:kind 不再强制三选一;tags 取代分类语义。
+    kind: str | None = None
     original_filename: str
     file_size: int
+    byte_size: int | None = None
+    mime_type: str | None = None
+    tags: list[str] | None = None
     extract_error: str | None = None
+    # PR-M7-2:异步抽取状态。pending = 抽取 task 已入队但未跑完。
+    extract_status: Literal["pending", "done", "failed"] = "pending"
