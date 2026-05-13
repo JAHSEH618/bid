@@ -13,6 +13,7 @@ const STATUS_LABEL: Record<ProjectStatus, string> = {
   init: '草稿',
   queued: '排队中',
   extracting: '解析文档',
+  awaiting_material_understanding: '待确认材料理解',
   outlining: '生成提纲',
   outline_ready: '提纲待确认',
   running: '生成中',
@@ -20,6 +21,8 @@ const STATUS_LABEL: Record<ProjectStatus, string> = {
   done: '已完成',
   failed: '失败',
   aborted: '已中止',
+  aborted_v1: 'v1 项目已废弃',
+  aborted_schema_v1: 'v1 schema 已弃用',
 }
 
 const STATUS_VARIANT: Record<
@@ -29,6 +32,7 @@ const STATUS_VARIANT: Record<
   init: 'outline',
   queued: 'muted',
   extracting: 'muted',
+  awaiting_material_understanding: 'warning',
   outlining: 'muted',
   outline_ready: 'warning',
   running: 'muted',
@@ -36,6 +40,8 @@ const STATUS_VARIANT: Record<
   done: 'success',
   failed: 'destructive',
   aborted: 'outline',
+  aborted_v1: 'outline',
+  aborted_schema_v1: 'outline',
 }
 
 // R-12 进度感知:点击卡片前用户能看到「下一步该做什么」的简短提示。
@@ -43,6 +49,7 @@ const STAGE_HINT: Record<ProjectStatus, string> = {
   init: '点击进入,上传招标文档',
   queued: '排队中,等待并发名额释放后自动启动',
   extracting: 'AI 正在解析上传的招标文档',
+  awaiting_material_understanding: 'LLM 已读完材料,点击进入确认理解',
   outlining: 'AI 正在生成方案提纲',
   outline_ready: '提纲已就绪,点击进入确认',
   running: '正在生成章节,可进入查看进度',
@@ -50,6 +57,8 @@ const STAGE_HINT: Record<ProjectStatus, string> = {
   done: '方案已完成,点击查看全文与下载',
   failed: '工作流失败,点击进入查看失败章节',
   aborted: '项目已中止',
+  aborted_v1: 'v1 旧项目,v2 升级后已废弃 — 请重建',
+  aborted_schema_v1: 'v1 checkpoint 无法在 v2 graph 上 resume,请重建',
 }
 
 const ACTIVE_STATUSES = new Set<ProjectStatus>([

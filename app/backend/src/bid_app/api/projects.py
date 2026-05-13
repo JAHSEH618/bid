@@ -32,6 +32,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -652,6 +653,142 @@ async def confirm_outline(
         ) from e
 
     return {"ok": True}
+
+
+# ========== /material-understanding (PR-M8-1) ==========
+
+
+@router.get("/{project_id}/material-understanding")
+async def get_material_understanding(
+    project_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """读取 LLM-0 输出的材料理解 JSON。
+
+    数据来源:LangGraph checkpoint 的 ``state.material_understanding``。
+    本期 MVP 走 SSE 推送 + 前端缓存,不开 DB 查询;若 checkpoint 不可用
+    则回 404 让用户重跑或刷新。
+    """
+    project = await _get_project_or_404(db, project_id)
+
+    saver = getattr(_router_app_state(), "checkpointer", None)
+    if saver is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "checkpointer 未初始化,请稍后重试",
+        )
+    run = await _get_active_run(db, project_id)
+    config = {"configurable": {"thread_id": run.langgraph_thread_id}}
+    try:
+        snapshot = await saver.aget(config)
+    except Exception as e:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"checkpoint 读取失败: {e}",
+        ) from e
+    state = (snapshot or {}).get("channel_values") or {}
+    payload = state.get("material_understanding")
+    if not payload:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"material_understanding 暂未就绪 (project status={project.status})",
+        )
+    return {"project_id": project_id, "material_understanding": payload}
+
+
+class MaterialUnderstandingDecisionRequest(BaseModel):
+    """``POST /material-understanding/decision`` 请求体。
+
+    - decision: pass / revise / skip
+    - feedback: revise 时必须非空;pass / skip 时忽略
+    """
+
+    decision: Literal["pass", "revise", "skip"]
+    feedback: str | None = None
+
+
+@router.post("/{project_id}/material-understanding/decision")
+async def decide_material_understanding(
+    project_id: int,
+    body: MaterialUnderstandingDecisionRequest,
+    request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, Any]:
+    """提交材料理解决策 (D-K 兄弟节点,resume_review_task)。
+
+    revise 必须带非空 feedback;否则 LLM-0 收不到信号会原样重出。
+    """
+    project = await _get_project_or_404(db, project_id)
+    if project.status != "awaiting_material_understanding":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"project status must be awaiting_material_understanding, "
+            f"got {project.status}",
+        )
+
+    feedback = (body.feedback or "").strip()
+    if body.decision == "revise" and not feedback:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "revise 必须带 feedback",
+        )
+
+    run = await _get_active_run(db, project_id)
+
+    result = await try_acquire_project_slot(project_id)
+    if result.reason == "already_active":
+        raise HTTPException(status.HTTP_409_CONFLICT, "该项目已有任务在执行")
+    if not result.acquired:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="系统繁忙,请稍后重试",
+            headers={"Retry-After": "60"},
+        )
+
+    arq_pool = getattr(request.app.state, "arq_pool", None)
+    if arq_pool is None:
+        await release_project_slot(project_id, result.token)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
+        )
+
+    try:
+        await arq_pool.enqueue_job(
+            "resume_review_task",
+            project_id=project_id,
+            run_id=run.id,
+            thread_id=run.langgraph_thread_id,
+            resume_payload={
+                "kind": "material_understanding",
+                "decision": body.decision,
+                "feedback": feedback,
+            },
+            slot_token=result.token,
+            reviewer_id=user.id,
+        )
+    except Exception as e:
+        await release_project_slot(project_id, result.token)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "无法入队材料理解决策任务,请稍后重试",
+        ) from e
+
+    return {"ok": True}
+
+
+def _router_app_state() -> Any:
+    """读取当前 FastAPI app 的 state(用于拿 checkpointer)。
+
+    依赖在 main.py 把 ``checkpointer`` 挂到 ``app.state``;若没挂会回退到
+    None,调用方各自处理。
+    """
+    # 延迟 import 避免循环;每个 request 由 fastapi 注入 request 本身
+    # 也可以,但这里只读全局 app,够用了。
+    from ..main import app
+
+    return app.state
 
 
 # ========== /proposal(全文整合产物) ==========

@@ -43,6 +43,8 @@ from .nodes import (
     gen_visuals,
     generate_outline,
     human_review,
+    material_understanding,
+    material_understanding_review,
     merge_chapter,
     outline_review,
     parse_outline,
@@ -66,6 +68,18 @@ def _route_after_update(state: WorkflowState) -> str:
     )
 
 
+def _route_after_material_review(state: WorkflowState) -> str:
+    """PR-M8-1:material_understanding_review 之后的分支。
+
+    - revise → 回到 material_understanding 节点重新跑 LLM-0 (revision_feedback 已写)
+    - pass / skip → 进 generate_outline
+    """
+    decision = state.get("_material_review_decision") or "pass"
+    if decision == "revise":
+        return "material_understanding"
+    return "generate_outline"
+
+
 def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     """编译 LangGraph workflow。``checkpointer`` 由 worker lifecycle 注入。
 
@@ -80,6 +94,10 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     g = StateGraph(WorkflowState)
 
     g.add_node("extract_documents", extract_documents.run)
+    g.add_node("material_understanding", material_understanding.run)
+    g.add_node(
+        "material_understanding_review", material_understanding_review.run
+    )
     g.add_node("generate_outline", generate_outline.run)
     g.add_node("parse_outline", parse_outline.run)
     g.add_node("outline_review", outline_review.run)  # ⭐ P4 interrupt(D-K)
@@ -93,7 +111,17 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     g.add_node("assemble", assemble.run)
 
     g.set_entry_point("extract_documents")
-    g.add_edge("extract_documents", "generate_outline")
+    g.add_edge("extract_documents", "material_understanding")
+    g.add_edge("material_understanding", "material_understanding_review")
+    # PR-M8-1:material_review 之后按 decision 分支
+    g.add_conditional_edges(
+        "material_understanding_review",
+        _route_after_material_review,
+        {
+            "material_understanding": "material_understanding",
+            "generate_outline": "generate_outline",
+        },
+    )
     g.add_edge("generate_outline", "parse_outline")
     g.add_edge("parse_outline", "outline_review")
     g.add_edge("outline_review", "pick_chapter")

@@ -10,6 +10,7 @@ import type { ProjectDTO, ProjectStatus } from '@/lib/types'
 const ACTIVE_STATUSES: ReadonlySet<ProjectStatus> = new Set([
   'queued',
   'extracting',
+  'awaiting_material_understanding',
   'outlining',
   'outline_ready',
   'running',
@@ -20,6 +21,7 @@ const STATUS_HINT: Record<ProjectStatus, string> = {
   init: '草稿',
   queued: '排队中',
   extracting: '解析文档',
+  awaiting_material_understanding: '待确认理解',
   outlining: '生成提纲',
   outline_ready: '提纲待确认',
   running: '生成章节',
@@ -27,6 +29,8 @@ const STATUS_HINT: Record<ProjectStatus, string> = {
   done: '已完成',
   failed: '失败',
   aborted: '已中止',
+  aborted_v1: 'v1 废弃',
+  aborted_schema_v1: 'v1 schema 废弃',
 }
 
 const STATUS_VARIANT: Record<
@@ -36,6 +40,7 @@ const STATUS_VARIANT: Record<
   init: 'secondary',
   queued: 'info',
   extracting: 'info',
+  awaiting_material_understanding: 'warning',
   outlining: 'info',
   outline_ready: 'warning',
   running: 'info',
@@ -43,6 +48,8 @@ const STATUS_VARIANT: Record<
   done: 'success',
   failed: 'destructive',
   aborted: 'outline',
+  aborted_v1: 'outline',
+  aborted_schema_v1: 'outline',
 }
 
 function pickActive(projects: ProjectDTO[] | undefined): ProjectDTO[] {
@@ -87,6 +94,9 @@ export function GlobalProgressBanner() {
 }
 
 function routeFor(p: ProjectDTO): string {
+  if (p.status === 'awaiting_material_understanding') {
+    return `/projects/${p.id}/understanding`
+  }
   if (
     p.status === 'outline_ready' ||
     p.status === 'extracting' ||

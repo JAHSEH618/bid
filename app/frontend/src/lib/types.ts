@@ -16,12 +16,14 @@ export interface UserDTO {
 }
 
 // REQUIREMENTS FR-1.2 + 后端 models/project.py:
-//   init → extracting → outlining → outline_ready → running → awaiting_review
-//   → ... → done / failed / aborted;旁路 queued(FR-1.3 D-T)。
+//   init → extracting → awaiting_material_understanding (PR-M8-1)
+//   → outlining → outline_ready → running → awaiting_review
+//   → ... → done / failed / aborted / aborted_v1 / aborted_schema_v1;旁路 queued。
 export type ProjectStatus =
   | 'init'
   | 'queued'
   | 'extracting'
+  | 'awaiting_material_understanding'
   | 'outlining'
   | 'outline_ready'
   | 'running'
@@ -29,6 +31,8 @@ export type ProjectStatus =
   | 'done'
   | 'failed'
   | 'aborted'
+  | 'aborted_v1'
+  | 'aborted_schema_v1'
 
 // 与后端 ProjectResponse(schemas/projects.py)对齐。
 //   - 没有 current_index / total_chapters(由前端从 /outline 派生)

@@ -76,6 +76,10 @@ class WorkflowState(TypedDict, total=False):
     # 若为 None / [] 走"自动确认",直接用 LLM-1 生成的 chapters 进入循环。
     _outline_confirmed_chapters: list[dict[str, Any]] | None
 
+    # === PR-M8-1 material_understanding 评审临时载体 ===
+    _material_review_decision: str  # pass | revise | skip
+    _material_review_feedback: str
+
     # === 节点之间的临时载体 ===
     # generate_outline 输出 LLM-1 原始 JSON 字符串,parse_outline 消费。
     _outline_json: str

@@ -14,6 +14,7 @@ import { ProposalPage } from './pages/ProposalPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { AdminPage } from './pages/AdminPage'
 import { DesignTokensPage } from './pages/dev/DesignTokensPage'
+import { MaterialUnderstandingPage } from './pages/MaterialUnderstandingPage'
 
 // IMPLEMENTATION_SPEC §16.1 + REQUIREMENTS P0~P8。
 // /change-password 用 allowMustChange 让 must_change_password=true 的用户能访问。
@@ -72,6 +73,15 @@ export const router = createBrowserRouter([
         element: (
           <Authed>
             <DocumentUploadPage />
+          </Authed>
+        ),
+      },
+      {
+        // PR-M8-1:材料理解评审页(extract_documents 后、generate_outline 前)
+        path: '/projects/:id/understanding',
+        element: (
+          <Authed>
+            <MaterialUnderstandingPage />
           </Authed>
         ),
       },
