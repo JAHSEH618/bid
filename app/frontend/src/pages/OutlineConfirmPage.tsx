@@ -3,22 +3,29 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
   ArrowRight,
-  CheckCircle2,
   GripVertical,
-  ListOrdered,
   Loader2,
-  Pencil,
   Plus,
-  Sparkles,
   X,
 } from 'lucide-react'
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -30,14 +37,26 @@ import {
 } from '@/api/projects'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
+import { cn } from '@/lib/utils'
 import type { OutlineChapterIn } from '@/lib/types'
 
+// PR-M8-2:editorial 提纲编辑 — 拖拽排序 + 增删改 + 锁定目录。
+// MVP 保留扁平结构(chapters[]),不引入树形嵌套;@dnd-kit 提供拖拽体验。
+// 业务逻辑、确认端点契约 (PUT /api/projects/{id}/outline) 不变。
+
 interface EditableChapter {
-  id: string | null
+  id: string
+  serverId: string | null
   title: string
   summary: string
   key_points: string[]
   target_pages: number
+}
+
+let _localIdCounter = 0
+function localId(): string {
+  _localIdCounter += 1
+  return `local-${Date.now()}-${_localIdCounter}`
 }
 
 export function OutlineConfirmPage() {
@@ -50,46 +69,68 @@ export function OutlineConfirmPage() {
   const confirm = useConfirmOutline()
   const [chapters, setChapters] = useState<EditableChapter[]>([])
   const [edited, setEdited] = useState(false)
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 4 },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  )
 
   useEffect(() => {
     if (!outline.data) return
     setChapters(
       outline.data.chapters.map((c) => ({
-        id: c.id,
+        id: localId(),
+        serverId: c.id,
         title: c.title,
         summary: c.summary ?? '',
         key_points: c.key_points,
         target_pages: c.target_pages,
       })),
     )
+    setEdited(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [outline.data?.run_id, outline.data?.chapters.length])
 
   const isReady = project.data?.status === 'outline_ready'
   const totalPages = chapters.reduce((s, c) => s + (c.target_pages || 0), 0)
 
-  const updateChapter = (i: number, patch: Partial<EditableChapter>) => {
+  const updateChapter = (id: string, patch: Partial<EditableChapter>) => {
     setEdited(true)
     setChapters((prev) =>
-      prev.map((c, idx) => (idx === i ? { ...c, ...patch } : c)),
+      prev.map((c) => (c.id === id ? { ...c, ...patch } : c)),
     )
   }
-  const removeChapter = (i: number) => {
+  const removeChapter = (id: string) => {
     setEdited(true)
-    setChapters((prev) => prev.filter((_, idx) => idx !== i))
+    setChapters((prev) => prev.filter((c) => c.id !== id))
   }
   const addChapter = () => {
     setEdited(true)
     setChapters((prev) => [
       ...prev,
       {
-        id: null,
+        id: localId(),
+        serverId: null,
         title: '新章节',
         summary: '',
         key_points: ['要点 1'],
         target_pages: 3,
       },
     ])
+  }
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    setEdited(true)
+    setChapters((prev) => {
+      const fromIdx = prev.findIndex((c) => c.id === active.id)
+      const toIdx = prev.findIndex((c) => c.id === over.id)
+      if (fromIdx < 0 || toIdx < 0) return prev
+      return arrayMove(prev, fromIdx, toIdx)
+    })
   }
 
   const handleConfirm = async () => {
@@ -116,7 +157,7 @@ export function OutlineConfirmPage() {
     }
     const payload: OutlineChapterIn[] = edited
       ? chapters.map((c) => ({
-          id: c.id,
+          id: c.serverId,
           title: c.title.trim(),
           summary: c.summary.trim() || null,
           key_points: c.key_points.map((p) => p.trim()).filter(Boolean),
@@ -126,7 +167,7 @@ export function OutlineConfirmPage() {
     try {
       await confirm.mutateAsync({ projectId, chapters: payload })
       toast({
-        title: edited ? '已确认编辑后的提纲' : '已沿用 AI 生成的提纲',
+        title: edited ? '已锁定编辑后的目录' : '已沿用 AI 生成的目录',
         variant: 'success',
       })
       navigate(`/projects/${projectId}/review`)
@@ -141,223 +182,241 @@ export function OutlineConfirmPage() {
 
   if (project.isLoading || outline.isLoading) {
     return (
-      <div className="container max-w-4xl space-y-4 py-8">
+      <div className="mx-auto max-w-4xl px-gutter py-12 space-y-4">
         <div className="skeleton h-8 w-1/3" />
         <div className="skeleton h-4 w-1/2" />
         {Array.from({ length: 3 }).map((_, i) => (
-          <div key={i} className="skeleton h-36 rounded-xl" />
+          <div key={i} className="skeleton h-32" />
         ))}
       </div>
     )
   }
   if (!project.data) {
     return (
-      <div className="container py-12 text-sm text-destructive">
+      <div className="mx-auto max-w-4xl px-gutter py-12 text-sm text-destructive">
         项目不存在或无访问权限
       </div>
     )
   }
 
   return (
-    <div className="container max-w-4xl space-y-6 py-8 page-enter">
-      <Button variant="ghost" size="sm" asChild>
+    <div className="mx-auto max-w-5xl px-gutter py-12 page-enter">
+      <Button variant="subtle" size="sm" asChild className="mb-8">
         <Link to="/">
           <ArrowLeft className="mr-1 h-4 w-4" />
           返回项目列表
         </Link>
       </Button>
 
-      <header className="space-y-2">
-        <div className="flex items-center gap-2">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            {project.data.name}
-          </h1>
-          <Badge variant="muted" className="text-[11px]">
-            确认提纲
-          </Badge>
-        </div>
-        <p className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Sparkles className="h-4 w-4 text-primary/70" />
-          AI 已根据技术需求与评分细则生成{' '}
-          <span className="font-medium text-foreground">{chapters.length}</span>{' '}
-          章提纲,目标总页数约{' '}
-          <span className="font-medium text-foreground">{totalPages}</span> 页
-          {edited && (
-            <Badge variant="warning" className="ml-1 text-[10px]">
-              <Pencil className="h-2.5 w-2.5" />
-              已编辑
-            </Badge>
-          )}
+      <header className="mb-12 border-b border-rule pb-8">
+        <p className="text-meta text-mute mb-3">
+          Outline · Step 3 / 3
         </p>
+        <h1 className="font-display text-h1 leading-tight text-ink">
+          {project.data.name} · 目录确认
+        </h1>
+        <p className="mt-4 max-w-prose text-sm text-mute">
+          拖拽 <GripVertical aria-hidden="true" className="inline h-3 w-3 align-middle" /> 调整顺序;直接编辑标题与关键要点;
+          锁定后进入章节生成阶段 (锁定后目录不可逆调整)。
+        </p>
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <Badge variant="outline">{chapters.length} 章</Badge>
+          <Badge variant="outline">目标 {totalPages} 页</Badge>
+          {edited && <Badge variant="warn">已编辑</Badge>}
+          {!isReady && (
+            <span className="text-meta text-mute">
+              status · {project.data.status}
+            </span>
+          )}
+        </div>
       </header>
 
       {!isReady && (
-        <Card
-          role="status"
-          aria-live="polite"
-          className="border-amber-200 bg-amber-50/70"
-        >
-          <CardContent className="flex items-center gap-2 py-4 text-sm text-amber-900">
-            <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
-            提纲尚未就绪(当前状态:{project.data.status})。请稍后刷新
-          </CardContent>
-        </Card>
+        <div className="mb-10 relative flex items-start gap-3 border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-warn before:absolute before:left-0 before:right-0 before:top-0 before:h-px before:bg-warn">
+          <Loader2 aria-hidden="true" className="mt-0.5 h-4 w-4 animate-spin" />
+          <span className="flex-1 leading-relaxed">
+            目录尚未就绪 (当前状态:{project.data.status})。LLM-1 仍在生成,稍后自动刷新。
+          </span>
+        </div>
       )}
 
-      <div className="space-y-3">
-        {chapters.map((c, i) => (
-          <Card
-            key={c.id ?? `new-${i}`}
-            className="border-border/70 transition-shadow hover:shadow-sm"
-          >
-            <CardHeader className="flex flex-row items-center gap-2 pb-3">
-              <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary">
-                {i + 1}
-              </span>
-              <GripVertical
-                aria-hidden="true"
-                className="h-4 w-4 cursor-grab text-muted-foreground/60"
-              />
-              <span className="text-xs text-muted-foreground">
-                第 {i + 1} 章
-              </span>
-              <Button
-                variant="ghost"
-                size="iconSm"
-                className="ml-auto text-muted-foreground hover:text-destructive"
-                onClick={() => removeChapter(i)}
-                aria-label={`移除第 ${i + 1} 章`}
-                title="移除本章"
-              >
-                <X className="h-4 w-4" aria-hidden="true" />
-              </Button>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <Input
-                value={c.title}
-                placeholder="章节标题"
-                aria-label={`第 ${i + 1} 章标题`}
-                className="text-[15px] font-medium"
-                onChange={(e) => updateChapter(i, { title: e.target.value })}
-              />
-              <Textarea
-                value={c.summary}
-                placeholder="章节简介(可选,会作为本章生成上下文)"
-                aria-label={`第 ${i + 1} 章简介`}
-                rows={2}
-                onChange={(e) => updateChapter(i, { summary: e.target.value })}
-              />
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
-                <div className="flex-1">
-                  <label
-                    htmlFor={`chapter-keypoints-${i}`}
-                    className="text-xs font-medium text-muted-foreground"
-                  >
-                    关键要点 · 每行一条
-                  </label>
-                  <Textarea
-                    id={`chapter-keypoints-${i}`}
-                    value={c.key_points.join('\n')}
-                    placeholder="一行一条关键要点"
-                    rows={3}
-                    className="mt-1"
-                    onChange={(e) =>
-                      updateChapter(i, {
-                        key_points: e.target.value.split('\n'),
-                      })
-                    }
-                  />
-                </div>
-                <div className="grid gap-3 sm:w-40 sm:grid-cols-1">
-                  <div>
-                    <label
-                      htmlFor={`chapter-target-pages-${i}`}
-                      className="text-xs font-medium text-muted-foreground"
-                    >
-                      目标页数
-                    </label>
-                    <Input
-                      id={`chapter-target-pages-${i}`}
-                      type="number"
-                      inputMode="numeric"
-                      min={1}
-                      max={10}
-                      value={c.target_pages}
-                      className="mt-1 text-center"
-                      onChange={(e) =>
-                        updateChapter(i, {
-                          target_pages: Math.max(
-                            1,
-                            Math.min(10, Number(e.target.value) || 1),
-                          ),
-                        })
-                      }
-                    />
-                    <p className="mt-1 text-[10px] text-muted-foreground">
-                      1 ~ 10 页
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-
-        <Button
-          variant="outline"
-          className="w-full border-dashed py-6 hover:border-primary/40 hover:bg-primary/5"
-          onClick={addChapter}
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={handleDragEnd}
+      >
+        <SortableContext
+          items={chapters.map((c) => c.id)}
+          strategy={verticalListSortingStrategy}
         >
-          <Plus className="mr-1 h-4 w-4" />
-          添加章节
+          <ul className="space-y-4">
+            {chapters.map((c, i) => (
+              <SortableChapter
+                key={c.id}
+                chapter={c}
+                index={i}
+                onChange={(patch) => updateChapter(c.id, patch)}
+                onRemove={() => removeChapter(c.id)}
+              />
+            ))}
+          </ul>
+        </SortableContext>
+      </DndContext>
+
+      <Button
+        variant="secondary"
+        className="mt-6 w-full border-dashed py-5"
+        onClick={addChapter}
+      >
+        <Plus className="mr-1 h-4 w-4" />
+        添加章节
+      </Button>
+
+      <div className="mt-16 border-t border-rule pt-8 flex flex-col items-stretch gap-3 sm:flex-row sm:justify-end">
+        <Button asChild variant="ghost">
+          <Link to={`/projects/${projectId}/upload`}>返回上传</Link>
+        </Button>
+        <Button
+          onClick={handleConfirm}
+          disabled={confirm.isPending}
+          size="lg"
+          variant="accent"
+        >
+          {confirm.isPending ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              锁定中…
+            </>
+          ) : (
+            <>
+              锁定目录 · 开始生成章节
+              <ArrowRight className="ml-2 h-4 w-4" />
+            </>
+          )}
         </Button>
       </div>
+    </div>
+  )
+}
 
-      {/* 确认区:用户友好文案,不再暴露"发送空数组"等技术细节 */}
-      <Card className="border-primary/30 bg-primary/[0.04] shadow-sm">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <ListOrdered className="h-4 w-4 text-primary" />
-            确认提纲并启动章节生成
-          </CardTitle>
-          <CardDescription>
-            {edited ? (
-              <span className="flex items-center gap-1.5">
-                <Pencil className="h-3.5 w-3.5" />
-                已编辑提纲,确认后将以编辑后的版本启动章节生成
-              </span>
-            ) : (
-              <span className="flex items-center gap-1.5">
-                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                提纲已生成,可直接确认或编辑后再启动
-              </span>
-            )}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col items-stretch gap-2 sm:flex-row sm:justify-end">
-          <Button asChild variant="outline">
-            <Link to={`/projects/${projectId}/upload`}>返回上传</Link>
-          </Button>
-          <Button
-            onClick={handleConfirm}
-            disabled={confirm.isPending}
-            size="lg"
-            className="shadow-md shadow-primary/15"
-          >
-            {confirm.isPending ? (
-              <>
-                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                提交中…
-              </>
-            ) : (
-              <>
-                确认并开始生成章节
-                <ArrowRight className="ml-1 h-4 w-4" />
-              </>
-            )}
-          </Button>
+function SortableChapter({
+  chapter,
+  index,
+  onChange,
+  onRemove,
+}: {
+  chapter: EditableChapter
+  index: number
+  onChange: (patch: Partial<EditableChapter>) => void
+  onRemove: () => void
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: chapter.id })
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : 1,
+  }
+
+  return (
+    <li ref={setNodeRef} style={style}>
+      <Card className={cn(isDragging && 'ring-2 ring-accent')}>
+        <CardContent className="grid grid-cols-12 gap-4 p-6">
+          <div className="col-span-1 flex flex-col items-center gap-2">
+            <button
+              type="button"
+              className="cursor-grab text-mute hover:text-ink"
+              aria-label={`拖拽第 ${index + 1} 章重排`}
+              {...attributes}
+              {...listeners}
+            >
+              <GripVertical className="h-5 w-5" />
+            </button>
+            <span className="font-display text-h3 tabular-nums leading-none text-mute">
+              {String(index + 1).padStart(2, '0')}
+            </span>
+          </div>
+          <div className="col-span-10 space-y-3">
+            <Input
+              value={chapter.title}
+              placeholder="章节标题"
+              aria-label={`第 ${index + 1} 章标题`}
+              className="font-display text-h3 px-0"
+              onChange={(e) => onChange({ title: e.target.value })}
+            />
+            <Textarea
+              value={chapter.summary}
+              placeholder="章节简介(可选,会作为本章生成上下文)"
+              aria-label={`第 ${index + 1} 章简介`}
+              rows={2}
+              onChange={(e) => onChange({ summary: e.target.value })}
+            />
+            <div className="grid grid-cols-12 gap-3">
+              <div className="col-span-9">
+                <label
+                  htmlFor={`chapter-keypoints-${chapter.id}`}
+                  className="text-meta text-mute"
+                >
+                  关键要点 · 每行一条
+                </label>
+                <Textarea
+                  id={`chapter-keypoints-${chapter.id}`}
+                  value={chapter.key_points.join('\n')}
+                  rows={3}
+                  className="mt-1"
+                  onChange={(e) =>
+                    onChange({ key_points: e.target.value.split('\n') })
+                  }
+                />
+              </div>
+              <div className="col-span-3">
+                <label
+                  htmlFor={`chapter-pages-${chapter.id}`}
+                  className="text-meta text-mute"
+                >
+                  目标页数
+                </label>
+                <Input
+                  id={`chapter-pages-${chapter.id}`}
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  max={10}
+                  value={chapter.target_pages}
+                  className="mt-1 text-center"
+                  onChange={(e) =>
+                    onChange({
+                      target_pages: Math.max(
+                        1,
+                        Math.min(10, Number(e.target.value) || 1),
+                      ),
+                    })
+                  }
+                />
+                <p className="text-meta text-mute mt-1">1 ~ 10 页</p>
+              </div>
+            </div>
+          </div>
+          <div className="col-span-1 flex justify-end">
+            <Button
+              variant="ghost"
+              size="iconSm"
+              className="text-mute hover:text-destructive"
+              onClick={onRemove}
+              aria-label={`移除第 ${index + 1} 章`}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </CardContent>
       </Card>
-    </div>
+    </li>
   )
 }
