@@ -5,6 +5,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { MarkdownRenderer } from '@/lib/markdown'
 import { DataExportPanel } from '@/components/DataExportPanel'
+import { PlaceholderBanner } from '@/components/PlaceholderBanner'
 import { useProject, useProposalMarkdown } from '@/api/projects'
 import { ApiError } from '@/lib/apiFetch'
 
@@ -85,6 +86,9 @@ export function ProposalPage() {
         projectName={project.data.name}
         markdown={proposal.data?.markdown}
       />
+
+      {/* PR-M6-1 / D3:全文出现脱敏占位符时顶部提示 + 清单。 */}
+      {proposal.data && <PlaceholderBanner markdown={proposal.data.markdown} />}
 
       <Card className="overflow-hidden border-border/70 shadow-sm">
         <CardContent className="px-8 py-8 sm:px-12 sm:py-10">

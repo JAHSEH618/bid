@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     # M1 测试用 fake LLM 开关(§22)
     bid_app_fake_llm: bool = False
 
+    # PR-M6-1 / D3:脱敏字典 YAML 路径覆盖。
+    # 默认指向 src/bid_app/services/redaction_rules.yaml;运维可以在 .env 里
+    # 指一份项目级私有词典(里头加客户特定 allowlist / org_suffixes 等)。
+    bid_app_redaction_dict_path: str | None = None
+
     @field_validator("bid_app_master_key", "jwt_secret")
     @classmethod
     def _hex64(cls, v: str) -> str:

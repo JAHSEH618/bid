@@ -31,6 +31,9 @@ dependencies = [
   "httpx>=0.28,<0.29",
   "click>=8.1,<9",
   "rich>=13.9,<14",
+  # PR-M6-1 / D3:脱敏规则 YAML 解析。pyyaml 已经被 markitdown/litellm 等
+  # 上游间接拉入,这里显式声明避免上游版本调整时无声丢依赖。
+  "pyyaml>=6.0,<7",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +44,7 @@ dev = [
   "ruff>=0.8",
   "mypy>=1.13",
   "types-passlib",
+  "types-PyYAML",
 ]
 
 [project.scripts]
@@ -67,6 +71,10 @@ ignore = ["E501", "N818"]
 # prompt 文件对中文 LLM,正文里 × ÷ — 等数学/排版字符是面向阅读者的真实内容,
 # RUF001/RUF002/RUF003(ambiguous unicode)在这里全是误报,豁免整个 prompts/。
 "src/bid_app/workflow/prompts/*.py" = ["RUF001", "RUF002", "RUF003"]
+# PR-M6-1:脱敏服务面向中文文本(org_suffixes 等),docstring 与 inline 注释
+# 大量使用中文标点(全角括号 / 引号 / 顿号),RUF002 在这里也是误报。
+"src/bid_app/services/redaction.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_redaction.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.format]
 quote-style = "double"

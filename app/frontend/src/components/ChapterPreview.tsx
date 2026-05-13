@@ -1,6 +1,7 @@
 import { Sparkles } from 'lucide-react'
 import { MarkdownRenderer } from '@/lib/markdown'
 import { cn } from '@/lib/utils'
+import { PlaceholderBanner } from '@/components/PlaceholderBanner'
 
 export interface ChapterPreviewProps {
   markdown: string
@@ -9,6 +10,7 @@ export interface ChapterPreviewProps {
 
 // 单章预览,接 ChapterReviewPage 主区。
 // 流式期间末尾加一个细长光标 + 顶部"AI 正在生成"标识。
+// PR-M6-1 / D3:章节内若含 `__XXX_NNN__` 占位符,顶部追加脱敏提示 banner。
 export function ChapterPreview({ markdown, isStreaming }: ChapterPreviewProps) {
   if (!markdown) {
     return (
@@ -23,6 +25,8 @@ export function ChapterPreview({ markdown, isStreaming }: ChapterPreviewProps) {
   }
   return (
     <div className="space-y-3">
+      {/* 流式中也展示,因为 token 一边推一边可能就含占位符 */}
+      <PlaceholderBanner markdown={markdown} />
       {isStreaming && (
         <div
           role="status"

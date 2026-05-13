@@ -33,6 +33,7 @@ from ..config import settings
 from ..core.error_log import append_error  # ⭐ D-BE
 from ..db import session_factory
 from ..events.bus import event_bus
+from .redaction import RedactionContext, redact_messages
 from .token_usage import record_token_usage
 
 log = structlog.get_logger()
@@ -88,6 +89,7 @@ async def call_llm_stream(
     run_id: int | None = None,
     chapter_index: int | None = None,
     on_partial: Any = None,  # async callable[[str], Awaitable[None]] | None
+    redaction_ctx: RedactionContext | None = None,
     **kw: Any,
 ) -> StreamResult:
     """流式调用 + 重试 + 超时 + 推 SSE token + 记 token_usage。
@@ -97,11 +99,20 @@ async def call_llm_stream(
     100 chunks **或** 距上次回调 ≥ 1s 触发一次,传入"截至此刻完整 partial
     markdown"。write_chapter 用它 periodic flush DB(让用户刷新页面也
     能看到流走的内容)。回调内部异常被 swallow,不打断流。
+
+    ⭐ D3 (PR-M6-1):所有 messages.content 在出栈点统一脱敏。caller 不传
+    ``redaction_ctx`` 时函数内自建一个;同一调用内重复出现的敏感值得到
+    同一占位符。脱敏映射不持久化,函数返回后 GC。
     """
     if _FAKE:
         return await _fake_stream(
             model, messages, project_id, chapter_index, on_partial
         )
+
+    # ⭐ D3:出栈前脱敏。同一 retry 链共用同一 ctx → 占位符一致。
+    if redaction_ctx is None:
+        redaction_ctx = RedactionContext()
+    redacted_messages = redact_messages(messages, redaction_ctx)
 
     backoffs = [int(s) for s in settings.llm_retry_backoff_s.split(",")]
     last_err: Exception | None = None
@@ -114,7 +125,7 @@ async def call_llm_stream(
                 try:
                     return await _do_stream(
                         model,
-                        messages,
+                        redacted_messages,
                         api_key,
                         user_id,
                         project_id,
@@ -302,6 +313,7 @@ async def call_llm_json(
     project_id: int,
     run_id: int | None = None,
     timeout_seconds: int | None = None,
+    redaction_ctx: RedactionContext | None = None,
     **kw: Any,
 ) -> tuple[dict[str, Any], StreamResult]:
     """非流式(LLM-1 / LLM-3 用)+ 重试 + 超时 + JSON 解析。
@@ -312,9 +324,15 @@ async def call_llm_json(
     - 超时默认 120s
 
     返回 ``(parsed_json, stream_result)``。``stream_result.text`` 是原始 JSON 字符串。
+
+    ⭐ D3 (PR-M6-1):同 ``call_llm_stream``,出栈前对 messages 脱敏。
     """
     if _FAKE:
         return await _fake_json(model, messages, project_id)
+
+    if redaction_ctx is None:
+        redaction_ctx = RedactionContext()
+    redacted_messages = redact_messages(messages, redaction_ctx)
 
     backoffs = [int(s) for s in settings.llm_retry_backoff_s.split(",")]
     timeout = timeout_seconds or 120
@@ -326,7 +344,7 @@ async def call_llm_json(
                 try:
                     response = await litellm.acompletion(
                         model=model,
-                        messages=messages,
+                        messages=redacted_messages,
                         api_key=api_key,
                         stream=False,
                         response_format={"type": "json_object"},

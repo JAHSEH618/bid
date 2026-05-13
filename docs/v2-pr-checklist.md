@@ -9,7 +9,7 @@
 ## PR 进度（每完成一个 PR check 一次,然后 commit + push）
 
 - [x] PR-UI-1 design tokens 基线
-- [ ] PR-M6-1 脱敏服务 (D3)
+- [x] PR-M6-1 脱敏服务 (D3)
 - [ ] PR-M6-2 单章 Word 导出
 - [ ] PR-M7-1 schema 迁移 + flush CLI
 - [ ] PR-M7-2 解除上传限制 (D5)
