@@ -641,7 +641,12 @@ async def confirm_outline(
             project_id=project_id,
             run_id=run.id,
             thread_id=run.langgraph_thread_id,
-            resume_payload={"kind": "outline_confirm", "chapters": edited},
+            resume_payload={
+                "kind": "outline_confirm",
+                "chapters": edited,
+                # PR-M9-1:把用户勾选的章节 id 一并传下游;空 / None → 全选
+                "selected_chapter_ids": body.selected_chapter_ids or None,
+            },
             slot_token=result.token,
             reviewer_id=user.id,
         )

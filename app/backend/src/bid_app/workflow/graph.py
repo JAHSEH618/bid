@@ -68,6 +68,16 @@ def _route_after_update(state: WorkflowState) -> str:
     )
 
 
+def _route_after_pick(state: WorkflowState) -> str:
+    """PR-M9-1:pick_chapter 后,若 current_index 已超过 chapters 长度
+    (常见于 selected 集合内章节全跑完,后面全是 skipped 的尾部),直接
+    进 assemble,不再调下游 generate gate。"""
+    chapters = state.get("chapters") or []
+    if state.get("current_index", 0) >= len(chapters):
+        return "assemble"
+    return "chapter_generate_gate"
+
+
 def _route_after_material_review(state: WorkflowState) -> str:
     """PR-M8-1:material_understanding_review 之后的分支。
 
@@ -125,7 +135,16 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     g.add_edge("generate_outline", "parse_outline")
     g.add_edge("parse_outline", "outline_review")
     g.add_edge("outline_review", "pick_chapter")
-    g.add_edge("pick_chapter", "chapter_generate_gate")
+    # PR-M9-1:若 pick_chapter 在 selected_chapter_ids 全部跑完后落到尾部
+    # 的连续 unselected 章节,current_index 越界 → 直接进 assemble
+    g.add_conditional_edges(
+        "pick_chapter",
+        _route_after_pick,
+        {
+            "chapter_generate_gate": "chapter_generate_gate",
+            "assemble": "assemble",
+        },
+    )
     g.add_edge("chapter_generate_gate", "write_chapter")
     g.add_edge("write_chapter", "gen_visuals")
     g.add_edge("gen_visuals", "merge_chapter")

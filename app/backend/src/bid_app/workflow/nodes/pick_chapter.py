@@ -1,11 +1,18 @@
-"""选取当前章节(对应 v10 §4.5.1)。
+"""选取当前章节(对应 v10 §4.5.1 + PR-M9-1 选择性生成)。
 
-state.current_index 就是循环游标;此节点只负责:
-- 通知前端 ``chapter_started_pick``(让 P5 高亮当前章节)
-- 不改任何核心 Loop 变量,仅做 SSE / log
+PR-M9-1 / D4:
+- 若 ``state.selected_chapter_ids`` 非空,只处理 id 命中的章节;
+  未命中的章节直接 mark status='skipped',同步 advance current_index,
+  不进入下游 write_chapter / gen_visuals / human_review。
+- selected 为 None / 空列表 → 全选(向后兼容旧 checkpoint)。
+- 章节编号保留原序号 (D4):跳过的 ch_02 不会被 ch_03 抢占,
+  assemble 输出还是 "ch_01 / ch_03 / ch_05"。
 
-返回空 dict(LangGraph 不更新 state)。
+实现:单次调用内连续跳过所有 unselected 直到落到一个 selected 章节
+(或越界)。下游 chapter_generate_gate / update_state 不需要再判断
+selection,保持节点解耦。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -13,24 +20,74 @@ from typing import Any
 import structlog
 
 from ..state import WorkflowState
-from ..sync import publish_event
+from ..sync import publish_event, sync_chapter_to_db
 
 log = structlog.get_logger()
 
 
 async def run(state: WorkflowState) -> dict[str, Any]:
     project_id = state["project_id"]
+    run_id = state.get("run_id")
     idx = state["current_index"]
     chapters = state.get("chapters") or []
+    selected_ids = state.get("selected_chapter_ids") or None
+    use_selection = bool(selected_ids)
+
+    advanced = 0
+
+    while idx < len(chapters):
+        current = chapters[idx]
+        chapter_id = current.get("id") or current.get("chapter_id")
+
+        if not use_selection or (
+            chapter_id and selected_ids and chapter_id in selected_ids
+        ):
+            # 命中或未启用选择 → 正常推下游
+            break
+
+        # ⭐ PR-M9-1 / D4:未命中 → 标 skipped + 推下一章
+        await publish_event(
+            project_id,
+            "chapter_skipped_unselected",
+            chapter_index=idx,
+            chapter_id=chapter_id,
+            chapter_title=current.get("title"),
+        )
+        if isinstance(run_id, int) and run_id > 0:
+            try:
+                await sync_chapter_to_db(
+                    run_id,
+                    idx,
+                    status="skipped",
+                    processing_started_at=None,
+                )
+            except Exception:
+                log.exception(
+                    "pick_chapter_skip_sync_failed",
+                    run_id=run_id,
+                    idx=idx,
+                )
+        idx += 1
+        advanced += 1
+
+    if advanced > 0:
+        log.info(
+            "pick_chapter_skipped_unselected_batch",
+            project_id=project_id,
+            advanced=advanced,
+            new_index=idx,
+        )
 
     if idx >= len(chapters):
-        log.warning(
-            "pick_chapter_out_of_range",
+        # 全部走完;route_after_update 已在 update_state 后处理,但 pick
+        # 阶段直接到达 assemble 边界时也要保证 current_index 写回 state。
+        log.info(
+            "pick_chapter_exhausted",
             project_id=project_id,
             idx=idx,
             total=len(chapters),
         )
-        return {}
+        return {"current_index": idx, "retry_count": 0}
 
     current = chapters[idx]
     await publish_event(
@@ -40,4 +97,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         chapter_title=current.get("title"),
         retry_count=state.get("retry_count", 0),
     )
+
+    if advanced > 0:
+        return {"current_index": idx, "retry_count": 0}
     return {}

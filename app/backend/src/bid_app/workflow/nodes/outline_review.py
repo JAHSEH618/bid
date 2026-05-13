@@ -64,6 +64,9 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         await sync_project_status(pid, "running")
 
     edited = (payload or {}).get("chapters")
+    # PR-M9-1:用户勾选的章节 ids;空 → 全选 (保持 None,pick_chapter 据此判断)
+    selected_ids = (payload or {}).get("selected_chapter_ids") or None
+
     if edited:
         if _real_run(run_id):
             try:
@@ -80,9 +83,11 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             "chapters": edited,
             "current_index": 0,
             "_outline_confirmed_chapters": edited,
+            "selected_chapter_ids": selected_ids,
         }
 
     return {
         "current_index": 0,
         "_outline_confirmed_chapters": chapters,
+        "selected_chapter_ids": selected_ids,
     }

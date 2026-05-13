@@ -174,6 +174,8 @@ export function useUploadDocument() {
 
 export interface ConfirmOutlinePayload {
   chapters: OutlineChapterIn[]
+  // PR-M9-1:用户勾选的章节 id 列表。空 / null → 全选
+  selected_chapter_ids?: string[] | null
 }
 
 export function useConfirmOutline() {
@@ -182,13 +184,18 @@ export function useConfirmOutline() {
     mutationFn: ({
       projectId,
       chapters,
+      selected_chapter_ids,
     }: {
       projectId: number
       chapters: OutlineChapterIn[]
+      selected_chapter_ids?: string[] | null
     }) =>
       apiFetch<{ ok: boolean }>(`/api/projects/${projectId}/outline`, {
         method: 'PUT',
-        body: JSON.stringify({ chapters }),
+        body: JSON.stringify({
+          chapters,
+          selected_chapter_ids: selected_chapter_ids ?? null,
+        }),
       }),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })

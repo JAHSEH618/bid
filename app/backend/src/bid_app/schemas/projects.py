@@ -96,9 +96,14 @@ class OutlineChapterIn(BaseModel):
 
 
 class OutlineConfirmRequest(BaseModel):
-    """body.chapters 为空数组 / 缺失 → 自动确认沿用 LLM-1。"""
+    """body.chapters 为空数组 / 缺失 → 自动确认沿用 LLM-1。
+
+    PR-M9-1:可选 ``selected_chapter_ids`` 让前端在锁定目录时一并提交
+    用户勾选的章节;空 / None → 全选(向后兼容)。
+    """
 
     chapters: list[OutlineChapterIn] = Field(default_factory=list)
+    selected_chapter_ids: list[str] | None = Field(default=None)
 
 
 class OutlineChapterOut(BaseModel):

@@ -51,6 +51,8 @@ interface EditableChapter {
   summary: string
   key_points: string[]
   target_pages: number
+  // PR-M9-1:用户是否勾选生成本章;默认 true。
+  selected: boolean
 }
 
 let _localIdCounter = 0
@@ -88,6 +90,7 @@ export function OutlineConfirmPage() {
         summary: c.summary ?? '',
         key_points: c.key_points,
         target_pages: c.target_pages,
+        selected: true,
       })),
     )
     setEdited(false)
@@ -95,7 +98,11 @@ export function OutlineConfirmPage() {
   }, [outline.data?.run_id, outline.data?.chapters.length])
 
   const isReady = project.data?.status === 'outline_ready'
-  const totalPages = chapters.reduce((s, c) => s + (c.target_pages || 0), 0)
+  const totalPages = chapters.reduce(
+    (s, c) => (c.selected ? s + (c.target_pages || 0) : s),
+    0,
+  )
+  const selectedCount = chapters.filter((c) => c.selected).length
 
   const updateChapter = (id: string, patch: Partial<EditableChapter>) => {
     setEdited(true)
@@ -118,8 +125,15 @@ export function OutlineConfirmPage() {
         summary: '',
         key_points: ['要点 1'],
         target_pages: 3,
+        selected: true,
       },
     ])
+  }
+  const toggleAllSelected = (nextSelected: boolean) => {
+    setEdited(true)
+    setChapters((prev) =>
+      prev.map((c) => ({ ...c, selected: nextSelected })),
+    )
   }
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
@@ -135,6 +149,13 @@ export function OutlineConfirmPage() {
 
   const handleConfirm = async () => {
     if (!projectId) return
+    if (selectedCount === 0) {
+      toast({
+        title: '至少要勾选一个章节',
+        variant: 'warning',
+      })
+      return
+    }
     for (const c of chapters) {
       if (!c.title.trim()) {
         toast({ title: '每个章节都必须有标题', variant: 'warning' })
@@ -164,10 +185,25 @@ export function OutlineConfirmPage() {
           target_pages: c.target_pages,
         }))
       : []
+    // PR-M9-1:勾选状态非全选时,把选中章节 id 一并发给后端。
+    const allSelected = selectedCount === chapters.length
+    const selected_chapter_ids = allSelected
+      ? null
+      : chapters
+          .filter((c) => c.selected && c.serverId)
+          .map((c) => c.serverId as string)
     try {
-      await confirm.mutateAsync({ projectId, chapters: payload })
+      await confirm.mutateAsync({
+        projectId,
+        chapters: payload,
+        selected_chapter_ids,
+      })
       toast({
-        title: edited ? '已锁定编辑后的目录' : '已沿用 AI 生成的目录',
+        title: allSelected
+          ? edited
+            ? '已锁定编辑后的目录'
+            : '已沿用 AI 生成的目录'
+          : `已锁定目录,仅生成 ${selectedCount} / ${chapters.length} 章`,
         variant: 'success',
       })
       navigate(`/projects/${projectId}/review`)
@@ -221,6 +257,9 @@ export function OutlineConfirmPage() {
         </p>
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <Badge variant="outline">{chapters.length} 章</Badge>
+          <Badge variant={selectedCount === chapters.length ? 'outline' : 'warn'}>
+            勾选 {selectedCount} / {chapters.length}
+          </Badge>
           <Badge variant="outline">目标 {totalPages} 页</Badge>
           {edited && <Badge variant="warn">已编辑</Badge>}
           {!isReady && (
@@ -228,6 +267,26 @@ export function OutlineConfirmPage() {
               status · {project.data.status}
             </span>
           )}
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => toggleAllSelected(true)}
+              disabled={selectedCount === chapters.length}
+            >
+              全选
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => toggleAllSelected(false)}
+              disabled={selectedCount === 0}
+            >
+              全不选
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -257,6 +316,9 @@ export function OutlineConfirmPage() {
                 index={i}
                 onChange={(patch) => updateChapter(c.id, patch)}
                 onRemove={() => removeChapter(c.id)}
+                onToggleSelected={(next) =>
+                  updateChapter(c.id, { selected: next })
+                }
               />
             ))}
           </ul>
@@ -304,11 +366,13 @@ function SortableChapter({
   index,
   onChange,
   onRemove,
+  onToggleSelected,
 }: {
   chapter: EditableChapter
   index: number
   onChange: (patch: Partial<EditableChapter>) => void
   onRemove: () => void
+  onToggleSelected: (next: boolean) => void
 }) {
   const {
     attributes,
@@ -322,14 +386,26 @@ function SortableChapter({
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
-    opacity: isDragging ? 0.6 : 1,
+    opacity: isDragging ? 0.6 : chapter.selected ? 1 : 0.55,
   }
 
   return (
     <li ref={setNodeRef} style={style}>
-      <Card className={cn(isDragging && 'ring-2 ring-accent')}>
+      <Card
+        className={cn(
+          isDragging && 'ring-2 ring-accent',
+          !chapter.selected && 'bg-paper-2',
+        )}
+      >
         <CardContent className="grid grid-cols-12 gap-4 p-6">
           <div className="col-span-1 flex flex-col items-center gap-2">
+            <input
+              type="checkbox"
+              checked={chapter.selected}
+              onChange={(e) => onToggleSelected(e.target.checked)}
+              aria-label={`勾选生成第 ${index + 1} 章`}
+              className="h-4 w-4 cursor-pointer accent-accent"
+            />
             <button
               type="button"
               className="cursor-grab text-mute hover:text-ink"
