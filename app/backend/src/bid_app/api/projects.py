@@ -171,7 +171,12 @@ async def delete_project(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
-    """FR-1.6:只有创建者 / admin 可删,同步删磁盘目录。"""
+    """FR-1.6:只有创建者 / admin 可删,同步删磁盘目录。
+
+    PR-M7-3 / D2:删除前显式调 ``delete_blackboard`` 清理黑板文件 + DB
+    引用。下面 ``shutil.rmtree(dir_path)`` 也会把目录端清掉,这里走 service
+    路径主要是 DB-side 字段清空 + log 信号(future event listener 兜底用)。
+    """
     project = await _get_project_or_404(db, project_id)
     if project.created_by != user.id and user.role != "admin":
         raise HTTPException(
@@ -179,6 +184,16 @@ async def delete_project(
         )
 
     dir_path = Path(project.dir_path) if project.dir_path else None
+
+    # ⭐ PR-M7-3:黑板级联删除(在 Project ORM 删除前调,顺序无关但语义更清晰)
+    from ..workflow.blackboard import delete_blackboard
+
+    try:
+        await delete_blackboard(project_id)
+    except Exception:
+        log.exception(
+            "blackboard_delete_failed_non_fatal", project_id=project_id
+        )
 
     await db.delete(project)
     try:

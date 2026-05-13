@@ -5,14 +5,17 @@
 # 用法:
 #   ./scripts/restore-backup.sh /var/lib/bid-app/backups/bid_20260501_0300.dump
 #   FORCE=1 ./scripts/restore-backup.sh <dump>   # 跳过交互式 yes 确认
+#   ./scripts/restore-backup.sh <dump> --with-files  # PR-M7-3:同时展开
+#                                                    # projects/ tar 包
 #
 # 顺序(关键 — 反过来会撞 alembic 已建的 schema):
 #   1. 校验 dump 文件可读(在 postgres 容器里 pg_restore --list)
 #   2. **停 app 容器**(防止恢复期间写入,且不让 entrypoint alembic upgrade 先把 schema 建好)
 #   3. 在 postgres 容器内 drop & create 数据库(干净空库)
 #   4. 在 postgres 容器内 pg_restore(--clean --if-exists 兜底,即使数据卷里有残留对象也能恢复)
-#   5. **start app**(此时 alembic_version 表已是 head 版,entrypoint 跑 alembic upgrade head 是 no-op;无 schema 冲突)
-#   6. 等 healthcheck 通过
+#   5. (可选) --with-files:tar -xzf projects_*.tar.gz 覆盖 /var/lib/bid-app/projects/
+#   6. **start app**(此时 alembic_version 表已是 head 版,entrypoint 跑 alembic upgrade head 是 no-op;无 schema 冲突)
+#   7. 等 healthcheck 通过
 #
 # 为什么不让 app 容器跑 pg_restore:
 #   docker compose start app 会触发 entrypoint.sh,顺序是 pg_isready → alembic upgrade head → exec supervisord;
@@ -22,11 +25,37 @@
 #   stop app → postgres exec drop/create + pg_restore(空库)→ start app(alembic upgrade head 是 no-op)。
 set -euo pipefail
 
-DUMP_FILE="${1:-}"
+DUMP_FILE=""
+WITH_FILES=0
 FORCE="${FORCE:-0}"
 
+for arg in "$@"; do
+  case "$arg" in
+    --with-files)
+      WITH_FILES=1
+      ;;
+    -h|--help)
+      cat <<EOF
+用法:$0 <dump-file-path> [--with-files]
+  例:$0 /var/lib/bid-app/backups/bid_20260501_0300.dump
+  或:$0 <dump> --with-files       (PR-M7-3:同步覆盖 /var/lib/bid-app/projects/)
+  或:FORCE=1 $0 <dump>            (跳过交互确认,适合脚本调用)
+EOF
+      exit 0
+      ;;
+    *)
+      if [[ -z "$DUMP_FILE" ]]; then
+        DUMP_FILE="$arg"
+      else
+        echo "❌ 未知参数:$arg" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+
 if [[ -z "$DUMP_FILE" ]]; then
-  echo "用法:$0 <dump-file-path>" >&2
+  echo "用法:$0 <dump-file-path> [--with-files]" >&2
   echo "  例:$0 /var/lib/bid-app/backups/bid_20260501_0300.dump" >&2
   echo "  或:FORCE=1 $0 <dump>(跳过交互确认,适合脚本调用)" >&2
   exit 1
@@ -133,7 +162,49 @@ docker compose exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" postgres \
 
 echo "[restore] pg_restore 完成"
 
-# 5. 起 app(此时 alembic_version 已是 dump 时的版本;entrypoint alembic upgrade head 是 no-op
+# 5. (可选) PR-M7-3:同步覆盖 /var/lib/bid-app/projects/
+if [[ "$WITH_FILES" == "1" ]]; then
+  # 推算 tar 路径:dump 是 bid_YYYYMMDD_HHMM.dump → tar 是 projects_YYYYMMDD_HHMM.tar.gz
+  DUMP_BASE_NO_EXT="${DUMP_BASENAME%.dump}"
+  TS_PART="${DUMP_BASE_NO_EXT#bid_}"
+  TAR_BASENAME="projects_${TS_PART}.tar.gz"
+  TAR_PATH="$(dirname "$DUMP_FILE")/${TAR_BASENAME}"
+
+  if [[ ! -f "$TAR_PATH" ]]; then
+    echo "❌ --with-files 找不到对应 projects tar:$TAR_PATH" >&2
+    echo "   (PR-M7-3 后期备份才会生成 projects_*.tar.gz)" >&2
+    exit 1
+  fi
+
+  PROJECTS_DIR="${PROJECTS_DIR:-/var/lib/bid-app/projects}"
+  echo ""
+  echo "⚠️  --with-files:即将用 ${TAR_BASENAME} 覆盖 ${PROJECTS_DIR}/"
+  echo "   现有目录会被清空再展开,操作不可逆。"
+
+  if [[ "$FORCE" != "1" ]]; then
+    read -r -p "确认继续?键入 'yes' 继续:" CONFIRM_FILES
+    if [[ "$CONFIRM_FILES" != "yes" ]]; then
+      echo "已取消 --with-files,仅 DB 已恢复"
+      WITH_FILES=0
+    fi
+  fi
+
+  if [[ "$WITH_FILES" == "1" ]]; then
+    PROJECTS_PARENT="$(dirname "$PROJECTS_DIR")"
+    PROJECTS_BASENAME="$(basename "$PROJECTS_DIR")"
+    echo "[restore] clearing ${PROJECTS_DIR}..."
+    rm -rf "${PROJECTS_DIR:?}"
+    echo "[restore] extracting ${TAR_BASENAME} → ${PROJECTS_PARENT}/"
+    tar -xzf "$TAR_PATH" -C "$PROJECTS_PARENT/"
+    if [[ ! -d "${PROJECTS_PARENT}/${PROJECTS_BASENAME}" ]]; then
+      echo "❌ 展开后未找到 ${PROJECTS_PARENT}/${PROJECTS_BASENAME}" >&2
+      exit 1
+    fi
+    echo "[restore] projects/ 已覆盖"
+  fi
+fi
+
+# 6. 起 app(此时 alembic_version 已是 dump 时的版本;entrypoint alembic upgrade head 是 no-op
 #    或前向 migration,无 schema 冲突)
 echo "[restore] 启动 app 容器(entrypoint 会跑 alembic upgrade head,正常情况是 no-op)..."
 docker compose start app

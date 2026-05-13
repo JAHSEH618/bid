@@ -34,6 +34,9 @@ dependencies = [
   # PR-M6-1 / D3:脱敏规则 YAML 解析。pyyaml 已经被 markitdown/litellm 等
   # 上游间接拉入,这里显式声明避免上游版本调整时无声丢依赖。
   "pyyaml>=6.0,<7",
+  # PR-M7-3 / D2:HTML 黑板 — markdown → HTML 转换 + bleach 白名单清洗。
+  "markdown>=3.7,<4",
+  "bleach>=6.1,<7",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +48,8 @@ dev = [
   "mypy>=1.13",
   "types-passlib",
   "types-PyYAML",
+  "types-bleach",
+  "types-Markdown",
 ]
 
 [project.scripts]
