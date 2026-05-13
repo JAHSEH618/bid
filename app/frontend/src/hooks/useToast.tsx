@@ -74,31 +74,33 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 }
 
 function variantStyles(v: ToastVariant) {
+  // v2 editorial toast — 极简：纯文本 + 顶部 1px accent line。
+  // 不同 variant 切换 accent line 颜色（默认 ink / success / destructive ...）。
   switch (v) {
     case 'success':
       return {
-        wrap: 'border-emerald-200 bg-emerald-50 text-emerald-900',
-        icon: <CheckCircle2 className="h-4 w-4 text-emerald-600" />,
+        accent: 'bg-success',
+        icon: <CheckCircle2 className="h-4 w-4 text-success" />,
       }
     case 'destructive':
       return {
-        wrap: 'border-destructive/30 bg-destructive/10 text-destructive',
+        accent: 'bg-destructive',
         icon: <AlertCircle className="h-4 w-4 text-destructive" />,
       }
     case 'warning':
       return {
-        wrap: 'border-amber-200 bg-amber-50 text-amber-900',
-        icon: <AlertTriangle className="h-4 w-4 text-amber-600" />,
+        accent: 'bg-warn',
+        icon: <AlertTriangle className="h-4 w-4 text-warn" />,
       }
     case 'info':
       return {
-        wrap: 'border-sky-200 bg-sky-50 text-sky-900',
-        icon: <Info className="h-4 w-4 text-sky-600" />,
+        accent: 'bg-ink',
+        icon: <Info className="h-4 w-4 text-mute" />,
       }
     default:
       return {
-        wrap: 'border-border bg-card text-foreground',
-        icon: <Info className="h-4 w-4 text-muted-foreground" />,
+        accent: 'bg-ink',
+        icon: <Info className="h-4 w-4 text-mute" />,
       }
   }
 }
@@ -119,10 +121,18 @@ function ToastViewport({
             key={t.id}
             role="status"
             className={cn(
-              'pointer-events-auto relative flex w-full max-w-sm items-start gap-2.5 rounded-lg border p-3 pr-8 shadow-lg backdrop-blur-sm animate-fade-up',
-              v.wrap,
+              'pointer-events-auto relative flex w-full max-w-sm items-start gap-3 bg-paper px-4 py-3 pr-8 text-ink animate-fade-up',
+              'border border-rule rounded-none',
             )}
           >
+            {/* 顶部 1px accent line — variant 信号 */}
+            <span
+              aria-hidden="true"
+              className={cn(
+                'absolute left-0 right-0 top-0 h-px',
+                v.accent,
+              )}
+            />
             <span className="mt-0.5 shrink-0">{v.icon}</span>
             <div className="min-w-0 flex-1 text-sm">
               {t.title && (
@@ -131,8 +141,8 @@ function ToastViewport({
               {t.description && (
                 <div
                   className={cn(
-                    'text-xs leading-relaxed',
-                    t.title ? 'mt-0.5 opacity-85' : '',
+                    'text-xs leading-relaxed text-mute',
+                    t.title ? 'mt-1' : '',
                   )}
                 >
                   {t.description}
@@ -143,7 +153,7 @@ function ToastViewport({
               type="button"
               onClick={() => onDismiss(t.id)}
               aria-label="关闭"
-              className="absolute right-2 top-2 rounded-md p-1 opacity-60 transition-opacity hover:bg-black/5 hover:opacity-100"
+              className="absolute right-2 top-2 p-1 text-mute transition-colors hover:text-ink"
             >
               <X className="h-3.5 w-3.5" />
             </button>

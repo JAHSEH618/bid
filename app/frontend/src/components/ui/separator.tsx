@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { cn } from '@/lib/utils'
 
+// v2 editorial separator — 1px hairline rule line。
 export interface SeparatorProps extends React.HTMLAttributes<HTMLDivElement> {
   orientation?: 'horizontal' | 'vertical'
   decorative?: boolean
@@ -16,7 +17,7 @@ export const Separator = React.forwardRef<HTMLDivElement, SeparatorProps>(
       role={decorative ? 'none' : 'separator'}
       aria-orientation={orientation}
       className={cn(
-        'shrink-0 bg-border',
+        'shrink-0 bg-rule',
         orientation === 'horizontal' ? 'h-px w-full' : 'h-full w-px',
         className,
       )}

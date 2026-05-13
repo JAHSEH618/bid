@@ -3,8 +3,9 @@ import * as LabelPrimitive from '@radix-ui/react-label'
 import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '@/lib/utils'
 
+// v2 editorial label — 大写字间距 + meta 大小；与正文区分明显。
 const labelVariants = cva(
-  'text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70',
+  'text-meta text-mute leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70',
 )
 
 export const Label = React.forwardRef<

@@ -2,144 +2,218 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================
+   v2 Design tokens — 瑞典编辑风
+   Monochrome + 1 克制 accent；大留白、强层级、衬线大标题。
+   - 编辑感的 tokens 直接挂在 `--ink/--paper/...`，新页面优先使用。
+   - shadcn 既有的 `--background/--foreground/...` 仍然保留，并重新映射
+     到新调色板上，保证旧页面 className 不破坏。
+   ============================================================ */
 @layer base {
   :root {
-    /* 中性背景与文字(更柔和的层次,避免纯白/纯黑刺眼) */
-    --background: 220 25% 98.5%;
-    --foreground: 222 47% 11%;
-    --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222 47% 11%;
+    /* === Editorial palette ===================================== */
+    --ink: 0 0% 7%;             /* #111111 正文/默认深色 */
+    --paper: 60 20% 98%;        /* #FAFAF7 主背景，略带暖偏离纯白 */
+    --paper-2: 47 18% 93%;      /* #F1EFE8 次级背景，新闻纸感 */
+    --rule: 0 0% 11%;           /* #1C1C1C 1px 分隔线底色（实际使用 + 10% alpha） */
+    --mute: 60 4% 41%;          /* #6B6B66 次要文字 */
+    --accent: 17 71% 41%;       /* #B5471F muted rust，唯一强调色 */
+    --warn: 39 100% 27%;        /* #8B5A00 占位符/脱敏提示色 */
 
-    /* 主色:沉稳的靛青(替代默认 near-black,更适合长时间阅读且具品牌感) */
-    --primary: 222 65% 35%;
-    --primary-foreground: 210 40% 98%;
+    /* === Shadcn token 兼容映射 ================================== */
+    /* 旧 className 路径仍可用；视觉与 editorial palette 一致。 */
+    --background: var(--paper);
+    --foreground: var(--ink);
+    --card: var(--paper);
+    --card-foreground: var(--ink);
+    --popover: var(--paper);
+    --popover-foreground: var(--ink);
 
-    /* 次色 / 弱按钮底色 */
-    --secondary: 220 20% 95%;
-    --secondary-foreground: 222 47% 18%;
+    --primary: var(--ink);
+    --primary-foreground: var(--paper);
 
-    /* 静音背景(空态、分组背景) */
-    --muted: 220 16% 95%;
-    --muted-foreground: 220 10% 46%;
+    --secondary: var(--paper-2);
+    --secondary-foreground: var(--ink);
 
-    /* 强调(hover / 选中态) */
-    --accent: 220 22% 93%;
-    --accent-foreground: 222 47% 18%;
+    --muted: var(--paper-2);
+    --muted-foreground: var(--mute);
 
-    /* 警示色 */
-    --destructive: 0 78% 56%;
-    --destructive-foreground: 0 0% 100%;
-    --success: 152 60% 38%;
-    --success-foreground: 0 0% 100%;
-    --warning: 35 92% 48%;
-    --warning-foreground: 35 100% 12%;
-    --info: 210 90% 50%;
-    --info-foreground: 0 0% 100%;
+    /* 旧 `--accent` 在 shadcn 里语义是「hover/选中表面」，
+       而编辑风规格里 `--accent` 是 rust 主强调色。
+       这里以新规为准（rust），旧页面 hover 表面在 UI-2 retrofit 时修正。 */
+    --accent-foreground: var(--paper);
 
-    /* 边框 / 输入框 / focus ring */
-    --border: 220 16% 88%;
-    --input: 220 16% 88%;
-    --ring: 222 65% 50%;
+    --destructive: 0 70% 42%;
+    --destructive-foreground: var(--paper);
+    --success: 152 50% 30%;
+    --success-foreground: var(--paper);
+    --warning: var(--warn);
+    --warning-foreground: var(--paper);
+    --info: var(--ink);
+    --info-foreground: var(--paper);
 
-    /* 圆角分级 — btn 6px / card 12px / dialog 16px */
-    --radius: 0.75rem;
+    --border: var(--rule);
+    --input: var(--rule);
+    --ring: var(--ink);
 
-    /* 阴影分级 — 卡片 / 弹窗 / 浮层 */
-    --shadow-sm:
-      0 1px 2px 0 rgba(15, 23, 42, 0.04),
-      0 1px 3px 0 rgba(15, 23, 42, 0.05);
-    --shadow-md:
-      0 4px 6px -1px rgba(15, 23, 42, 0.07),
-      0 2px 4px -2px rgba(15, 23, 42, 0.05);
-    --shadow-lg:
-      0 12px 24px -8px rgba(15, 23, 42, 0.12),
-      0 4px 8px -4px rgba(15, 23, 42, 0.06);
-    --shadow-xl:
-      0 24px 48px -12px rgba(15, 23, 42, 0.18),
-      0 8px 16px -8px rgba(15, 23, 42, 0.08);
+    /* === 圆角：editorial = 几乎无圆角 ============================ */
+    --radius: 2px;
+
+    /* === 阴影：默认无；浮层用极淡 ================================ */
+    --shadow-sm: none;
+    --shadow-md: 0 1px 2px 0 rgba(17, 17, 17, 0.04);
+    --shadow-lg: 0 6px 16px -8px rgba(17, 17, 17, 0.10);
+    --shadow-xl: 0 16px 32px -16px rgba(17, 17, 17, 0.14);
+
+    /* === Layout rhythm ========================================= */
+    --gutter: 24px;
+    --prose-max: 68ch;
+    --rhythm: 8px;
+  }
+}
+
+/* `border-border` 默认透明度 — shadcn 调色板里 `--border` 是不透明色，
+   editorial 风需要 1px 微弱分隔线，所以全局对默认 border 走 10% alpha。 */
+@layer base {
+  * {
+    border-color: hsl(var(--rule) / 0.10);
   }
 }
 
 @layer base {
-  * {
-    @apply border-border;
-  }
   html {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
-    /* 当前未实现 dark mode,显式声明亲 light scheme 让 native 控件
-       (<select>/scrollbar/form autofill 等)采用与设计一致的浅色调色板。 */
     color-scheme: light;
   }
   body {
     @apply bg-background text-foreground;
     font-family:
-      -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei',
-      'Helvetica Neue', 'Segoe UI', Roboto, sans-serif;
+      'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+      'Microsoft YaHei', 'Helvetica Neue', 'Segoe UI', Roboto, sans-serif;
     font-feature-settings:
       'cv11' on,
       'ss01' on;
-    /* 中文标点紧凑 + 中英文混排留白更自然 */
     text-spacing: trim-start allow-end trim-adjacent;
+    font-size: 16px;
+    line-height: 1.6;
   }
-  /* 输入元素与浏览器默认 outline 协调 */
+  /* 大标题用衬线 + 中文用 Noto Serif SC，编辑感 */
+  h1,
+  h2,
+  h3,
+  .font-display {
+    font-family: 'Tiempos Headline', 'Noto Serif SC', Georgia, 'Songti SC',
+      'STSong', serif;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
   input,
   textarea,
   select,
   button {
     font-family: inherit;
   }
-  /* Vercel 排版指南:标题用 text-wrap: balance,长标题断行更均匀 */
   h1,
   h2,
   h3 {
     text-wrap: balance;
   }
-  /* 段落 / 正文用 pretty,避免最后一行只剩孤词 */
   p {
     text-wrap: pretty;
   }
-  /* 滚动条更精致(WebKit) */
+  /* 滚动条：极简单色 */
   *::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
   }
   *::-webkit-scrollbar-track {
     background: transparent;
   }
   *::-webkit-scrollbar-thumb {
-    background-color: hsl(220 14% 84%);
-    border-radius: 6px;
+    background-color: hsl(var(--ink) / 0.14);
+    border-radius: 0;
     border: 2px solid transparent;
     background-clip: padding-box;
   }
   *::-webkit-scrollbar-thumb:hover {
-    background-color: hsl(220 14% 70%);
+    background-color: hsl(var(--ink) / 0.28);
   }
 }
 
-/* prose 调整(react-markdown 章节预览) */
+/* ============================================================
+   Editorial 排版 utility（新页面直接用 className）
+   ----
+   Tailwind fontSize tokens (`text-hero/h1/h2/h3/body/meta`) 已经
+   生成 font-size + line-height + letter-spacing；这里只补 font-family
+   与 meta 的 text-transform，避免与 Tailwind 生成的 class 同名冲突。
+   ============================================================ */
+@layer utilities {
+  .font-display {
+    font-family: 'Tiempos Headline', 'Noto Serif SC', Georgia, 'Songti SC',
+      'STSong', serif;
+    font-weight: 600;
+  }
+  .font-mono-editorial {
+    font-family: 'JetBrains Mono', 'SFMono-Regular', Menlo, monospace;
+  }
+  /* 与 Tailwind 生成的 .text-meta 同名 — 这里只追加 uppercase + weight，
+     `@layer utilities` 内同名规则按源顺序合并，本文件在 @tailwind utilities
+     之后定义,会与上面的 size 规则合并而非覆盖。 */
+  .text-meta {
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  .prose-editorial {
+    max-width: var(--prose-max);
+  }
+  .rule-line {
+    border-top: 1px solid hsl(var(--ink) / 0.10);
+  }
+}
+
+/* prose 调整(react-markdown 章节预览) — 转编辑风 */
+.prose {
+  font-size: 16px;
+  line-height: 1.7;
+}
 .prose pre {
-  @apply rounded-lg border border-slate-200 bg-white text-slate-900 p-4 overflow-x-auto shadow-sm;
+  @apply border bg-paper-2 p-4 overflow-x-auto;
+  border-color: hsl(var(--ink) / 0.10);
+  border-radius: 2px;
 }
 .prose code {
   @apply font-mono text-sm;
 }
 .prose :not(pre) > code {
-  @apply rounded bg-slate-100 px-1.5 py-0.5 text-slate-800;
+  background: hsl(var(--ink) / 0.06);
+  padding: 1px 6px;
+  border-radius: 2px;
 }
 .prose table {
   @apply text-sm;
+  border-collapse: collapse;
 }
 .prose th,
 .prose td {
-  @apply border border-slate-200 px-3 py-2;
+  border: 1px solid hsl(var(--ink) / 0.10);
+  padding: 8px 12px;
 }
 .prose th {
-  @apply bg-slate-50;
+  background: hsl(var(--paper-2));
+  font-family: 'Inter', sans-serif;
+  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+}
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  font-family: 'Tiempos Headline', 'Noto Serif SC', Georgia, serif;
+  font-weight: 600;
 }
 
 .mermaid-svg svg {
@@ -148,14 +222,14 @@
 }
 .mermaid-svg text,
 .mermaid-svg tspan {
-  fill: #0f172a;
-  color: #0f172a;
+  fill: hsl(var(--ink));
+  color: hsl(var(--ink));
   font-family:
-    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei',
-    sans-serif;
+    'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
 }
 
-/* === 公用动效 === */
+/* === 公用动效（保留） === */
 @keyframes shake {
   0%,
   100% {
@@ -212,16 +286,15 @@
 .skeleton {
   background: linear-gradient(
     90deg,
-    hsl(220 14% 92%) 0%,
-    hsl(220 14% 96%) 50%,
-    hsl(220 14% 92%) 100%
+    hsl(var(--paper-2)) 0%,
+    hsl(var(--paper)) 50%,
+    hsl(var(--paper-2)) 100%
   );
   background-size: 200% 100%;
   animation: shimmer 1.4s ease-in-out infinite;
-  border-radius: 6px;
+  border-radius: 2px;
 }
 
-/* === streaming 光标 === */
 @keyframes caret-blink {
   0%,
   60% {
@@ -236,27 +309,19 @@
   animation: caret-blink 1s step-end infinite;
 }
 
-/* hover 微抬升:用于卡片 / 主 CTA */
 .lift-on-hover {
   transition:
     transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
     box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .lift-on-hover:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
 }
 
-/* 整页加载渐入,避免突兀 */
 .page-enter {
   animation: fade-up 240ms ease-out both;
 }
 
-/* === 尊重 prefers-reduced-motion(Vercel 指南必备) ===
-   用户开启系统级减少动画时,把所有自定义关键帧动画 + 通用 transition
-   全部缩成 1ms,既保留状态切换语义、又不会触发眩晕/前庭功能不适。
-   注:具体组件用 motion-reduce: variant 已经处理了某些 hover transform,
-   这里负责兜底全局动画。 */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

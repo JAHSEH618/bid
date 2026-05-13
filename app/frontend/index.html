@@ -4,9 +4,17 @@
     <meta charset="UTF-8" />
     <!-- 不锁 maximum-scale / user-scalable=no:防止视障用户无法放大(Vercel 必删 anti-pattern) -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- theme-color 与 globals.css --background 浅靛青同源,iOS Safari URL bar 跟随 -->
-    <meta name="theme-color" content="#f6f8fc" />
+    <!-- theme-color 同 --paper (#FAFAF7),iOS Safari URL bar 跟随 -->
+    <meta name="theme-color" content="#FAFAF7" />
     <meta name="color-scheme" content="light" />
+    <!-- v2 editorial fonts:Tiempos/Söhne 等付费字体在生产用户自带,这里只挂开源 fallback。
+         preconnect 减少首屏字体阻塞。 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Noto+Serif+SC:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
     <title>投标技术方案生成器</title>
   </head>
   <body>

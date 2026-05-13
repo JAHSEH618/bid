@@ -2,6 +2,7 @@ import * as React from 'react'
 import * as TabsPrimitive from '@radix-ui/react-tabs'
 import { cn } from '@/lib/utils'
 
+// v2 editorial tabs — 底部 indicator 1px line，active 加粗到 3px；不用胶囊背景。
 export const Tabs = TabsPrimitive.Root
 
 export const TabsList = React.forwardRef<
@@ -11,7 +12,8 @@ export const TabsList = React.forwardRef<
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      'inline-flex h-10 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground',
+      'inline-flex items-center justify-start gap-8 border-b border-rule',
+      'text-mute',
       className,
     )}
     {...props}
@@ -26,7 +28,18 @@ export const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      'inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium ring-offset-background transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 hover:text-foreground/80 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm',
+      'relative inline-flex items-center justify-center whitespace-nowrap',
+      'px-1 pb-3 pt-2 -mb-px text-sm font-medium',
+      'border-b-0 ring-offset-background',
+      'transition-[color] duration-150',
+      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2',
+      'disabled:pointer-events-none disabled:opacity-50',
+      'hover:text-ink',
+      // active: 文字加深 + 3px 底线
+      'data-[state=active]:text-ink',
+      'data-[state=active]:after:absolute data-[state=active]:after:left-0 data-[state=active]:after:right-0',
+      'data-[state=active]:after:-bottom-px data-[state=active]:after:h-[3px]',
+      'data-[state=active]:after:bg-ink data-[state=active]:after:content-[""]',
       className,
     )}
     {...props}
@@ -41,7 +54,7 @@ export const TabsContent = React.forwardRef<
   <TabsPrimitive.Content
     ref={ref}
     className={cn(
-      'mt-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+      'mt-6 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2',
       className,
     )}
     {...props}

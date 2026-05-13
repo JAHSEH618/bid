@@ -13,6 +13,7 @@ import { ChapterReviewPage } from './pages/ChapterReviewPage'
 import { ProposalPage } from './pages/ProposalPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { AdminPage } from './pages/AdminPage'
+import { DesignTokensPage } from './pages/dev/DesignTokensPage'
 
 // IMPLEMENTATION_SPEC §16.1 + REQUIREMENTS P0~P8。
 // /change-password 用 allowMustChange 让 must_change_password=true 的用户能访问。
@@ -40,6 +41,8 @@ export const router = createBrowserRouter([
     element: <App />,
     children: [
       { path: '/login', element: <LoginPage /> },
+      // PR-UI-1 验收用 — 不接入鉴权/AppShell,仅供 design tokens 预览。
+      { path: '/dev/tokens', element: <DesignTokensPage /> },
       {
         path: '/change-password',
         element: (
