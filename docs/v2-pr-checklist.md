@@ -14,7 +14,7 @@
 - [x] PR-M7-1 schema 迁移 + flush CLI
 - [x] PR-M7-2 解除上传限制 (D5)
 - [x] PR-M7-3 HTML 黑板 + 备份脚本 (D2)
-- [ ] PR-UI-2 现有页面 retrofitting
+- [x] PR-UI-2 现有页面 retrofitting
 - [ ] PR-M8-1 材料理解先行
 - [ ] PR-M8-2 目录交互编辑
 - [ ] PR-M9-1 选择性生成 + 增量补齐

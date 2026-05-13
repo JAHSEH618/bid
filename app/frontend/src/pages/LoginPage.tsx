@@ -1,11 +1,9 @@
 import { useState } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { z } from 'zod'
-import { FileText, ShieldCheck, Sparkles } from 'lucide-react'
 import {
   Card,
   CardContent,
-  CardDescription,
   CardFooter,
   CardHeader,
   CardTitle,
@@ -23,6 +21,8 @@ const schema = z.object({
   password: z.string().min(1, '请输入密码'),
 })
 
+// PR-UI-2:editorial 登录页 — 衬线大标题 + 大留白 + 1px hairline border。
+// 不动业务逻辑;diff 限定为 className / 结构。
 export function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -84,43 +84,26 @@ export function LoginPage() {
   }
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden p-4">
-      {/* 背景渐变 + 浮动光斑,提升登录页质感 */}
-      <div
-        aria-hidden
-        className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_at_top,_hsl(222_70%_94%)_0%,_hsl(220_25%_98.5%)_55%)]"
-      />
-      <div
-        aria-hidden
-        className="absolute -top-32 left-1/2 -z-10 h-[460px] w-[460px] -translate-x-1/2 rounded-full bg-primary/10 blur-3xl"
-      />
-
-      <div className="page-enter w-full max-w-sm">
-        <div className="mb-6 flex flex-col items-center text-center">
-          <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-lg shadow-primary/20">
-            <FileText className="h-6 w-6" strokeWidth={2.2} />
-          </div>
-          <h1 className="text-[22px] font-semibold tracking-tight text-foreground">
+    <div className="flex min-h-screen items-center justify-center bg-paper px-gutter py-16">
+      <div className="page-enter w-full max-w-md">
+        <header className="mb-12 text-center">
+          <p className="text-meta text-mute mb-3">Bid · Proposal Generator</p>
+          <h1 className="font-display text-h1 leading-tight text-ink">
             投标技术方案生成器
           </h1>
-          <p className="mt-1 text-xs text-muted-foreground">
+          <p className="mt-4 text-sm text-mute">
             AI 驱动的投标方案自动撰写与人工审核工作流
           </p>
-        </div>
+        </header>
 
-        <Card
-          className={cn(
-            'border-border/60 shadow-md',
-            shake && 'animate-shake',
-          )}
-        >
-          <CardHeader className="space-y-1.5">
-            <CardTitle className="text-[17px]">登录</CardTitle>
-            <CardDescription>使用账号密码进入工作台</CardDescription>
+        <Card className={cn('bg-paper', shake && 'animate-shake')}>
+          <CardHeader>
+            <p className="text-meta text-mute">Sign in</p>
+            <CardTitle className="text-h3">登录</CardTitle>
           </CardHeader>
           <form onSubmit={handleSubmit} noValidate>
-            <CardContent className="space-y-4">
-              <div className="space-y-1.5">
+            <CardContent className="space-y-8">
+              <div className="space-y-2">
                 <Label htmlFor="username">用户名</Label>
                 <Input
                   id="username"
@@ -140,7 +123,7 @@ export function LoginPage() {
                   </p>
                 )}
               </div>
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <Label htmlFor="password">密码</Label>
                 <Input
                   id="password"
@@ -160,7 +143,7 @@ export function LoginPage() {
                 )}
               </div>
             </CardContent>
-            <CardFooter className="flex flex-col items-stretch gap-2.5">
+            <CardFooter className="flex flex-col items-stretch gap-4 pt-2">
               <Button
                 type="submit"
                 size="lg"
@@ -169,16 +152,14 @@ export function LoginPage() {
               >
                 {login.isPending ? '登录中…' : '登录'}
               </Button>
-              <p className="flex items-center justify-center gap-1 text-center text-xs text-muted-foreground">
-                <ShieldCheck className="h-3 w-3" />
+              <p className="text-meta text-mute text-center">
                 首次登录后系统会要求修改默认密码
               </p>
             </CardFooter>
           </form>
         </Card>
 
-        <p className="mt-5 flex items-center justify-center gap-1.5 text-[11px] text-muted-foreground/80">
-          <Sparkles className="h-3 w-3" />
+        <p className="mt-8 text-meta text-mute text-center">
           内网部署 · 阿里云 DashScope 大模型驱动
         </p>
       </div>

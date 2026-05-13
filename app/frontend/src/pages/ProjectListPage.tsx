@@ -1,17 +1,12 @@
 import { Link, useNavigate } from 'react-router-dom'
-import { Plus, Trash2, ExternalLink, FolderPlus, Sparkles } from 'lucide-react'
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useDeleteProject, useProjects } from '@/api/projects'
 import { useCurrentUser } from '@/hooks/useAuth'
 import { useToast } from '@/hooks/useToast'
 import { confirmDialog } from '@/components/ConfirmDialog'
+import { cn } from '@/lib/utils'
 import type { ProjectDTO, ProjectStatus } from '@/lib/types'
 
 const STATUS_LABEL: Record<ProjectStatus, string> = {
@@ -29,14 +24,14 @@ const STATUS_LABEL: Record<ProjectStatus, string> = {
 
 const STATUS_VARIANT: Record<
   ProjectStatus,
-  'secondary' | 'info' | 'warning' | 'success' | 'destructive' | 'outline'
+  'secondary' | 'warning' | 'success' | 'destructive' | 'outline' | 'muted'
 > = {
-  init: 'secondary',
-  queued: 'info',
-  extracting: 'info',
-  outlining: 'info',
+  init: 'outline',
+  queued: 'muted',
+  extracting: 'muted',
+  outlining: 'muted',
   outline_ready: 'warning',
-  running: 'info',
+  running: 'muted',
   awaiting_review: 'warning',
   done: 'success',
   failed: 'destructive',
@@ -45,7 +40,7 @@ const STATUS_VARIANT: Record<
 
 // R-12 进度感知:点击卡片前用户能看到「下一步该做什么」的简短提示。
 const STAGE_HINT: Record<ProjectStatus, string> = {
-  init: '点击进入,上传 3 份招标文档',
+  init: '点击进入,上传招标文档',
   queued: '排队中,等待并发名额释放后自动启动',
   extracting: 'AI 正在解析上传的招标文档',
   outlining: 'AI 正在生成方案提纲',
@@ -64,6 +59,7 @@ const ACTIVE_STATUSES = new Set<ProjectStatus>([
   'running',
 ])
 
+// PR-UI-2 retrofit:editorial 列表 — 左侧大数字 + 中间 serif 标题 + 右侧 meta。
 export function ProjectListPage() {
   const projects = useProjects()
   const remove = useDeleteProject()
@@ -106,171 +102,162 @@ export function ProjectListPage() {
   }
 
   return (
-    <div className="container max-w-6xl space-y-6 py-8 page-enter">
-      <header className="flex flex-wrap items-end justify-between gap-3">
+    <div className="mx-auto max-w-6xl px-gutter py-12 page-enter">
+      <header className="mb-12 flex flex-wrap items-end justify-between gap-4 border-b border-rule pb-8">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">项目列表</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            团队共享池:任何成员可审核任何项目;只有创建者与管理员能删除
+          <p className="text-meta text-mute mb-3">Projects · 团队共享池</p>
+          <h1 className="font-display text-hero leading-tight text-ink">
+            项目
+          </h1>
+          <p className="mt-4 max-w-prose text-sm text-mute">
+            任何成员可审核任何项目;只有创建者与管理员能删除。
           </p>
         </div>
-        <Button asChild size="lg">
+        <Button asChild size="lg" variant="default">
           <Link to="/projects/new">
-            <Plus className="mr-1.5 h-4 w-4" />
+            <Plus className="mr-2 h-4 w-4" />
             新建项目
           </Link>
         </Button>
       </header>
 
-      {projects.isLoading && <ProjectGridSkeleton />}
+      {projects.isLoading && <ProjectListSkeleton />}
 
       {projects.data && projects.data.length === 0 && (
-        <Card className="border-dashed">
-          <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted">
-              <FolderPlus className="h-7 w-7 text-muted-foreground" />
-            </div>
-            <div className="space-y-1">
-              <p className="text-base font-medium text-foreground">
-                还没有项目
-              </p>
-              <p className="text-sm text-muted-foreground">
-                创建你的第一个投标方案,跟着工作流一步步生成全文
-              </p>
-            </div>
-            <Button asChild className="mt-2">
-              <Link to="/projects/new">
-                <Plus className="mr-1.5 h-4 w-4" />
-                新建项目
-              </Link>
-            </Button>
-          </CardContent>
-        </Card>
+        <div className="border border-rule bg-paper-2 px-gutter py-24 text-center">
+          <p className="text-meta text-mute mb-3">空空如也</p>
+          <p className="font-display text-h2 text-ink">还没有项目</p>
+          <p className="mx-auto mt-4 max-w-prose text-sm text-mute">
+            创建你的第一个投标方案,跟着工作流一步步生成全文。
+          </p>
+          <Button asChild className="mt-8">
+            <Link to="/projects/new">
+              <Plus className="mr-2 h-4 w-4" />
+              新建项目
+            </Link>
+          </Button>
+        </div>
       )}
 
       {projects.data && projects.data.length > 0 && (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {projects.data.map((p) => {
+        <ul className="divide-y divide-rule border-y border-rule">
+          {projects.data.map((p, idx) => {
             const canDelete = me?.role === 'admin' || me?.id === p.created_by
             const isActive = ACTIVE_STATUSES.has(p.status)
             return (
-              <Card
-                key={p.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => goToProject(p)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    goToProject(p)
-                  }
-                }}
-                className="group relative cursor-pointer overflow-hidden border-border/70 transition-[transform,border-color,box-shadow] duration-200 ease-out hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 motion-reduce:transition-none motion-reduce:hover:translate-y-0"
-              >
-                {/* 顶部色条:状态视觉标识 */}
+              <li key={p.id}>
                 <div
-                  className={
-                    p.status === 'done'
-                      ? 'absolute inset-x-0 top-0 h-1 bg-emerald-400'
-                      : p.status === 'awaiting_review' ||
-                          p.status === 'outline_ready'
-                        ? 'absolute inset-x-0 top-0 h-1 bg-amber-400'
-                        : p.status === 'failed'
-                          ? 'absolute inset-x-0 top-0 h-1 bg-destructive'
-                          : isActive
-                            ? 'absolute inset-x-0 top-0 h-1 bg-sky-400'
-                            : 'absolute inset-x-0 top-0 h-1 bg-transparent'
-                  }
-                />
-                <CardHeader className="pb-3 pt-5">
-                  <div className="flex items-start justify-between gap-3">
-                    <CardTitle className="line-clamp-1 text-[15px] leading-snug">
-                      {p.name}
-                    </CardTitle>
-                    <Badge variant={STATUS_VARIANT[p.status]}>
-                      {isActive && (
-                        <span
-                          aria-hidden
-                          className="inline-block h-1.5 w-1.5 animate-pulse-soft rounded-full bg-current"
-                        />
-                      )}
-                      {STATUS_LABEL[p.status]}
-                    </Badge>
-                  </div>
-                  {p.description && (
-                    <p className="line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-                      {p.description}
-                    </p>
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => goToProject(p)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      goToProject(p)
+                    }
+                  }}
+                  className={cn(
+                    'group grid grid-cols-12 gap-6 px-2 py-8 cursor-pointer',
+                    'transition-colors duration-150 hover:bg-paper-2',
+                    'focus-visible:outline-none focus-visible:bg-paper-2',
                   )}
-                </CardHeader>
-                <CardContent className="space-y-3 text-xs text-muted-foreground">
-                  <div className="flex items-center justify-between">
-                    <span>创建者 #{p.created_by}</span>
-                    <span>
-                      {new Date(p.created_at).toLocaleDateString('zh-CN')}
-                    </span>
+                >
+                  {/* 左侧大数字 — editorial 信号 */}
+                  <div className="col-span-2 md:col-span-1">
+                    <p className="font-display text-h1 tabular-nums leading-none text-mute">
+                      {String(idx + 1).padStart(2, '0')}
+                    </p>
                   </div>
-                  <p className="flex items-start gap-1.5 rounded-md bg-muted/60 px-2.5 py-2 text-[12px] leading-relaxed text-muted-foreground/95">
-                    <Sparkles className="mt-0.5 h-3 w-3 shrink-0 text-primary/70" />
-                    {STAGE_HINT[p.status]}
-                  </p>
-                  <div
-                    className="flex items-center justify-end gap-1"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => goToProject(p)}
-                    >
-                      <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                      打开
-                    </Button>
-                    {canDelete && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleDelete(p)}
-                        disabled={remove.isPending}
-                        className="text-muted-foreground hover:text-destructive"
-                      >
-                        <Trash2 className="mr-1 h-3.5 w-3.5" />
-                        删除
-                      </Button>
+                  {/* 中间 serif 标题 + 描述 */}
+                  <div className="col-span-7 md:col-span-7 min-w-0">
+                    <div className="flex items-center gap-3 mb-2">
+                      <Badge variant={STATUS_VARIANT[p.status]}>
+                        {isActive && (
+                          <span
+                            aria-hidden
+                            className="inline-block h-1.5 w-1.5 animate-pulse-soft rounded-full bg-current"
+                          />
+                        )}
+                        {STATUS_LABEL[p.status]}
+                      </Badge>
+                      <span className="text-meta text-mute">
+                        #{p.id}
+                      </span>
+                    </div>
+                    <p className="font-display text-h3 leading-snug text-ink line-clamp-2">
+                      {p.name}
+                    </p>
+                    {p.description && (
+                      <p className="mt-2 max-w-prose text-sm text-mute line-clamp-2">
+                        {p.description}
+                      </p>
                     )}
+                    <p className="mt-3 text-meta text-mute">
+                      {STAGE_HINT[p.status]}
+                    </p>
                   </div>
-                </CardContent>
-              </Card>
+                  {/* 右侧 meta + 操作 */}
+                  <div className="col-span-3 md:col-span-4 flex flex-col items-end justify-between gap-3 text-right">
+                    <div className="space-y-1">
+                      <p className="text-meta text-mute">
+                        {new Date(p.created_at).toLocaleDateString('zh-CN', {
+                          year: 'numeric',
+                          month: '2-digit',
+                          day: '2-digit',
+                        })}
+                      </p>
+                      <p className="text-meta text-mute">
+                        创建者 #{p.created_by}
+                      </p>
+                    </div>
+                    <div
+                      className="flex items-center gap-1"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {canDelete && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDelete(p)}
+                          disabled={remove.isPending}
+                          className="text-mute hover:text-destructive"
+                        >
+                          <Trash2 className="mr-1 h-3.5 w-3.5" />
+                          删除
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </li>
             )
           })}
-        </div>
+        </ul>
       )}
     </div>
   )
 }
 
-function ProjectGridSkeleton() {
+function ProjectListSkeleton() {
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-      {Array.from({ length: 6 }).map((_, i) => (
-        <Card key={i} className="border-border/70">
-          <CardHeader className="pb-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="skeleton h-5 w-2/3" />
-              <div className="skeleton h-5 w-16 rounded-full" />
-            </div>
-            <div className="skeleton mt-2 h-3 w-full" />
-            <div className="skeleton mt-1 h-3 w-3/4" />
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex items-center justify-between text-xs">
-              <div className="skeleton h-3 w-20" />
-              <div className="skeleton h-3 w-16" />
-            </div>
-            <div className="skeleton h-9 w-full rounded-md" />
-          </CardContent>
-        </Card>
+    <ul className="divide-y divide-rule border-y border-rule">
+      {Array.from({ length: 4 }).map((_, i) => (
+        <li
+          key={i}
+          className="grid grid-cols-12 gap-6 px-2 py-8 animate-pulse"
+        >
+          <div className="col-span-1 skeleton h-10 w-12" />
+          <div className="col-span-7 space-y-3">
+            <div className="skeleton h-4 w-1/4" />
+            <div className="skeleton h-6 w-3/5" />
+            <div className="skeleton h-3 w-4/5" />
+          </div>
+          <div className="col-span-4 flex flex-col items-end gap-2">
+            <div className="skeleton h-3 w-20" />
+            <div className="skeleton h-3 w-16" />
+          </div>
+        </li>
       ))}
-    </div>
+    </ul>
   )
 }
