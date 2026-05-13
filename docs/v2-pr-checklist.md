@@ -11,7 +11,7 @@
 - [x] PR-UI-1 design tokens 基线
 - [x] PR-M6-1 脱敏服务 (D3)
 - [x] PR-M6-2 单章 Word 导出
-- [ ] PR-M7-1 schema 迁移 + flush CLI
+- [x] PR-M7-1 schema 迁移 + flush CLI
 - [ ] PR-M7-2 解除上传限制 (D5)
 - [ ] PR-M7-3 HTML 黑板 + 备份脚本 (D2)
 - [ ] PR-UI-2 现有页面 retrofitting

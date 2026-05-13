@@ -43,7 +43,12 @@ from ..services.document_extractor import extract_for_project
 from ..services.docx_export import export_chapter_docx, export_docx
 from ..services.llm import ChapterGenerationFailed
 from ..workflow.graph import build_graph
-from ..workflow.state import WorkflowState
+from ..workflow.state import (
+    CURRENT_WORKFLOW_SCHEMA_VERSION,
+    WorkflowSchemaMismatch,
+    WorkflowState,
+    ensure_v2_state,
+)
 
 
 class _StaleJob(Exception):
@@ -168,6 +173,7 @@ async def build_initial_state(project_id: int, run_id: int) -> WorkflowState:
 
     docs = await extract_for_project(project_id)
     return {
+        "schema_version": CURRENT_WORKFLOW_SCHEMA_VERSION,
         "project_id": project_id,
         "run_id": run_id,
         "tech_spec_md": docs.get("tech_spec_md", ""),
@@ -217,6 +223,7 @@ async def build_chapter_body_state(project_id: int, run_id: int) -> WorkflowStat
         for row in chapter_rows
     ]
     return {
+        "schema_version": CURRENT_WORKFLOW_SCHEMA_VERSION,
         "project_id": project_id,
         "run_id": run_id,
         "tech_spec_md": docs.get("tech_spec_md", ""),
@@ -375,6 +382,41 @@ async def _slot_lost_compensation(
 # ----- workflow tasks ---------------------------------------------------
 
 
+async def _abort_project_schema_v1(
+    project_id: int, run_id: int, action: str
+) -> None:
+    """⭐ PR-M7-1:checkpoint schema 不匹配,标 project 'aborted_schema_v1'。
+
+    与 ``_fail_project_and_run`` 区分:这条路径不算 task crash,只是 v2 上线
+    遗留的 v1 项目无法 resume。UI 看到 ``aborted_schema_v1`` 时提示用户重建。
+    """
+    try:
+        async with session_factory() as s:
+            await s.execute(
+                sa.text(
+                    "UPDATE projects SET status='aborted_schema_v1' "
+                    "WHERE id=:p AND status NOT IN ('done', 'failed')"
+                ),
+                {"p": project_id},
+            )
+            await s.execute(
+                sa.text(
+                    "UPDATE runs SET status='aborted', "
+                    "finished_at=NOW(), error='workflow schema v1 → v2' "
+                    "WHERE id=:r AND status='running'"
+                ),
+                {"r": run_id},
+            )
+            await s.commit()
+    except Exception:
+        log.exception(
+            "schema_v1_abort_db_update_failed",
+            project_id=project_id,
+            run_id=run_id,
+            action=action,
+        )
+
+
 async def start_workflow_task(
     ctx: dict[str, Any],
     *,
@@ -397,9 +439,11 @@ async def start_workflow_task(
         async with project_heartbeat(project_id, token) as lost_event:
             await _set_project_status(project_id, "running")
             initial = await build_initial_state(project_id, run_id)
-            async for _ in graph.astream(
+            async for state in graph.astream(
                 initial, config, stream_mode="values"
             ):
+                # ⭐ PR-M7-1:每个 state snapshot 校验 schema_version
+                ensure_v2_state(state)
                 if lost_event.is_set() or not await ensure_project_slot(
                     project_id, token
                 ):
@@ -415,6 +459,15 @@ async def start_workflow_task(
         )
         log.warning(
             "start_workflow_task_aborted_slot_lost", project_id=project_id
+        )
+    except WorkflowSchemaMismatch as e:
+        # ⭐ PR-M7-1:v1 checkpoint 在 v2 graph 无法 resume;标 aborted_schema_v1
+        await _abort_project_schema_v1(project_id, run_id, action="start")
+        log.warning(
+            "start_workflow_task_schema_mismatch",
+            project_id=project_id,
+            found=e.found,
+            current=e.current,
         )
     except ChapterGenerationFailed as e:
         await _set_project_status(project_id, "awaiting_review")
@@ -490,11 +543,13 @@ async def resume_review_task(
                     await s.commit()
 
         async with project_heartbeat(project_id, token) as lost_event:
-            async for _ in graph.astream(
+            async for state in graph.astream(
                 Command(resume=resume_payload),
                 config,
                 stream_mode="values",
             ):
+                # ⭐ PR-M7-1:resume 路径上也要校验 v1 → v2 不兼容 checkpoint
+                ensure_v2_state(state)
                 if lost_event.is_set() or not await ensure_project_slot(
                     project_id, token
                 ):
@@ -512,6 +567,14 @@ async def resume_review_task(
         )
         log.warning(
             "resume_review_task_aborted_slot_lost", project_id=project_id
+        )
+    except WorkflowSchemaMismatch as e:
+        await _abort_project_schema_v1(project_id, run_id, action="resume")
+        log.warning(
+            "resume_review_task_schema_mismatch",
+            project_id=project_id,
+            found=e.found,
+            current=e.current,
         )
     except ChapterGenerationFailed as e:
         await _set_project_status(project_id, "awaiting_review")
@@ -670,7 +733,9 @@ async def retry_failed_chapter_task(
 
         async with project_heartbeat(project_id, token) as lost_event:
             await graph.aupdate_state(config, {"retry_count": 0})
-            async for _ in graph.astream(None, config, stream_mode="values"):
+            async for state in graph.astream(None, config, stream_mode="values"):
+                # ⭐ PR-M7-1:retry 也走 checkpoint resume,同样校验 schema
+                ensure_v2_state(state)
                 if lost_event.is_set() or not await ensure_project_slot(
                     project_id, token
                 ):
@@ -687,6 +752,14 @@ async def retry_failed_chapter_task(
         log.warning(
             "retry_failed_chapter_task_aborted_slot_lost",
             project_id=project_id,
+        )
+    except WorkflowSchemaMismatch as e:
+        await _abort_project_schema_v1(project_id, run_id, action="retry")
+        log.warning(
+            "retry_failed_chapter_task_schema_mismatch",
+            project_id=project_id,
+            found=e.found,
+            current=e.current,
         )
     except ChapterGenerationFailed as e:
         await _set_project_status(project_id, "awaiting_review")

@@ -1,15 +1,20 @@
-"""Project 表(§8)。
+"""Project 表(§8 + PR-M7-1 v2 schema bump)。
 
 ⚠️ status 取值:``init | extracting | outlining | outline_ready | queued |
-running | awaiting_review | done | failed | aborted``。
+running | awaiting_review | done | failed | aborted | aborted_schema_v1``。
 ``queued`` 表示项目已 ``/start`` 但全局并发上限已满,排队等位(D-P)。
+``aborted_schema_v1`` (PR-M7-1) = v1 checkpoint 在 v2 graph 上无法 resume。
 
 ⭐ D-C 真快照:``encrypted_api_key_snapshot`` 在 ``/start`` 时由 ApiKey 拷过来,
 工作流后续都从这里读;用户重置 / 删除 ApiKey 不影响本项目(FR-7.6)。
+
+⭐ PR-M7-3:``blackboard_path`` 指向 ``/var/lib/bid-app/projects/{id}/blackboard.html``,
+disk + DB 双写;备份脚本同步覆盖该目录。
 """
+
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Index, LargeBinary, String
+from sqlalchemy import ForeignKey, Index, LargeBinary, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, TimestampMixin
@@ -47,3 +52,6 @@ class Project(Base, TimestampMixin):
     visuals_model_snapshot: Mapped[str | None] = mapped_column(
         String(128), nullable=True
     )
+
+    # ⭐ PR-M7-3:HTML 黑板的磁盘路径
+    blackboard_path: Mapped[str | None] = mapped_column(Text, nullable=True)
