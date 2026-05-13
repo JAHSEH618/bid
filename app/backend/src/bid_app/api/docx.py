@@ -31,10 +31,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..deps import get_current_user, get_db
-from ..models import DocxJob, Project, User
+from ..models import Chapter, DocxJob, Project, User
 from ..services.docx_export import sanitize_filename
 
 router = APIRouter(prefix="/api/projects", tags=["docx"])
+chapter_router = APIRouter(prefix="/api/chapters", tags=["chapter-docx"])
 log = structlog.get_logger()
 
 
@@ -356,6 +357,272 @@ async def download_docx(
 
     fname = _display_filename(project.name)
     ascii_fallback = "proposal.docx"
+    return FileResponse(
+        path,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
+        ),
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_fallback}"; '
+                f"filename*=UTF-8''{quote(fname)}"
+            ),
+        },
+    )
+
+
+# ============== PR-M6-2:单章 DOCX 导出 ==============
+#
+# POST /api/chapters/{chapter_id}/export.docx → 触发(返回 docx_job_id)
+# GET  /api/chapters/{chapter_id}/export.docx → 下载
+#
+# 进度查询复用 GET /api/projects/{project_id}/docx-job/{docx_job_id}
+# (job id 是全局唯一,project_id 可从 DocxJob 行反查)。
+
+
+def _display_chapter_filename(project_name: str, chapter_title: str) -> str:
+    """``{项目名}_{章节标题}_{YYYYMMDD}.docx``,与全本格式对齐(D-L 风格)。"""
+    today = datetime.now(ZoneInfo(settings.tz)).strftime("%Y%m%d")
+    return (
+        f"{sanitize_filename(project_name)}_"
+        f"{sanitize_filename(chapter_title)}_{today}.docx"
+    )
+
+
+async def _load_chapter_for_export(
+    db: AsyncSession, chapter_id: int
+) -> tuple[Chapter, Project]:
+    """取章节 + 关联项目;鉴权交给 deps.get_current_user。pass 状态才允许导出。"""
+    row = (
+        await db.execute(
+            sa.text(
+                "SELECT c.id, c.status, c.title, c.final_text, "
+                "p.id AS project_id, p.name, p.dir_path "
+                "FROM chapters c "
+                "JOIN runs r ON r.id = c.run_id "
+                "JOIN projects p ON p.id = r.project_id "
+                "WHERE c.id = :c"
+            ),
+            {"c": chapter_id},
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
+    if row["status"] != "approved":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"chapter not approved yet, status={row['status']}",
+        )
+    if not row["final_text"]:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "chapter has no final text — cannot export",
+        )
+    # 实例化轻量对象,避免再次 query
+    chapter = Chapter()
+    chapter.id = row["id"]
+    chapter.title = row["title"]
+    chapter.status = row["status"]
+    project = Project()
+    project.id = row["project_id"]
+    project.name = row["name"]
+    project.dir_path = row["dir_path"]
+    return chapter, project
+
+
+@chapter_router.post("/{chapter_id}/export.docx")
+async def trigger_chapter_docx(
+    chapter_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """触发单章 DOCX 生成。命中已存在的 done job 时返回 ``cached=True``。"""
+    _chapter, project = await _load_chapter_for_export(db, chapter_id)
+    cached = Path(project.dir_path) / f"chapter_{chapter_id}.docx"
+
+    # finalizing repair (与项目级路径同思路)
+    if cached.exists():
+        await db.execute(
+            sa.text(
+                "UPDATE docx_jobs SET status='done', output_path=:p, "
+                "finished_at=NOW(), updated_at=NOW() "
+                "WHERE chapter_id=:c AND status='finalizing'"
+            ),
+            {"p": str(cached), "c": chapter_id},
+        )
+        await db.commit()
+
+    latest = (
+        await db.execute(
+            sa.text(
+                "SELECT id, status FROM docx_jobs "
+                "WHERE chapter_id=:c AND scope='chapter' "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"c": chapter_id},
+        )
+    ).mappings().one_or_none()
+
+    if cached.exists() and latest and latest["status"] == "done":
+        return {
+            "docx_job_id": latest["id"],
+            "arq_job_id": None,
+            "cached": True,
+            "scope": "chapter",
+        }
+
+    job = DocxJob(
+        project_id=project.id,
+        scope="chapter",
+        chapter_id=chapter_id,
+        arq_job_id=None,
+        status="pending",
+    )
+    db.add(job)
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "本章节已有 DOCX 生成任务在进行中",
+        ) from e
+    job_pk = job.id
+
+    arq_pool = getattr(request.app.state, "arq_pool", None)
+    if arq_pool is None:
+        await db.execute(
+            sa.text(
+                "UPDATE docx_jobs SET status='failed', "
+                "error='arq_pool not initialized', finished_at=NOW(), "
+                "updated_at=NOW() WHERE id=:i"
+            ),
+            {"i": job_pk},
+        )
+        await db.commit()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
+        )
+
+    try:
+        arq_job = await arq_pool.enqueue_job(
+            "generate_docx_task",
+            project_id=project.id,
+            docx_job_id=job_pk,
+        )
+    except Exception as e:
+        await db.execute(
+            sa.text(
+                "UPDATE docx_jobs SET status='failed', error=:err, "
+                "finished_at=NOW(), updated_at=NOW() WHERE id=:i"
+            ),
+            {"err": f"enqueue failed: {e!r}"[:4000], "i": job_pk},
+        )
+        await db.commit()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "无法入队 DOCX 任务,请稍后重试",
+        ) from e
+
+    if arq_job is None:
+        await db.execute(
+            sa.text(
+                "UPDATE docx_jobs SET status='failed', "
+                "error='enqueue returned None', finished_at=NOW(), "
+                "updated_at=NOW() WHERE id=:i"
+            ),
+            {"i": job_pk},
+        )
+        await db.commit()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "无法入队 DOCX 任务,请稍后重试",
+        )
+
+    job_2 = await db.get(DocxJob, job_pk)
+    if job_2 is not None:
+        job_2.arq_job_id = arq_job.job_id
+        await db.commit()
+
+    return {
+        "docx_job_id": job_pk,
+        "arq_job_id": arq_job.job_id,
+        "cached": False,
+        "scope": "chapter",
+        "project_id": project.id,
+    }
+
+
+@chapter_router.get(
+    "/{chapter_id}/export.docx",
+    response_class=FileResponse,
+    response_model=None,
+)
+async def download_chapter_docx(
+    chapter_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> FileResponse:
+    """下载单章 DOCX。"""
+    chapter, project = await _load_chapter_for_export(db, chapter_id)
+    path = Path(project.dir_path) / f"chapter_{chapter_id}.docx"
+
+    if path.exists():
+        await db.execute(
+            sa.text(
+                "UPDATE docx_jobs SET status='done', output_path=:p, "
+                "finished_at=NOW(), updated_at=NOW() "
+                "WHERE chapter_id=:c AND status='finalizing'"
+            ),
+            {"p": str(path), "c": chapter_id},
+        )
+        await db.commit()
+
+    latest = (
+        await db.execute(
+            sa.text(
+                "SELECT id, status FROM docx_jobs "
+                "WHERE chapter_id=:c AND scope='chapter' "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"c": chapter_id},
+        )
+    ).mappings().one_or_none()
+
+    if not latest or latest["status"] != "done":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "docx_not_ready",
+                "message": "请先 POST 触发生成",
+                "docx_job_id": latest["id"] if latest else None,
+                "current_status": latest["status"] if latest else None,
+            },
+        )
+
+    if not path.exists():
+        await db.execute(
+            sa.text(
+                "UPDATE docx_jobs SET status='failed', "
+                "error='done file missing on disk', finished_at=NOW(), "
+                "updated_at=NOW(), output_path=NULL WHERE id=:i"
+            ),
+            {"i": latest["id"]},
+        )
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "docx_missing",
+                "message": "DOCX 文件丢失,请重新生成",
+                "docx_job_id": latest["id"],
+            },
+        )
+
+    fname = _display_chapter_filename(project.name, chapter.title)
+    ascii_fallback = f"chapter_{chapter_id}.docx"
     return FileResponse(
         path,
         media_type=(

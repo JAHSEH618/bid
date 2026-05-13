@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
   Bot,
+  Download,
   FileCheck,
   History,
   Loader2,
@@ -22,6 +23,11 @@ import {
   useRetryChapter,
   useSetChapterModel,
 } from '@/api/chapters'
+import {
+  downloadChapterDocxUrl,
+  useDocxJob,
+  useTriggerChapterDocx,
+} from '@/api/docx'
 import { useModelConfig } from '@/api/me'
 import { useQueryClient } from '@tanstack/react-query'
 import { useProjectStream, type ProjectEvent } from '@/hooks/useSSE'
@@ -425,7 +431,10 @@ export function ChapterReviewPage() {
                     isStreaming={isStreaming}
                   />
                 ) : (
-                  <ChapterEmptyHint status={activeChapter.status} />
+                  <ChapterEmptyHint
+                    status={activeChapter.status}
+                    chapterId={chapterDetail.data?.id ?? null}
+                  />
                 )}
               </TabsContent>
               <TabsContent value="versions">
@@ -604,7 +613,13 @@ function uniqueModels(models: string[]) {
 }
 
 // 当前 chapter 没有可显示的 markdown 时,根据状态给用户合适的提示。
-function ChapterEmptyHint({ status }: { status: ChapterStatus }) {
+function ChapterEmptyHint({
+  status,
+  chapterId,
+}: {
+  status: ChapterStatus
+  chapterId: number | null
+}) {
   const base =
     'flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-muted/30 py-16 text-center'
 
@@ -656,6 +671,10 @@ function ChapterEmptyHint({ status }: { status: ChapterStatus }) {
         <p className="max-w-sm text-xs text-muted-foreground">
           章节正文已并入全文。本期后端不暴露已审章节的历史正文,可前往「全文」页查看完整结果
         </p>
+        {/* PR-M6-2:approved 章节提供单章 .docx 导出。skipped 不显示按钮。 */}
+        {status === 'approved' && chapterId != null && (
+          <ChapterExportButton chapterId={chapterId} />
+        )}
       </div>
     )
   }
@@ -676,5 +695,92 @@ function ChapterEmptyHint({ status }: { status: ChapterStatus }) {
     <div className={base}>
       <p className="text-sm text-muted-foreground">章节尚未就绪</p>
     </div>
+  )
+}
+
+// PR-M6-2:approved 章节单击触发后端单章 .docx 生成,完成后弹出下载链接。
+// 复用现有 useDocxJob 轮询（chapter scope 共享 docx_jobs 表,job_id 全局唯一）。
+function ChapterExportButton({ chapterId }: { chapterId: number }) {
+  const trigger = useTriggerChapterDocx()
+  const { toast } = useToast()
+  const [pollState, setPollState] = useState<{
+    projectId: number | null
+    jobId: number | null
+  }>({ projectId: null, jobId: null })
+
+  const job = useDocxJob(pollState.projectId, pollState.jobId, {
+    refetchInterval: (q) => {
+      const s = q.state.data?.status
+      if (s === 'done' || s === 'failed' || s === 'invalidated') return false
+      return 3_000
+    },
+  })
+
+  useEffect(() => {
+    const data = job.data
+    if (!data) return
+    if (data.status === 'failed') {
+      toast({
+        variant: 'destructive',
+        title: '导出失败',
+        description: data.error ?? '后端报告未知错误',
+      })
+      setPollState({ projectId: null, jobId: null })
+    } else if (data.status === 'done') {
+      toast({
+        variant: 'success',
+        title: '本章 .docx 已就绪',
+        description: '正在打开下载…',
+      })
+      window.location.href = downloadChapterDocxUrl(chapterId)
+      setPollState({ projectId: null, jobId: null })
+    }
+  }, [job.data, toast, chapterId])
+
+  const handleClick = async () => {
+    try {
+      const res = await trigger.mutateAsync(chapterId)
+      if (res.cached) {
+        toast({
+          variant: 'info',
+          title: '使用已生成的 .docx',
+          description: '正在打开下载…',
+        })
+        window.location.href = downloadChapterDocxUrl(chapterId)
+        return
+      }
+      setPollState({
+        projectId: res.project_id ?? null,
+        jobId: res.docx_job_id,
+      })
+    } catch (err) {
+      toast({
+        variant: 'destructive',
+        title: '触发失败',
+        description: readApiError(err, '请重试'),
+      })
+    }
+  }
+
+  const polling = pollState.jobId !== null
+  const stageLabel =
+    job.data?.stage ?? (trigger.isPending ? '排队中' : '导出本章')
+
+  return (
+    <Button
+      type="button"
+      variant="secondary"
+      size="sm"
+      onClick={handleClick}
+      disabled={trigger.isPending || polling}
+      className="mt-4"
+    >
+      {polling || trigger.isPending ? (
+        <Loader2 className="mr-1 h-4 w-4 animate-spin" aria-hidden="true" />
+      ) : (
+        <Download className="mr-1 h-4 w-4" aria-hidden="true" />
+      )}
+      {polling ? stageLabel : '导出本章 .docx'}
+    </Button>
   )
 }

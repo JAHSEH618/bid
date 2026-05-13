@@ -61,3 +61,41 @@ export function downloadDocxUrl(projectId: number): string {
 export function downloadMarkdownUrl(projectId: number): string {
   return apiUrl(`/api/projects/${projectId}/proposal.md`)
 }
+
+// ============== PR-M6-2:单章 DOCX 导出 ==============
+//
+// 端点:
+//   - POST /api/chapters/{chapter_id}/export.docx → {docx_job_id, arq_job_id, cached, project_id}
+//   - GET  /api/chapters/{chapter_id}/export.docx → FileResponse
+//   - 进度查询复用 GET /api/projects/{project_id}/docx-job/{docx_job_id}
+//     (job_id 全局唯一,trigger 返回 project_id 给前端轮询用)
+
+export interface TriggerChapterDocxResponse {
+  docx_job_id: number
+  arq_job_id: string | null
+  cached: boolean
+  scope: 'chapter'
+  project_id?: number
+}
+
+export function useTriggerChapterDocx() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (chapterId: number) =>
+      apiFetch<TriggerChapterDocxResponse>(
+        `/api/chapters/${chapterId}/export.docx`,
+        { method: 'POST' },
+      ),
+    onSuccess: (data) => {
+      if (data.project_id) {
+        qc.invalidateQueries({
+          queryKey: ['projects', data.project_id, 'docx-job'],
+        })
+      }
+    },
+  })
+}
+
+export function downloadChapterDocxUrl(chapterId: number): string {
+  return apiUrl(`/api/chapters/${chapterId}/export.docx`)
+}

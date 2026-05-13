@@ -132,6 +132,8 @@ app.include_router(_stream_router.router)
 app.include_router(_projects_router.router)
 app.include_router(_chapters_router.router)
 app.include_router(_docx_router.router)
+# PR-M6-2:单章 Word 导出走 /api/chapters/{chapter_id}/export.docx
+app.include_router(_docx_router.chapter_router)
 
 
 # === SPA fallback(§15.6) ===

@@ -40,7 +40,7 @@ from ..services.concurrency import (
     wake_queued_projects,
 )
 from ..services.document_extractor import extract_for_project
-from ..services.docx_export import export_docx
+from ..services.docx_export import export_chapter_docx, export_docx
 from ..services.llm import ChapterGenerationFailed
 from ..workflow.graph import build_graph
 from ..workflow.state import WorkflowState
@@ -787,16 +787,23 @@ async def generate_docx_task(  # max_tries=1 在 worker/settings.py functions �
     project_id: int,
     docx_job_id: int,
 ) -> dict[str, Any]:
-    """串行锁在 export_docx 内部实现(D-H)。"""
-    # 0. ⭐ D-AK:校验 DocxJob row 存在
+    """串行锁在 export_docx 内部实现(D-H)。
+
+    PR-M6-2:按 ``DocxJob.scope`` 分发到 project / chapter 两条路径。
+    chapter scope 走单章 markdown (``Chapter.final_text``) + 章节专属 final 路径
+    (``chapter_{id}.docx``);project scope 维持原全本流程不动。
+    """
+    # 0. ⭐ D-AK:校验 DocxJob row 存在 + 读 scope/chapter_id 决定分支
     async with session_factory() as s:
-        existing = (
+        existing_row = (
             await s.execute(
-                sa.text("SELECT status FROM docx_jobs WHERE id=:i"),
+                sa.text(
+                    "SELECT status, scope, chapter_id FROM docx_jobs WHERE id=:i"
+                ),
                 {"i": docx_job_id},
             )
-        ).scalar_one_or_none()
-        if existing is None:
+        ).mappings().one_or_none()
+        if existing_row is None:
             log.error(
                 "docx_job_row_missing",
                 docx_job_id=docx_job_id,
@@ -804,6 +811,9 @@ async def generate_docx_task(  # max_tries=1 在 worker/settings.py functions �
                 hint="API 端 commit 可能失败;arq 仍把 task 入了队",
             )
             return {"error": "docx_job row not found"}
+        existing = existing_row["status"]
+        scope = existing_row["scope"] or "project"
+        chapter_id = existing_row["chapter_id"]
         if existing in ("done", "failed"):
             log.warning(
                 "docx_job_already_finished",
@@ -820,7 +830,25 @@ async def generate_docx_task(  # max_tries=1 在 worker/settings.py functions �
             )
             return {"status": "invalidated"}
 
-    # 1. 取项目 markdown + dir + name
+    if scope == "chapter":
+        if chapter_id is None:
+            raise RuntimeError(
+                f"docx_job {docx_job_id} scope=chapter but chapter_id NULL"
+            )
+        return await _run_chapter_docx_pipeline(
+            project_id=project_id,
+            docx_job_id=docx_job_id,
+            chapter_id=int(chapter_id),
+        )
+
+    return await _run_project_docx_pipeline(
+        project_id=project_id, docx_job_id=docx_job_id
+    )
+
+
+async def _run_project_docx_pipeline(
+    *, project_id: int, docx_job_id: int
+) -> dict[str, Any]:    # 1. 取项目 markdown + dir + name
     async with session_factory() as s:
         prj_row = await s.execute(
             sa.text(
@@ -1027,4 +1055,213 @@ async def generate_docx_task(  # max_tries=1 在 worker/settings.py functions �
         raise
 
     # ⭐ D-BQ + D-CE + D-CL:rename 成功才 commit done
+    return await _commit_docx_done(docx_job_id, final_path)
+
+
+# ----- chapter scope (PR-M6-2) -----------------------------------------
+
+
+async def _run_chapter_docx_pipeline(
+    *,
+    project_id: int,
+    docx_job_id: int,
+    chapter_id: int,
+) -> dict[str, Any]:
+    """单章 DOCX 导出。共享 export pipeline 与全局串行锁;状态机与 project
+    scope 完全对齐(pending → rendering_mermaid → pandoc → finalizing → done),
+    但 final 路径不固定 ``proposal.docx``,而是 ``chapter_{chapter_id}.docx``;
+    invalidation flow 不复用 — 单章导出不依赖整本 assemble。
+    """
+    # 1. 取章节正文 + 项目目录
+    async with session_factory() as s:
+        chapter_row = (
+            await s.execute(
+                sa.text(
+                    "SELECT c.final_text, c.status, c.title, c.index, "
+                    "p.id AS project_id, p.dir_path "
+                    "FROM chapters c "
+                    "JOIN runs r ON r.id = c.run_id "
+                    "JOIN projects p ON p.id = r.project_id "
+                    "WHERE c.id = :c"
+                ),
+                {"c": chapter_id},
+            )
+        ).mappings().one_or_none()
+        if chapter_row is None:
+            raise RuntimeError(f"chapter {chapter_id} not found")
+        if chapter_row["project_id"] != project_id:
+            raise RuntimeError(
+                f"chapter {chapter_id} belongs to project "
+                f"{chapter_row['project_id']}, not {project_id}"
+            )
+        markdown = chapter_row["final_text"]
+        project_dir = Path(chapter_row["dir_path"])
+
+    if not markdown:
+        async with session_factory() as s:
+            await s.execute(
+                sa.text(
+                    "UPDATE docx_jobs SET status='failed', "
+                    "error='chapter has no final_text', finished_at=NOW(), "
+                    "updated_at=NOW() WHERE id=:i AND status='pending'"
+                ),
+                {"i": docx_job_id},
+            )
+            await s.commit()
+        raise RuntimeError(
+            f"chapter {chapter_id} has no final_text — generate it first"
+        )
+
+    # 2. ⭐ D-BX:进 rendering_mermaid 加 WHERE status='pending' 前置
+    async with session_factory() as s:
+        result = await s.execute(
+            sa.text(
+                "UPDATE docx_jobs SET status='rendering_mermaid', "
+                "updated_at=NOW() WHERE id=:i AND status='pending'"
+            ),
+            {"i": docx_job_id},
+        )
+        await s.commit()
+        if cast(CursorResult[Any], result).rowcount == 0:
+            log.warning(
+                "docx_chapter_stage_blocked_at_rendering",
+                docx_job_id=docx_job_id,
+                hint="cleanup 已把 job 标 failed;不再启动 mermaid 渲染",
+            )
+            return {"status": "stale", "output_path": None}
+
+    # 3. ⭐ D-CU:清旧 final
+    final_path = project_dir / f"chapter_{chapter_id}.docx"
+    try:
+        final_path.unlink(missing_ok=True)
+    except OSError as e:
+        log.exception(
+            "docx_chapter_pre_render_unlink_failed",
+            docx_job_id=docx_job_id,
+            path=str(final_path),
+        )
+        async with session_factory() as s:
+            await s.execute(
+                sa.text(
+                    "UPDATE docx_jobs SET status='failed', "
+                    "error=:e, finished_at=NOW(), updated_at=NOW() "
+                    "WHERE id=:i AND status='rendering_mermaid'"
+                ),
+                {
+                    "i": docx_job_id,
+                    "e": f"failed to clear stale chapter docx: {e!r}"[:4000],
+                },
+            )
+            await s.commit()
+        raise
+
+    async def _update_stage(stage: str) -> None:
+        prev_states = _DOCX_STAGE_ALLOWED_FROM.get(stage)
+        if not prev_states:
+            raise ValueError(f"unknown stage: {stage}")
+        in_clause = ",".join(f"'{s}'" for s in prev_states)
+        async with session_factory() as s:
+            r = await s.execute(
+                sa.text(
+                    f"UPDATE docx_jobs SET status=:s, updated_at=NOW() "
+                    f"WHERE id=:i AND status IN ({in_clause})"
+                ),
+                {"s": stage, "i": docx_job_id},
+            )
+            await s.commit()
+            if cast(CursorResult[Any], r).rowcount == 0:
+                log.warning(
+                    "docx_chapter_stage_blocked",
+                    docx_job_id=docx_job_id,
+                    stage=stage,
+                )
+                raise _StaleJob(stage)
+
+    # 4. pipeline 调用
+    try:
+        tmp_path = await export_chapter_docx(
+            markdown=markdown,
+            project_dir=project_dir,
+            chapter_id=chapter_id,
+            reference_doc=Path(settings.templates_dir) / "reference.docx",
+            redis_url=settings.redis_url,
+            on_stage=_update_stage,
+            job_id=docx_job_id,
+        )
+    except _StaleJob as se:
+        log.info(
+            "docx_chapter_task_stale_exit",
+            docx_job_id=docx_job_id,
+            stage=str(se),
+        )
+        try:
+            (
+                project_dir / f"chapter_{chapter_id}.{docx_job_id}.tmp.docx"
+            ).unlink(missing_ok=True)
+        except Exception:
+            log.exception(
+                "docx_chapter_tmp_unlink_failed", docx_job_id=docx_job_id
+            )
+        return {"status": "stale", "output_path": None}
+    except Exception as e:
+        async with session_factory() as s:
+            await s.execute(
+                sa.text(
+                    "UPDATE docx_jobs SET status='failed', error=:e, "
+                    "finished_at=NOW(), updated_at=NOW() "
+                    "WHERE id=:i AND status IN "
+                    "('pending','rendering_mermaid','pandoc','finalizing')"
+                ),
+                {"i": docx_job_id, "e": str(e)[:4000]},
+            )
+            await s.commit()
+        raise
+
+    # 5. finalizing 抢占 + atomic rename + done
+    async with session_factory() as s:
+        result = await s.execute(
+            sa.text(
+                "UPDATE docx_jobs SET status='finalizing', updated_at=NOW() "
+                "WHERE id=:i AND status IN "
+                "('pending','rendering_mermaid','pandoc')"
+            ),
+            {"i": docx_job_id},
+        )
+        await s.commit()
+        if cast(CursorResult[Any], result).rowcount == 0:
+            log.warning(
+                "docx_chapter_finalize_blocked",
+                docx_job_id=docx_job_id,
+            )
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                log.exception(
+                    "docx_chapter_tmp_unlink_failed", tmp=str(tmp_path)
+                )
+            return {"status": "stale", "output_path": None}
+
+    try:
+        tmp_path.rename(final_path)
+    except Exception:
+        log.exception(
+            "docx_chapter_atomic_rename_failed",
+            tmp=str(tmp_path),
+            final=str(final_path),
+        )
+        async with session_factory() as s:
+            await s.execute(
+                sa.text(
+                    "UPDATE docx_jobs SET status='failed', "
+                    "error='atomic rename failed', finished_at=NOW(), "
+                    "updated_at=NOW(), output_path=NULL "
+                    "WHERE id=:i AND status='finalizing'"
+                ),
+                {"i": docx_job_id},
+            )
+            await s.commit()
+        with contextlib.suppress(Exception):
+            tmp_path.unlink(missing_ok=True)
+        raise
+
     return await _commit_docx_done(docx_job_id, final_path)

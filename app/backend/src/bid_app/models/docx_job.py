@@ -9,11 +9,17 @@ done | failed | invalidated``。
 ⭐ D-CG:``invalidated`` = "上游 markdown 重新生成,本 DOCX 产物已过期";
 由 assemble 节点同步标记。
 
+⭐ PR-M6-2:``scope`` ∈ {'project', 'chapter'}。chapter 范围必须填
+``chapter_id``;project 范围必须留 NULL (DB CHECK 约束保证)。
+
 partial unique index 在 migration 里建(§9):
 - ``uq_docx_jobs_arq_job_id``  : ``(arq_job_id) WHERE arq_job_id IS NOT NULL``
-- ``uq_docx_jobs_project_inflight`` : ``(project_id) WHERE status IN
-  ('pending','rendering_mermaid','pandoc','finalizing')``
+- ``uq_docx_jobs_project_inflight_v2`` : ``(project_id) WHERE scope='project'
+  AND status IN ('pending','rendering_mermaid','pandoc','finalizing')``
+- ``uq_docx_jobs_chapter_inflight`` : ``(chapter_id) WHERE scope='chapter'
+  AND status IN ('pending','rendering_mermaid','pandoc','finalizing')``
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -47,4 +53,11 @@ class DocxJob(Base, TimestampMixin):
         server_default=sa_func.now(),
         onupdate=sa_func.now(),
         nullable=False,
+    )
+    # ⭐ PR-M6-2:project 范围 = 整本方案;chapter 范围 = 单章导出
+    scope: Mapped[str] = mapped_column(
+        String(16), default="project", server_default="project"
+    )
+    chapter_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chapters.id", ondelete="CASCADE"), nullable=True
     )
