@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field
 # outline_ready:LLM-1 跑完,等用户在 P4 编辑提纲并 /confirm-outline
 # running / awaiting_review:章节循环阶段(P5)
 # done / failed / aborted:终态
+# aborted_v1 (PR-M7-1):v2 上线时 ``flush_running_workflows`` CLI 把所有
+#   in-flight v1 项目标记为该状态,提示用户重建。
+# aborted_schema_v1 (PR-M7-1):worker 运行时检测到 ``WorkflowSchemaMismatch``
+#   (老 checkpoint + 新 graph)时自动标记。
 ProjectStatus = Literal[
     "init",
     "queued",
@@ -23,6 +27,8 @@ ProjectStatus = Literal[
     "done",
     "failed",
     "aborted",
+    "aborted_v1",
+    "aborted_schema_v1",
 ]
 
 # Chapter.status 已在 schemas/chapters.py 收紧;outline 端点回填 chapter 嵌入信息

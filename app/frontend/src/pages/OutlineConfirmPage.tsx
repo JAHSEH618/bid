@@ -178,7 +178,9 @@ export function OutlineConfirmPage() {
     }
     const payload: OutlineChapterIn[] = edited
       ? chapters.map((c) => ({
-          id: c.serverId,
+          // PR-M9-1 fix:新章节没有 serverId 时退回 local id,
+          // 让后端 pick_chapter 能在 selected_chapter_ids 里匹配到。
+          id: c.serverId ?? c.id,
           title: c.title.trim(),
           summary: c.summary.trim() || null,
           key_points: c.key_points.map((p) => p.trim()).filter(Boolean),
@@ -186,12 +188,13 @@ export function OutlineConfirmPage() {
         }))
       : []
     // PR-M9-1:勾选状态非全选时,把选中章节 id 一并发给后端。
+    // 用与 payload 同一套 id 策略 (serverId ?? local id),保证新章节也能被选中。
     const allSelected = selectedCount === chapters.length
     const selected_chapter_ids = allSelected
       ? null
       : chapters
-          .filter((c) => c.selected && c.serverId)
-          .map((c) => c.serverId as string)
+          .filter((c) => c.selected)
+          .map((c) => (c.serverId ?? c.id) as string)
     try {
       await confirm.mutateAsync({
         projectId,
