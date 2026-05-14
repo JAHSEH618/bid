@@ -242,7 +242,7 @@ export function OutlineConfirmPage() {
     <div className="mx-auto max-w-5xl px-gutter py-12 page-enter">
       <Button variant="subtle" size="sm" asChild className="mb-8">
         <Link to="/">
-          <ArrowLeft className="mr-1 h-4 w-4" />
+          <ArrowLeft aria-hidden="true" className="mr-1 h-4 w-4" />
           返回项目列表
         </Link>
       </Button>
@@ -294,8 +294,12 @@ export function OutlineConfirmPage() {
       </header>
 
       {!isReady && (
-        <div className="mb-10 relative flex items-start gap-3 border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-warn before:absolute before:left-0 before:right-0 before:top-0 before:h-px before:bg-warn">
-          <Loader2 aria-hidden="true" className="mt-0.5 h-4 w-4 animate-spin" />
+        <div
+          role="status"
+          aria-live="polite"
+          className="mb-10 relative flex items-start gap-3 border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-warn before:absolute before:left-0 before:right-0 before:top-0 before:h-px before:bg-warn"
+        >
+          <Loader2 aria-hidden="true" className="mt-0.5 h-4 w-4 animate-spin motion-reduce:animate-none" />
           <span className="flex-1 leading-relaxed">
             目录尚未就绪 (当前状态:{project.data.status})。LLM-1 仍在生成,稍后自动刷新。
           </span>
@@ -333,7 +337,7 @@ export function OutlineConfirmPage() {
         className="mt-6 w-full border-dashed py-5"
         onClick={addChapter}
       >
-        <Plus className="mr-1 h-4 w-4" />
+        <Plus aria-hidden="true" className="mr-1 h-4 w-4" />
         添加章节
       </Button>
 
@@ -349,13 +353,13 @@ export function OutlineConfirmPage() {
         >
           {confirm.isPending ? (
             <>
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              <Loader2 aria-hidden="true" className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
               锁定中…
             </>
           ) : (
             <>
               锁定目录 · 开始生成章节
-              <ArrowRight className="ml-2 h-4 w-4" />
+              <ArrowRight aria-hidden="true" className="ml-2 h-4 w-4" />
             </>
           )}
         </Button>
@@ -479,7 +483,7 @@ function SortableChapter({
                     })
                   }
                 />
-                <p className="text-meta text-mute mt-1">1 ~ 10 页</p>
+                <p className="text-meta text-mute mt-1">1–10 页</p>
               </div>
             </div>
           </div>
@@ -491,7 +495,7 @@ function SortableChapter({
               onClick={onRemove}
               aria-label={`移除第 ${index + 1} 章`}
             >
-              <X className="h-4 w-4" />
+              <X aria-hidden="true" className="h-4 w-4" />
             </Button>
           </div>
         </CardContent>

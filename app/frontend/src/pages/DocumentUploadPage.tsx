@@ -187,7 +187,7 @@ export function DocumentUploadPage() {
     <div className="container max-w-5xl space-y-6 py-8 page-enter">
       <Button variant="ghost" size="sm" asChild>
         <Link to="/">
-          <ArrowLeft className="mr-1 h-4 w-4" />
+          <ArrowLeft aria-hidden="true" className="mr-1 h-4 w-4" />
           返回项目列表
         </Link>
       </Button>
@@ -197,7 +197,7 @@ export function DocumentUploadPage() {
           {project.data.name}
         </h1>
         <p className="text-sm text-muted-foreground">
-          上传招标文档以启动 AI 工作流。支持 .docx / .doc / .md / .txt,单文件 ≤ {MAX_MB_LABEL},每个模块可上传多个文件
+          上传招标文档以启动 AI 工作流。支持 .docx / .doc / .md / .txt,单文件&nbsp;≤&nbsp;{MAX_MB_LABEL},每个模块可上传多个文件
         </p>
       </header>
 
@@ -276,14 +276,14 @@ export function DocumentUploadPage() {
         >
           {start.isPending ? (
             <>
-              <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+              <Loader2 aria-hidden="true" className="mr-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" />
               启动中…
             </>
           ) : (
             <>
-              <Play className="mr-1.5 h-4 w-4" />
+              <Play aria-hidden="true" className="mr-1.5 h-4 w-4" />
               启动 AI 工作流
-              <ArrowRight className="ml-1 h-4 w-4" />
+              <ArrowRight aria-hidden="true" className="ml-1 h-4 w-4" />
             </>
           )}
         </Button>
@@ -321,7 +321,8 @@ function ModelSelect({
         value={selected}
         onChange={(e) => onChange(e.target.value)}
         disabled={loading || options.length === 0}
-        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 font-mono text-xs shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+        style={{ colorScheme: 'light dark' }}
+        className="flex h-9 w-full rounded-md border border-input bg-background text-foreground px-3 py-1 font-mono text-xs shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
       >
         {options.map((model) => (
           <option key={model} value={model}>
@@ -360,7 +361,7 @@ function UploadSlot({
 
   const validate = (file: File): string | null => {
     if (file.size > MAX_BYTES) {
-      return `文件 ≤ ${MAX_MB_LABEL},当前 ${(file.size / 1024 / 1024).toFixed(1)}MB`
+      return `文件 ≤ ${MAX_MB_LABEL},当前 ${(file.size / 1024 / 1024).toFixed(1)} MB`
     }
     const ext = file.name.split('.').pop()?.toLowerCase()
     if (!ALLOWED_EXTS.includes(ext ?? '')) {
@@ -465,7 +466,7 @@ function UploadSlot({
                 className="flex items-start gap-2 rounded-md border border-emerald-200/70 bg-white p-2.5"
               >
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-emerald-100">
-                  <CheckCircle2 className="h-4 w-4 text-emerald-700" />
+                  <CheckCircle2 aria-hidden="true" className="h-4 w-4 text-emerald-700" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="line-clamp-1 text-sm font-medium text-foreground">
@@ -487,9 +488,9 @@ function UploadSlot({
                   aria-label={`删除 ${doc.original_filename}`}
                 >
                   {remove.isPending ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                   ) : (
-                    <Trash2 className="h-3.5 w-3.5" />
+                    <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
                   )}
                 </Button>
               </li>
@@ -512,6 +513,7 @@ function UploadSlot({
           }}
           onDragLeave={() => setDragActive(false)}
           onDrop={handleDrop}
+          aria-label={`${meta.label}:点击或拖拽文件上传,单文件最大 ${MAX_MB_LABEL}`}
           className={cn(
             'flex min-h-[110px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-border bg-background/80 px-3 py-4 text-center transition-[background-color,border-color,transform] duration-150',
             'hover:border-primary/50 hover:bg-primary/5',
@@ -522,7 +524,7 @@ function UploadSlot({
         >
           {upload.isPending ? (
             <>
-              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              <Loader2 aria-hidden="true" className="h-6 w-6 animate-spin motion-reduce:animate-none text-primary" />
               <p className="text-xs font-medium text-muted-foreground">
                 上传中…
               </p>
@@ -530,20 +532,24 @@ function UploadSlot({
           ) : (
             <>
               <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                <Upload className="h-4 w-4 text-primary" />
+                <Upload aria-hidden="true" className="h-4 w-4 text-primary" />
               </div>
               <p className="text-xs font-medium text-foreground">
                 {hasFiles ? '继续添加文件' : '点击或拖拽文件到此'}
               </p>
               <p className="text-[10px] text-muted-foreground">
-                .docx / .doc / .md / .txt · 单文件 ≤ {MAX_MB_LABEL} · 可多选
+                .docx / .doc / .md / .txt · 单文件&nbsp;≤&nbsp;{MAX_MB_LABEL} · 可多选
               </p>
             </>
           )}
         </div>
         {error && (
-          <p className="flex items-start gap-1 text-xs text-destructive">
-            <FileText className="mt-0.5 h-3 w-3 shrink-0" />
+          <p
+            role="alert"
+            aria-live="polite"
+            className="flex items-start gap-1 text-xs text-destructive"
+          >
+            <FileText aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0" />
             {error}
           </p>
         )}

@@ -1,4 +1,4 @@
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -68,11 +68,24 @@ const ACTIVE_STATUSES = new Set<ProjectStatus>([
   'running',
 ])
 
+// 推导每个项目卡点击后的目标路由;改成 <Link> 后给 href 用。
+function projectHref(p: ProjectDTO): string {
+  if (p.status === 'init') return `/projects/${p.id}/upload`
+  if (
+    p.status === 'queued' ||
+    p.status === 'extracting' ||
+    p.status === 'outlining' ||
+    p.status === 'outline_ready'
+  )
+    return `/projects/${p.id}/outline`
+  if (p.status === 'done') return `/projects/${p.id}/proposal`
+  return `/projects/${p.id}/review`
+}
+
 // PR-UI-2 retrofit:editorial 列表 — 左侧大数字 + 中间 serif 标题 + 右侧 meta。
 export function ProjectListPage() {
   const projects = useProjects()
   const remove = useDeleteProject()
-  const navigate = useNavigate()
   const { data: me } = useCurrentUser()
   const { toast } = useToast()
 
@@ -97,19 +110,6 @@ export function ProjectListPage() {
     }
   }
 
-  const goToProject = (p: ProjectDTO) => {
-    if (p.status === 'init') navigate(`/projects/${p.id}/upload`)
-    else if (
-      p.status === 'queued' ||
-      p.status === 'extracting' ||
-      p.status === 'outlining' ||
-      p.status === 'outline_ready'
-    )
-      navigate(`/projects/${p.id}/outline`)
-    else if (p.status === 'done') navigate(`/projects/${p.id}/proposal`)
-    else navigate(`/projects/${p.id}/review`)
-  }
-
   return (
     <div className="mx-auto max-w-6xl px-gutter py-12 page-enter">
       <header className="mb-12 flex flex-wrap items-end justify-between gap-4 border-b border-rule pb-8">
@@ -124,7 +124,7 @@ export function ProjectListPage() {
         </div>
         <Button asChild size="lg" variant="default">
           <Link to="/projects/new">
-            <Plus className="mr-2 h-4 w-4" />
+            <Plus aria-hidden="true" className="mr-2 h-4 w-4" />
             新建项目
           </Link>
         </Button>
@@ -141,7 +141,7 @@ export function ProjectListPage() {
           </p>
           <Button asChild className="mt-8">
             <Link to="/projects/new">
-              <Plus className="mr-2 h-4 w-4" />
+              <Plus aria-hidden="true" className="mr-2 h-4 w-4" />
               新建项目
             </Link>
           </Button>
@@ -154,19 +154,12 @@ export function ProjectListPage() {
             const canDelete = me?.role === 'admin' || me?.id === p.created_by
             const isActive = ACTIVE_STATUSES.has(p.status)
             return (
-              <li key={p.id}>
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => goToProject(p)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault()
-                      goToProject(p)
-                    }
-                  }}
+              <li key={p.id} className="relative">
+                {/* 整行 <Link> — 支持 Cmd/Ctrl+click 与中键打开新标签页 */}
+                <Link
+                  to={projectHref(p)}
                   className={cn(
-                    'group grid grid-cols-12 gap-6 px-2 py-8 cursor-pointer',
+                    'group grid grid-cols-12 gap-6 px-2 py-8',
                     'transition-colors duration-150 hover:bg-paper-2',
                     'focus-visible:outline-none focus-visible:bg-paper-2',
                   )}
@@ -183,8 +176,8 @@ export function ProjectListPage() {
                       <Badge variant={STATUS_VARIANT[p.status]}>
                         {isActive && (
                           <span
-                            aria-hidden
-                            className="inline-block h-1.5 w-1.5 animate-pulse-soft rounded-full bg-current"
+                            aria-hidden="true"
+                            className="inline-block h-1.5 w-1.5 animate-pulse-soft motion-reduce:animate-none rounded-full bg-current"
                           />
                         )}
                         {STATUS_LABEL[p.status]}
@@ -205,7 +198,7 @@ export function ProjectListPage() {
                       {STAGE_HINT[p.status]}
                     </p>
                   </div>
-                  {/* 右侧 meta + 操作 */}
+                  {/* 右侧 meta(操作按钮在 Link 外部叠加,避免嵌套) */}
                   <div className="col-span-3 md:col-span-4 flex flex-col items-end justify-between gap-3 text-right">
                     <div className="space-y-1">
                       <p className="text-meta text-mute">
@@ -219,25 +212,24 @@ export function ProjectListPage() {
                         创建者 {p.created_by_username ?? `#${p.created_by}`}
                       </p>
                     </div>
-                    <div
-                      className="flex items-center gap-1"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {canDelete && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleDelete(p)}
-                          disabled={remove.isPending}
-                          className="text-mute hover:text-destructive"
-                        >
-                          <Trash2 className="mr-1 h-3.5 w-3.5" />
-                          删除
-                        </Button>
-                      )}
-                    </div>
+                    {/* placeholder 占位,真正的删除按钮叠在右下角(见下) */}
+                    <div className="h-7" aria-hidden="true" />
                   </div>
-                </div>
+                </Link>
+                {canDelete && (
+                  <div className="absolute bottom-6 right-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleDelete(p)}
+                      disabled={remove.isPending}
+                      className="text-mute hover:text-destructive"
+                    >
+                      <Trash2 aria-hidden="true" className="mr-1 h-3.5 w-3.5" />
+                      删除
+                    </Button>
+                  </div>
+                )}
               </li>
             )
           })}
@@ -253,7 +245,7 @@ function ProjectListSkeleton() {
       {Array.from({ length: 4 }).map((_, i) => (
         <li
           key={i}
-          className="grid grid-cols-12 gap-6 px-2 py-8 animate-pulse"
+          className="grid grid-cols-12 gap-6 px-2 py-8 animate-pulse motion-reduce:animate-none"
         >
           <div className="col-span-1 skeleton h-10 w-12" />
           <div className="col-span-7 space-y-3">
