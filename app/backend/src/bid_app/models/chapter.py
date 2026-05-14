@@ -39,6 +39,8 @@ class Chapter(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
     index: Mapped[int] = mapped_column(Integer)
+    # PR-M8-2 follow-up:层级编号 "1.1" / "2.3.1";老项目 NULL 时前端 fallback。
+    section: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(String(255))
     summary: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     key_points: Mapped[list[str]] = mapped_column(JSON, default=list)

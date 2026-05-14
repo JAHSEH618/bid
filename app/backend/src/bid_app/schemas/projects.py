@@ -98,6 +98,8 @@ class OutlineChapterIn(BaseModel):
     """提纲编辑端的章节(用户改过的字段)。"""
 
     id: str | None = None
+    # PR-M8-2 follow-up:层级编号 "1.1" / "2.3.1";None 时后端按 index+1 兜底
+    section: str | None = None
     title: str = Field(..., min_length=1)
     summary: str | None = None
     key_points: list[str] = Field(..., min_length=1)
@@ -133,6 +135,8 @@ class OutlineChapterDTO(BaseModel):
     """
 
     id: str
+    # PR-M8-2 follow-up:层级目录编号 "1.1" / "2.3.1";老项目可能 None
+    section: str | None = None
     title: str
     summary: str | None = None
     key_points: list[str] = Field(default_factory=list)

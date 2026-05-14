@@ -174,8 +174,12 @@ function makeChapter(
   const finalText =
     chapterFinalTexts[`${pid}_${idx}`] ??
     (status === 'approved' ? `# ${title}\n\n(示例正文 …)` : null)
+  // mock 数据按 1.1 / 1.2 ... 排:每 3 节归一章,够拉出层级感。
+  const top = Math.floor(idx / 3) + 1
+  const sub = (idx % 3) + 1
   return {
     id: `ch_${(idx + 1).toString().padStart(2, '0')}`,
+    section: `${top}.${sub}`,
     title,
     summary: '示例章节简介(LLM-1 生成)',
     key_points: ['要点 A', '要点 B', '要点 C'],
@@ -681,6 +685,7 @@ function route(ctx: ResolveContext): unknown {
         max_concurrent_chapter_generations: 3,
         chapters: chs.map((c) => ({
           id: c.id,
+          section: c.section,
           title: c.title,
           summary: c.summary,
           key_points: c.key_points,
@@ -697,6 +702,7 @@ function route(ctx: ResolveContext): unknown {
     if (sub === '/outline' && method === 'PUT') {
       const b = ctx.body as {
         chapters?: {
+          section?: string | null
           title: string
           summary?: string | null
           key_points: string[]
@@ -707,6 +713,7 @@ function route(ctx: ResolveContext): unknown {
       if (b?.chapters && b.chapters.length > 0) {
         projectChapters[pid] = b.chapters.map((c, i) => ({
           id: `ch_${(i + 1).toString().padStart(2, '0')}`,
+          section: c.section ?? `${Math.floor(i / 3) + 1}.${(i % 3) + 1}`,
           title: c.title,
           summary: c.summary ?? null,
           key_points: c.key_points,

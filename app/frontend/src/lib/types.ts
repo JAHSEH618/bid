@@ -68,8 +68,12 @@ export type ChapterStatus =
 // /outline 返回的章节(id 字符串 'ch_01' 形式;index 是数字)。
 // commit 7fbda55 后 backend 也在 outline 端点 chapters dict 里返 final_text,
 // 用于 R-15 hydrate 「刷新页面已生成内容不丢」。仍可选走 GET /chapters/{idx} 拿完整 ChapterDetailDTO。
+//
+// PR-M8-2 follow-up:section 是层级编号 "1.1" / "2.3.1";老项目 null,
+// 前端按 index+1 显示扁平编号兜底。
 export interface OutlineChapterDTO {
   id: string
+  section: string | null
   title: string
   summary: string | null
   key_points: string[]
@@ -108,8 +112,10 @@ export interface OutlineResponseDTO {
 }
 
 // /outline PUT body 中的章节(用户编辑后)。
+// PR-M8-2 follow-up:section 跟着 chapters 一起 round-trip。
 export interface OutlineChapterIn {
   id?: string | null
+  section?: string | null
   title: string
   summary?: string | null
   key_points: string[]

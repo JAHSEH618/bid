@@ -113,6 +113,7 @@ async def sync_outline_to_db(
                 .values(
                     run_id=run_id,
                     index=i,
+                    section=c.get("section"),
                     title=c["title"],
                     summary=c.get("summary"),
                     key_points=c.get("key_points", []),
@@ -122,6 +123,7 @@ async def sync_outline_to_db(
                 .on_conflict_do_update(
                     index_elements=["run_id", "index"],
                     set_={
+                        "section": sa.text("EXCLUDED.section"),
                         "title": sa.text("EXCLUDED.title"),
                         "summary": sa.text("EXCLUDED.summary"),
                         "key_points": sa.text("EXCLUDED.key_points"),
