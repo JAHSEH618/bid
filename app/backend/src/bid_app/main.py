@@ -30,6 +30,7 @@ from bid_app.config import settings
 from bid_app.core.middleware import TraceIdMiddleware
 from bid_app.core.rate_limit import limiter
 from bid_app.core.security_headers import SecurityHeadersMiddleware
+from bid_app.workflow.checkpointer import open_checkpointer
 
 
 def _print_startup_banner() -> None:
@@ -74,7 +75,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
       1. 启动横幅(M5-4)— 必须在最前
       2. redis async client 挂 ``app.state.redis``(/health / login throttle)
       3. arq pool 挂 ``app.state.arq_pool``(API enqueue_job 用)
-      4. (M2/M3) 继续 append
+      4. LangGraph PG checkpointer 挂 ``app.state.checkpointer`` —— 让
+         ``GET /material-understanding`` 等读 checkpoint 的端点能拿到 saver。
+         worker 进程有自己独立的 saver/pool,两者不共享 (各自的 PG 连接池)。
     """
     _print_startup_banner()
 
@@ -84,9 +87,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     arq_pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
     app.state.arq_pool = arq_pool
 
+    saver, saver_pool = await open_checkpointer()
+    app.state.checkpointer = saver
+    app.state.checkpointer_pool = saver_pool
+
     try:
         yield
     finally:
+        with contextlib.suppress(Exception):
+            await saver_pool.close()
         with contextlib.suppress(Exception):
             await arq_pool.aclose()
         with contextlib.suppress(Exception):

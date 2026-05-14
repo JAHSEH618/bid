@@ -6,34 +6,22 @@
 - ⭐ D-AG:启动时 ``reconcile_active_projects()`` 清僵尸 + 一次 wake 把
   漏唤醒的 queued 项目入队。
 
-⚠️ langgraph-checkpoint-postgres 2.0.25 实测(REVIEW-1 🟡 #3 修复):
-``AsyncPostgresSaver.from_conn_string`` 是 ``@classmethod @asynccontextmanager``,
-入参连接随 context manager 退出而关闭——不适合 worker 长生命周期。
-spec §17.2 写法 ``saver = AsyncPostgresSaver.from_conn_string(...) ; await
-saver.setup()`` 在该版本上拿到的是 ``_AsyncGeneratorContextManager`` 对象
-而不是 saver 实例,且没有 ``async with`` 包裹连接已关。
-
-正确写法:用 ``AsyncConnectionPool`` + 直接 ``AsyncPostgresSaver(pool)``
-构造,池由 worker 持有到 shutdown(``__init__`` 入参 ``conn:
-AsyncConnection | AsyncConnectionPool``,见 ``_ainternal.Conn`` 联合类型)。
+⚠️ ``open_checkpointer`` 共享逻辑见 ``workflow/checkpointer.py``;web 进程
+也用同一个 helper,两侧各自持有独立的连接池(不共享)。
 """
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import sqlalchemy as sa
 import structlog
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from psycopg import AsyncConnection
-from psycopg.rows import dict_row
-from psycopg_pool import AsyncConnectionPool
 
-from ..config import settings
 from ..db import session_factory
 from ..services.concurrency import (
     reconcile_active_projects,
     wake_queued_projects,
 )
+from ..workflow.checkpointer import open_checkpointer
 
 log = structlog.get_logger()
 
@@ -110,26 +98,8 @@ async def _reconcile_orphaned_chapters_on_startup() -> None:
 
 
 async def on_startup(ctx: dict[str, Any]) -> None:
-    # AsyncConnectionPool:LangGraph 文档与 _ainternal.Conn 联合类型都允许走池
-    pool = AsyncConnectionPool(
-        conninfo=settings.langgraph_dsn,
-        min_size=1,
-        max_size=10,
-        kwargs={
-            "autocommit": True,
-            "prepare_threshold": 0,
-            "row_factory": dict_row,
-        },
-        open=False,  # 显式 await pool.open() 控制启动语义
-    )
-    await pool.open(wait=True)
-    # ⚠️ langgraph stub 把 AsyncConnectionPool 泛型参数标 dict[str, Any] 才接受,
-    # 但 psycopg_pool 推断 row_factory=dict_row 时仍返 tuple[Any,...]。运行时
-    # row_factory 已对,这里 cast 让 mypy 收敛(stub 与实际行为不一致的 known issue)。
-    saver = AsyncPostgresSaver(
-        conn=cast(AsyncConnectionPool[AsyncConnection[dict[str, Any]]], pool)
-    )
-    await saver.setup()
+    # worker 并发跑 LangGraph stream,池要更大;web 默认 4 不够。
+    saver, pool = await open_checkpointer(max_size=10)
 
     ctx["checkpointer"] = saver
     ctx["checkpointer_pool"] = pool  # on_shutdown 用
