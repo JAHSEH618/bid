@@ -680,7 +680,13 @@ async def confirm_outline(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, Any]:
-    """提纲确认(D-K)。``chapters`` 为空 → 自动确认沿用 LLM-1。"""
+    """提纲确认(D-K)。
+
+    - ``decision="confirm"``(默认):``chapters`` 为空 → 沿用 LLM-1;否则
+      把用户编辑后的 chapters 落 DB + state,流水线进章节循环。
+    - ``decision="revise"``:把 ``feedback`` 送 LLM-1 重新生成大纲
+      (workflow 走 outline_review → generate_outline 回环)。
+    """
     project = await _get_project_or_404(db, project_id)
     if project.status != "outline_ready":
         raise HTTPException(
@@ -688,17 +694,27 @@ async def confirm_outline(
             f"project status must be outline_ready, got {project.status}",
         )
 
-    # body.chapters 已被 pydantic 校验过 title/key_points/target_pages
+    decision = body.decision
+    feedback = (body.feedback or "").strip()
+    if decision == "revise" and not feedback:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "decision=revise 时必须带非空 feedback",
+        )
+
+    # confirm 路径:校验 chapter_model + 把 chapters dump 成可序列化 dict
     available_models = set(_available_models_for(user))
-    edited = [c.model_dump() for c in body.chapters] if body.chapters else []
-    for chapter in edited:
-        model = (chapter.get("chapter_model") or "").strip()
-        chapter["chapter_model"] = model or None
-        if model and model not in available_models:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"chapter model not in your model catalog: {model}",
-            )
+    edited: list[dict[str, Any]] = []
+    if decision == "confirm" and body.chapters:
+        edited = [c.model_dump() for c in body.chapters]
+        for chapter in edited:
+            model = (chapter.get("chapter_model") or "").strip()
+            chapter["chapter_model"] = model or None
+            if model and model not in available_models:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"chapter model not in your model catalog: {model}",
+                )
 
     run = await _get_active_run(db, project_id)
 
@@ -719,18 +735,24 @@ async def confirm_outline(
             status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
         )
 
+    resume_payload: dict[str, Any] = {
+        "kind": "outline_confirm",
+        "decision": decision,
+    }
+    if decision == "revise":
+        resume_payload["feedback"] = feedback
+    else:
+        resume_payload["chapters"] = edited
+        # PR-M9-1:把用户勾选的章节 id 一并传下游;空 / None → 全选
+        resume_payload["selected_chapter_ids"] = body.selected_chapter_ids or None
+
     try:
         await arq_pool.enqueue_job(
             "resume_review_task",
             project_id=project_id,
             run_id=run.id,
             thread_id=run.langgraph_thread_id,
-            resume_payload={
-                "kind": "outline_confirm",
-                "chapters": edited,
-                # PR-M9-1:把用户勾选的章节 id 一并传下游;空 / None → 全选
-                "selected_chapter_ids": body.selected_chapter_ids or None,
-            },
+            resume_payload=resume_payload,
             slot_token=result.token,
             reviewer_id=user.id,
         )

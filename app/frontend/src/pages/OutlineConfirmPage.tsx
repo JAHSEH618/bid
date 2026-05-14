@@ -1,54 +1,125 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import {
-  ArrowLeft,
-  ArrowRight,
-  ChevronDown,
-  ChevronRight,
-  Loader2,
-  Plus,
-  Sparkles,
-  X,
-} from 'lucide-react'
-import { Card, CardContent } from '@/components/ui/card'
+import { ArrowLeft, ArrowRight, Loader2, Sparkles, Wand2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { useConfirmOutline, useProject, useProjectOutline } from '@/api/projects'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
-import { cn } from '@/lib/utils'
 import { statusHref } from '@/lib/projectRoute'
-import type { OutlineChapterIn } from '@/lib/types'
+import type { OutlineChapterDTO, OutlineChapterIn } from '@/lib/types'
 
-// PR-M8-2 follow-up:层级目录视图。
+// PR-M8-2 follow-up #2:单文本框 TOC 编辑。
 //
-// 后端 chapters[] 是展平后的叶子,每条带 ``section`` ("1.1" / "2.3.1");
-// 前端按 section 前缀重建一级分组,默认折叠每节的 summary/key_points/页数,
-// 点击展开才编辑。一级分组(``1`` / ``2``)的标题是 LLM-1 出的同级前缀,
-// 但展开形态下不直接编辑(节点不参与 write_chapter,只是目录骨架)。
+// 视图:一个大 textarea 显示完整层级目录(最多 4 级,用 # / ## / ### / ####
+// 标记)。用户可以直接编辑 / 增删行;或写一段反馈让模型重新生成。
+//
+// 提交时把 textarea 解析回 chapters[]:
+//   - 每行匹配 ``^(#{1,4})\s+(\d+(?:\.\d+)*)\s+(.*)$`` 拿到 level / section / title
+//   - 叶子(下一行 level <= 当前 level)进入 chapters,继承原 LLM-1 输出的
+//     summary / key_points / target_pages(按 section 索引匹配),
+//     新增节用默认值
+//   - 没有 section 编号的行兜底自动按层级补编号
 
-interface EditableChapter {
-  id: string
-  serverId: string | null
+const SECTION_LINE_RE = /^(#{1,4})\s+(\d+(?:\.\d+){0,3})\s+(.*)$/
+const DEFAULT_KEY_POINTS = ['核心要点 1', '核心要点 2', '核心要点 3']
+const DEFAULT_TARGET_PAGES = 3
+
+interface ParsedNode {
+  level: number // 1 / 2 / 3 / 4
   section: string
   title: string
-  summary: string
-  key_points: string[]
-  target_pages: number
-  selected: boolean
 }
 
-let _localIdCounter = 0
-function localId(): string {
-  _localIdCounter += 1
-  return `local-${Date.now()}-${_localIdCounter}`
+function parseTocText(text: string): ParsedNode[] {
+  const lines = text.split('\n')
+  const out: ParsedNode[] = []
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line) continue
+    const m = line.match(SECTION_LINE_RE)
+    if (!m) continue
+    const level = m[1].length
+    const section = m[2]
+    const title = m[3].trim()
+    if (!title) continue
+    out.push({ level, section, title })
+  }
+  return out
 }
 
-/** 取一级章节编号("1.2.3" → "1");用来分组。 */
-function topLevelKey(section: string): string {
-  return section.split('.')[0]
+/** 没有显式 ## / ### 时,允许用户用纯 "1.2 标题" / "1.2.3 标题" 写;按 . 数推断 level。 */
+function parseTocTextLenient(text: string): ParsedNode[] {
+  const strict = parseTocText(text)
+  if (strict.length > 0) return strict
+  const out: ParsedNode[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    // 容忍 "## 1.2 X" 与 "1.2 X" 两种;后者按 dot 数推 level
+    const sectionMatch = line.match(/^(\d+(?:\.\d+){0,3})\s+(.*)$/)
+    if (!sectionMatch) continue
+    const section = sectionMatch[1]
+    const title = sectionMatch[2].trim()
+    if (!title) continue
+    const level = section.split('.').length
+    out.push({ level: Math.min(4, level), section, title })
+  }
+  return out
+}
+
+/** 把节点列表展平成 chapters[](只取叶子)。 */
+function nodesToChapters(
+  nodes: ParsedNode[],
+  metaBySection: Map<string, OutlineChapterDTO>,
+): OutlineChapterIn[] {
+  const chapters: OutlineChapterIn[] = []
+  for (let i = 0; i < nodes.length; i++) {
+    const cur = nodes[i]
+    const next = nodes[i + 1]
+    // 下一个节点 level 更深 → 当前是分组,不进 chapters
+    if (next && next.level > cur.level) continue
+    const meta = metaBySection.get(cur.section)
+    chapters.push({
+      id: meta?.id ?? null,
+      section: cur.section,
+      title: cur.title,
+      summary: meta?.summary ?? null,
+      key_points: meta?.key_points.length ? meta.key_points : DEFAULT_KEY_POINTS,
+      target_pages: meta?.target_pages ?? DEFAULT_TARGET_PAGES,
+    })
+  }
+  return chapters
+}
+
+/** chapters[] → markdown 文本(供 textarea 初始化和重写后回灌)。 */
+function chaptersToTocText(chapters: OutlineChapterDTO[]): string {
+  // 把扁平叶子重建出非叶子分组行:遍历 section 前缀,首次见到的前缀作为分组发一行
+  const lines: string[] = []
+  const seenPrefixes = new Set<string>()
+
+  for (const c of chapters) {
+    const section = c.section ?? ''
+    if (!section) {
+      // 老项目 section=null:用 index+1 当 section,单层
+      lines.push(`# ${c.index + 1} ${c.title}`)
+      continue
+    }
+    const parts = section.split('.')
+    // 先发分组行(level=1..parts.length-1),title 用空("项目目录")
+    for (let i = 1; i < parts.length; i++) {
+      const prefix = parts.slice(0, i).join('.')
+      if (!seenPrefixes.has(prefix)) {
+        seenPrefixes.add(prefix)
+        lines.push(`${'#'.repeat(i)} ${prefix} 章节分组`)
+      }
+    }
+    // 叶子行(深度 = parts.length)
+    const level = Math.min(4, parts.length)
+    lines.push(`${'#'.repeat(level)} ${section} ${c.title}`)
+  }
+  return lines.join('\n')
 }
 
 export function OutlineConfirmPage() {
@@ -59,27 +130,26 @@ export function OutlineConfirmPage() {
   const project = useProject(projectId)
   const outline = useProjectOutline(projectId)
   const confirm = useConfirmOutline()
-  const [chapters, setChapters] = useState<EditableChapter[]>([])
-  const [edited, setEdited] = useState(false)
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  const [tocText, setTocText] = useState('')
+  const [feedback, setFeedback] = useState('')
+  const [revising, setRevising] = useState(false)
+  // 把上一次从 /outline 拉到的 chapters 镜像存下来,用 section → meta 索引
+  // 把 key_points / target_pages / summary 带回 submit。
+  const lastChaptersRef = useRef<OutlineChapterDTO[]>([])
 
   useEffect(() => {
-    if (!outline.data) return
-    setChapters(
-      outline.data.chapters.map((c, i) => ({
-        id: localId(),
-        serverId: c.id,
-        // 老项目可能 section=null;按 index+1 兜底
-        section: c.section ?? String(i + 1),
-        title: c.title,
-        summary: c.summary ?? '',
-        key_points: c.key_points,
-        target_pages: c.target_pages,
-        selected: true,
-      })),
-    )
-    setEdited(false)
-    setExpanded(new Set())
+    const chs = outline.data?.chapters ?? []
+    if (chs.length === 0) return
+    lastChaptersRef.current = chs
+    // 用户在 textarea 改过但还没提交:避免覆盖,只在第一次 / chapters 真换了
+    // 才重置。判定:if textarea 跟旧重建一致或为空。
+    const rebuilt = chaptersToTocText(chs)
+    setTocText((cur) => {
+      if (!cur.trim()) return rebuilt
+      const prevRebuilt = chaptersToTocText(lastChaptersRef.current)
+      return cur === prevRebuilt ? rebuilt : cur
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [outline.data?.run_id, outline.data?.chapters.length])
 
@@ -101,127 +171,52 @@ export function OutlineConfirmPage() {
   const isReady = status === 'outline_ready'
   const isGenerating = status === 'extracting' || status === 'outlining' || status === 'queued'
 
-  const totalPages = chapters.reduce(
-    (s, c) => (c.selected ? s + (c.target_pages || 0) : s),
-    0,
-  )
-  const selectedCount = chapters.filter((c) => c.selected).length
-
-  // 按一级 section ("1" / "2" / ...) 分组;每组下挂该前缀的全部叶子。
-  const groups = useMemo(() => {
-    const byTop = new Map<string, EditableChapter[]>()
-    for (const c of chapters) {
-      const k = topLevelKey(c.section)
-      if (!byTop.has(k)) byTop.set(k, [])
-      byTop.get(k)!.push(c)
+  // 实时解析当前 textarea,显示节点统计(用户写错时也能看到节数)
+  const parsedSummary = useMemo(() => {
+    const nodes = parseTocTextLenient(tocText)
+    const leaves: ParsedNode[] = []
+    const groups: ParsedNode[] = []
+    for (let i = 0; i < nodes.length; i++) {
+      const next = nodes[i + 1]
+      if (next && next.level > nodes[i].level) groups.push(nodes[i])
+      else leaves.push(nodes[i])
     }
-    // 按 section 自然顺序排:数值升序("1" < "2" < "10"),保留单字符简化
-    return [...byTop.entries()].sort((a, b) => {
-      const na = Number(a[0])
-      const nb = Number(b[0])
-      if (Number.isNaN(na) || Number.isNaN(nb)) return a[0].localeCompare(b[0])
-      return na - nb
-    })
-  }, [chapters])
-
-  const updateChapter = (id: string, patch: Partial<EditableChapter>) => {
-    setEdited(true)
-    setChapters((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)))
-  }
-  const removeChapter = (id: string) => {
-    setEdited(true)
-    setChapters((prev) => prev.filter((c) => c.id !== id))
-  }
-  const addChapter = () => {
-    setEdited(true)
-    // 新节挂到最末一级章下作 N.M;若空目录则起步 "1.1"
-    const lastTop = chapters.length
-      ? topLevelKey(chapters[chapters.length - 1].section)
-      : '1'
-    const siblings = chapters.filter((c) => topLevelKey(c.section) === lastTop)
-    const nextSub = siblings.length + 1
-    const newSection = `${lastTop}.${nextSub}`
-    const newId = localId()
-    setChapters((prev) => [
-      ...prev,
-      {
-        id: newId,
-        serverId: null,
-        section: newSection,
-        title: '新节',
-        summary: '',
-        key_points: ['要点 1'],
-        target_pages: 3,
-        selected: true,
-      },
-    ])
-    setExpanded((prev) => new Set(prev).add(newId))
-  }
-  const toggleAllSelected = (nextSelected: boolean) => {
-    setEdited(true)
-    setChapters((prev) => prev.map((c) => ({ ...c, selected: nextSelected })))
-  }
-  const toggleExpanded = (id: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
+    return { leaves: leaves.length, groups: groups.length }
+  }, [tocText])
 
   const handleConfirm = async () => {
     if (!projectId) return
-    if (selectedCount === 0) {
-      toast({ title: '至少要勾选一个章节', variant: 'warning' })
+    const nodes = parseTocTextLenient(tocText)
+    if (nodes.length === 0) {
+      toast({
+        title: '目录为空',
+        description: '请至少填一行 "# 1 标题",或让模型重新生成',
+        variant: 'warning',
+      })
       return
     }
-    for (const c of chapters) {
-      if (!c.title.trim()) {
-        toast({ title: '每个章节都必须有标题', variant: 'warning' })
-        return
-      }
-      if (c.key_points.length === 0 || c.key_points.every((p) => !p.trim())) {
-        toast({
-          title: `「${c.title}」需要至少一个关键要点`,
-          variant: 'warning',
-        })
-        return
-      }
-      if (c.target_pages < 1 || c.target_pages > 10) {
-        toast({
-          title: `「${c.title}」目标页数需在 1–10`,
-          variant: 'warning',
-        })
-        return
-      }
+    const metaBySection = new Map<string, OutlineChapterDTO>()
+    for (const c of lastChaptersRef.current) {
+      if (c.section) metaBySection.set(c.section, c)
     }
-    const payload: OutlineChapterIn[] = edited
-      ? chapters.map((c) => ({
-          id: c.serverId ?? c.id,
-          section: c.section,
-          title: c.title.trim(),
-          summary: c.summary.trim() || null,
-          key_points: c.key_points.map((p) => p.trim()).filter(Boolean),
-          target_pages: c.target_pages,
-        }))
-      : []
-    const allSelected = selectedCount === chapters.length
-    const selected_chapter_ids = allSelected
-      ? null
-      : chapters.filter((c) => c.selected).map((c) => (c.serverId ?? c.id) as string)
+    const chapters = nodesToChapters(nodes, metaBySection)
+    if (chapters.length === 0) {
+      toast({
+        title: '没有可生成的章节',
+        description: '至少需要一个叶子节点(没有下级的最深一行)',
+        variant: 'warning',
+      })
+      return
+    }
     try {
       await confirm.mutateAsync({
         projectId,
-        chapters: payload,
-        selected_chapter_ids,
+        decision: 'confirm',
+        chapters,
+        selected_chapter_ids: null,
       })
       toast({
-        title: allSelected
-          ? edited
-            ? '已锁定编辑后的目录'
-            : '已沿用 AI 生成的目录'
-          : `已锁定目录,仅生成 ${selectedCount} / ${chapters.length} 节`,
+        title: `已锁定目录(${chapters.length} 节)`,
         variant: 'success',
       })
       navigate(`/projects/${projectId}/review`)
@@ -234,14 +229,48 @@ export function OutlineConfirmPage() {
     }
   }
 
+  const handleRevise = async () => {
+    if (!projectId) return
+    const fb = feedback.trim()
+    if (!fb) {
+      toast({
+        title: '请填写修改意见',
+        description: '告诉模型哪里要改 / 加 / 减,它会重新出一版完整目录',
+        variant: 'warning',
+      })
+      return
+    }
+    setRevising(true)
+    try {
+      await confirm.mutateAsync({
+        projectId,
+        decision: 'revise',
+        chapters: [],
+        feedback: fb,
+      })
+      toast({
+        title: 'LLM-1 正在按反馈重新生成目录',
+        description: '本页会自动刷新',
+        variant: 'success',
+      })
+      setFeedback('')
+    } catch (err) {
+      toast({
+        title: '提交失败',
+        description: readApiError(err, '提交失败'),
+        variant: 'destructive',
+      })
+    } finally {
+      setRevising(false)
+    }
+  }
+
   if (project.isLoading || outline.isLoading) {
     return (
       <div className="mx-auto max-w-4xl px-gutter py-12 space-y-4">
         <div className="skeleton h-8 w-1/3" />
         <div className="skeleton h-4 w-1/2" />
-        {Array.from({ length: 3 }).map((_, i) => (
-          <div key={i} className="skeleton h-24" />
-        ))}
+        <div className="skeleton h-64" />
       </div>
     )
   }
@@ -253,9 +282,10 @@ export function OutlineConfirmPage() {
     )
   }
 
-  // ⭐ 目录还没生成完(extracting / outlining / queued):全屏 hero 状态,
-  // 让用户清楚知道在等什么,而不是看到一个空的"目录确认"页。
-  if (isGenerating || chapters.length === 0) {
+  // 目录还没生成完(extracting / outlining / queued):全屏 hero 状态,
+  // 让用户清楚知道在等什么。
+  const noChaptersYet = (outline.data?.chapters ?? []).length === 0
+  if (isGenerating || noChaptersYet) {
     return (
       <div className="mx-auto max-w-3xl px-gutter py-12 page-enter">
         <Button variant="subtle" size="sm" asChild className="mb-8">
@@ -285,8 +315,8 @@ export function OutlineConfirmPage() {
           </h1>
           <p className="mx-auto max-w-prose text-sm text-mute leading-relaxed">
             根据你的招标文档与确认过的材料理解,LLM-1 正在为本次投标方案输出一份
-            层级化的章节目录。生成完成后本页会自动呈现目录,你可以编辑标题、
-            勾选要生成的章节,然后锁定进入正文撰写。
+            最多 4 级的层级目录。生成完成后本页会自动呈现完整目录,可直接在
+            文本框内编辑,或写一段反馈让模型重新生成。
           </p>
           <p className="mt-6 text-meta text-mute">
             当前状态 · {status ?? 'unknown'}
@@ -297,7 +327,7 @@ export function OutlineConfirmPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl px-gutter py-12 page-enter">
+    <div className="mx-auto max-w-4xl px-gutter py-12 page-enter">
       <Button variant="subtle" size="sm" asChild className="mb-8">
         <Link to="/">
           <ArrowLeft aria-hidden="true" className="mr-1 h-4 w-4" />
@@ -305,94 +335,97 @@ export function OutlineConfirmPage() {
         </Link>
       </Button>
 
-      <header className="mb-12 border-b border-rule pb-8">
+      <header className="mb-10 border-b border-rule pb-8">
         <p className="text-meta text-mute mb-3">Outline · Step 3 / 3</p>
         <h1 className="font-display text-h1 leading-tight text-ink">
           {project.data.name} · 目录确认
         </h1>
         <p className="mt-4 max-w-prose text-sm text-mute">
-          层级目录按章 / 节展开,默认折叠详情;展开任一节可编辑标题、要点与
-          页数。锁定后进入章节生成阶段(锁定后目录不可逆调整)。
+          下面是 LLM-1 生成的完整层级目录(最多 4 级)。每行格式为
+          ``# 1 标题`` / ``## 1.1 标题`` / ``### 1.1.1 标题`` /
+          ``#### 1.1.1.1 标题``。可直接在文本框里编辑、增删、调换顺序;
+          也可以写一段反馈让模型整体重写。锁定后进入章节生成阶段(锁定后
+          目录不可逆调整)。
         </p>
         <div className="mt-5 flex flex-wrap items-center gap-3">
-          <Badge variant="outline">{groups.length} 章</Badge>
-          <Badge variant="outline">{chapters.length} 节</Badge>
-          <Badge variant={selectedCount === chapters.length ? 'outline' : 'warn'}>
-            勾选 {selectedCount} / {chapters.length}
-          </Badge>
-          <Badge variant="outline">目标 {totalPages} 页</Badge>
-          {edited && <Badge variant="warn">已编辑</Badge>}
+          <Badge variant="outline">{parsedSummary.leaves} 节</Badge>
+          <Badge variant="outline">{parsedSummary.groups} 组</Badge>
           {!isReady && (
             <span className="text-meta text-mute">status · {status}</span>
           )}
-          <div className="ml-auto flex items-center gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => toggleAllSelected(true)}
-              disabled={selectedCount === chapters.length}
-            >
-              全选
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => toggleAllSelected(false)}
-              disabled={selectedCount === 0}
-            >
-              全不选
-            </Button>
-          </div>
         </div>
       </header>
 
-      <ol className="space-y-10">
-        {groups.map(([topKey, leaves]) => (
-          <li key={topKey} className="border-l border-rule pl-6">
-            <p className="font-display text-h3 text-ink mb-4 -ml-7">
-              <span className="text-mute mr-3 tabular-nums">{topKey}</span>
-              {/* 一级章节没有独立标题字段,用第一个叶子的 section 路径作锚定 */}
-              <span className="text-meta text-mute">第 {topKey} 章</span>
-            </p>
-            <ul className="space-y-2">
-              {leaves.map((c) => (
-                <TocRow
-                  key={c.id}
-                  chapter={c}
-                  expanded={expanded.has(c.id)}
-                  onToggleExpand={() => toggleExpanded(c.id)}
-                  onChange={(patch) => updateChapter(c.id, patch)}
-                  onRemove={() => removeChapter(c.id)}
-                  onToggleSelected={(next) => updateChapter(c.id, { selected: next })}
-                />
-              ))}
-            </ul>
-          </li>
-        ))}
-      </ol>
-
-      <Button
-        variant="secondary"
-        className="mt-8 w-full border-dashed py-5"
-        onClick={addChapter}
+      <label
+        htmlFor="toc-textarea"
+        className="text-meta text-mute mb-2 block"
       >
-        <Plus aria-hidden="true" className="mr-1 h-4 w-4" />
-        添加一节
-      </Button>
+        完整目录(每行一项,# 数量决定层级)
+      </label>
+      <Textarea
+        id="toc-textarea"
+        value={tocText}
+        onChange={(e) => setTocText(e.target.value)}
+        rows={22}
+        spellCheck={false}
+        className="font-mono text-sm leading-7"
+        placeholder="# 1 项目背景&#10;## 1.1 招标方现状&#10;### 1.1.1 公司规模&#10;#### 1.1.1.1 总部与分支&#10;## 1.2 项目需求理解&#10;# 2 技术方案&#10;## 2.1 总体架构"
+      />
 
-      <div className="mt-16 border-t border-rule pt-8 flex flex-col items-stretch gap-3 sm:flex-row sm:justify-end">
+      <section className="mt-10 border border-rule p-6">
+        <div className="flex items-start gap-3 mb-4">
+          <Wand2 aria-hidden="true" className="h-5 w-5 mt-0.5 text-accent shrink-0" />
+          <div>
+            <p className="font-display text-h3 text-ink">让模型修改</p>
+            <p className="mt-1 text-sm text-mute leading-relaxed">
+              给 LLM-1 一段反馈,它会**整体**重新生成一版完整目录(覆盖
+              当前文本框内容)。例如:「第二章拆得太细,合并 2.3 和 2.4」
+              / 「补一节风险管控」。
+            </p>
+          </div>
+        </div>
+        <Textarea
+          value={feedback}
+          onChange={(e) => setFeedback(e.target.value)}
+          rows={4}
+          placeholder="写下要 LLM-1 调整的方向 / 缺漏 / 重点……"
+        />
+        <div className="mt-3 flex justify-end">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={handleRevise}
+            disabled={revising || !feedback.trim()}
+          >
+            {revising ? (
+              <>
+                <Loader2
+                  aria-hidden="true"
+                  className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none"
+                />
+                提交中…
+              </>
+            ) : (
+              <>
+                <Wand2 aria-hidden="true" className="mr-2 h-4 w-4" />
+                请模型重写
+              </>
+            )}
+          </Button>
+        </div>
+      </section>
+
+      <div className="mt-12 border-t border-rule pt-8 flex flex-col items-stretch gap-3 sm:flex-row sm:justify-end">
         <Button asChild variant="ghost">
           <Link to={`/projects/${projectId}/upload`}>返回上传</Link>
         </Button>
         <Button
           onClick={handleConfirm}
-          disabled={confirm.isPending}
+          disabled={confirm.isPending || revising}
           size="lg"
           variant="accent"
         >
-          {confirm.isPending ? (
+          {confirm.isPending && !revising ? (
             <>
               <Loader2
                 aria-hidden="true"
@@ -409,135 +442,5 @@ export function OutlineConfirmPage() {
         </Button>
       </div>
     </div>
-  )
-}
-
-function TocRow({
-  chapter,
-  expanded,
-  onToggleExpand,
-  onChange,
-  onRemove,
-  onToggleSelected,
-}: {
-  chapter: EditableChapter
-  expanded: boolean
-  onToggleExpand: () => void
-  onChange: (patch: Partial<EditableChapter>) => void
-  onRemove: () => void
-  onToggleSelected: (next: boolean) => void
-}) {
-  return (
-    <li>
-      <Card className={cn(!chapter.selected && 'bg-paper-2')}>
-        <CardContent className="p-0">
-          <div
-            className={cn(
-              'flex items-center gap-3 px-4 py-3',
-              !chapter.selected && 'opacity-60',
-            )}
-          >
-            <input
-              type="checkbox"
-              checked={chapter.selected}
-              onChange={(e) => onToggleSelected(e.target.checked)}
-              aria-label={`勾选生成 ${chapter.section}`}
-              className="h-4 w-4 cursor-pointer accent-accent"
-            />
-            <button
-              type="button"
-              onClick={onToggleExpand}
-              className="flex flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 rounded-sm"
-              aria-expanded={expanded}
-              aria-label={`${expanded ? '收起' : '展开'} ${chapter.section} ${chapter.title}`}
-            >
-              {expanded ? (
-                <ChevronDown aria-hidden="true" className="h-4 w-4 text-mute shrink-0" />
-              ) : (
-                <ChevronRight aria-hidden="true" className="h-4 w-4 text-mute shrink-0" />
-              )}
-              <span className="font-mono text-sm tabular-nums text-mute shrink-0 w-16">
-                {chapter.section}
-              </span>
-              <span className="text-ink font-medium truncate">{chapter.title}</span>
-              <span className="ml-auto text-meta text-mute shrink-0">
-                {chapter.target_pages} 页
-              </span>
-            </button>
-            <Button
-              variant="ghost"
-              size="iconSm"
-              className="text-mute hover:text-destructive"
-              onClick={onRemove}
-              aria-label={`移除 ${chapter.section}`}
-            >
-              <X aria-hidden="true" className="h-4 w-4" />
-            </Button>
-          </div>
-          {expanded && (
-            <div className="border-t border-rule px-4 py-4 space-y-3 bg-paper-2/30">
-              <Input
-                value={chapter.title}
-                placeholder="节标题"
-                aria-label={`${chapter.section} 标题`}
-                onChange={(e) => onChange({ title: e.target.value })}
-              />
-              <Textarea
-                value={chapter.summary}
-                placeholder="节简介(可选,会作为本节生成上下文)"
-                aria-label={`${chapter.section} 简介`}
-                rows={2}
-                onChange={(e) => onChange({ summary: e.target.value })}
-              />
-              <div className="grid grid-cols-12 gap-3">
-                <div className="col-span-9">
-                  <label
-                    htmlFor={`chapter-keypoints-${chapter.id}`}
-                    className="text-meta text-mute"
-                  >
-                    关键要点 · 每行一条
-                  </label>
-                  <Textarea
-                    id={`chapter-keypoints-${chapter.id}`}
-                    value={chapter.key_points.join('\n')}
-                    rows={3}
-                    className="mt-1"
-                    onChange={(e) =>
-                      onChange({ key_points: e.target.value.split('\n') })
-                    }
-                  />
-                </div>
-                <div className="col-span-3">
-                  <label
-                    htmlFor={`chapter-pages-${chapter.id}`}
-                    className="text-meta text-mute"
-                  >
-                    目标页数
-                  </label>
-                  <Input
-                    id={`chapter-pages-${chapter.id}`}
-                    type="number"
-                    inputMode="numeric"
-                    min={1}
-                    max={10}
-                    value={chapter.target_pages}
-                    className="mt-1 text-center"
-                    onChange={(e) =>
-                      onChange({
-                        target_pages: Math.max(
-                          1,
-                          Math.min(10, Number(e.target.value) || 1),
-                        ),
-                      })
-                    }
-                  />
-                  <p className="text-meta text-mute mt-1">1–10 页</p>
-                </div>
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    </li>
   )
 }

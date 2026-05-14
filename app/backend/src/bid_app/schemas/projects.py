@@ -113,8 +113,14 @@ class OutlineConfirmRequest(BaseModel):
 
     PR-M9-1:可选 ``selected_chapter_ids`` 让前端在锁定目录时一并提交
     用户勾选的章节;空 / None → 全选(向后兼容)。
+
+    textarea TOC + revise(PR-M8-2 follow-up #2):
+    - ``decision="confirm"``(默认):提交 ``chapters`` 锁定目录
+    - ``decision="revise"``:把 ``feedback`` 送 LLM-1 重新生成大纲
     """
 
+    decision: Literal["confirm", "revise"] = "confirm"
+    feedback: str | None = None
     chapters: list[OutlineChapterIn] = Field(default_factory=list)
     selected_chapter_ids: list[str] | None = Field(default=None)
 

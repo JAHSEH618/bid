@@ -701,6 +701,8 @@ function route(ctx: ResolveContext): unknown {
     }
     if (sub === '/outline' && method === 'PUT') {
       const b = ctx.body as {
+        decision?: 'confirm' | 'revise'
+        feedback?: string | null
         chapters?: {
           section?: string | null
           title: string
@@ -709,6 +711,10 @@ function route(ctx: ResolveContext): unknown {
           target_pages: number
           chapter_model?: string | null
         }[]
+      }
+      // textarea TOC + revise:mock 下不重新跑 LLM,简单接受并保持原 chapters
+      if (b?.decision === 'revise') {
+        return { ok: true }
       }
       if (b?.chapters && b.chapters.length > 0) {
         projectChapters[pid] = b.chapters.map((c, i) => ({

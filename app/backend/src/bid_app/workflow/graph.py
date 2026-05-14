@@ -90,6 +90,18 @@ def _route_after_material_review(state: WorkflowState) -> str:
     return "generate_outline"
 
 
+def _route_after_outline_review(state: WorkflowState) -> str:
+    """textarea TOC + revise:outline_review 之后的分支。
+
+    - revise → 回到 generate_outline 节点(``_outline_revision_feedback`` 已写)
+    - confirm(默认)→ 进 pick_chapter 章节循环
+    """
+    decision = state.get("_outline_review_decision") or "confirm"
+    if decision == "revise":
+        return "generate_outline"
+    return "pick_chapter"
+
+
 def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     """编译 LangGraph workflow。``checkpointer`` 由 worker lifecycle 注入。
 
@@ -134,7 +146,15 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     )
     g.add_edge("generate_outline", "parse_outline")
     g.add_edge("parse_outline", "outline_review")
-    g.add_edge("outline_review", "pick_chapter")
+    # textarea TOC + revise:outline_review 之后按 decision 分支
+    g.add_conditional_edges(
+        "outline_review",
+        _route_after_outline_review,
+        {
+            "generate_outline": "generate_outline",
+            "pick_chapter": "pick_chapter",
+        },
+    )
     # PR-M9-1:若 pick_chapter 在 selected_chapter_ids 全部跑完后落到尾部
     # 的连续 unselected 章节,current_index 越界 → 直接进 assemble
     g.add_conditional_edges(

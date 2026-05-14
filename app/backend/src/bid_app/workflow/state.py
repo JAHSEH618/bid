@@ -80,6 +80,12 @@ class WorkflowState(TypedDict, total=False):
     _material_review_decision: str  # pass | revise | skip
     _material_review_feedback: str
 
+    # === outline_review 评审临时载体(textarea TOC + revise 路径)===
+    # confirm = 用户已在 textarea 编辑好,提交 chapters;revise = 用户给 LLM-1 反馈
+    # 让其重新生成。conditional edge ``_route_after_outline_review`` 据此分支。
+    _outline_review_decision: str  # confirm | revise
+    _outline_revision_feedback: str  # 用户写给 LLM-1 的反馈,generate_outline 用
+
     # === 节点之间的临时载体 ===
     # generate_outline 输出 LLM-1 原始 JSON 字符串,parse_outline 消费。
     _outline_json: str

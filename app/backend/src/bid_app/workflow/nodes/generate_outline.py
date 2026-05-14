@@ -96,10 +96,16 @@ async def run(state: WorkflowState) -> dict[str, str]:
     api_key = await _resolve_api_key(project_id, run_id=run_id)
     user_id = await _resolve_user_id(project_id)
 
+    # outline_review 的 revise 分支会把用户反馈塞到 ``_outline_revision_feedback``,
+    # 下一轮 LLM-1 prompt 注入这一段做整体重设计。读完 generate_outline 一并
+    # 清空(返回 ""),避免下次启动残留。
+    revision_feedback = state.get("_outline_revision_feedback") or ""
+
     messages = build_messages(
         tech_spec_md=state.get("tech_spec_md", ""),
         scoring_md=state.get("scoring_md", ""),
         template_md=state.get("template_md", ""),
+        revision_feedback=revision_feedback,
     )
 
     await publish_event(project_id, "outline_started")
@@ -114,4 +120,4 @@ async def run(state: WorkflowState) -> dict[str, str]:
         timeout_seconds=settings.llm_outline_timeout_seconds,
     )
 
-    return {"_outline_json": sr.text}
+    return {"_outline_json": sr.text, "_outline_revision_feedback": ""}

@@ -1,4 +1,4 @@
-"""P4 提纲确认节点(§10.6 / D-K)。
+"""P4 提纲确认节点(§10.6 / D-K + textarea TOC + revise 路径)。
 
 parse_outline 已经把 LLM-1 输出落到 state.chapters。
 此节点:
@@ -10,8 +10,20 @@ parse_outline 已经把 LLM-1 输出落到 state.chapters。
 
 resume payload 形状::
 
+    # confirm 路径(默认):
     {"kind": "outline_confirm",
-     "chapters": [...]}    # 用户编辑后的章节;为空/None 表示自动确认
+     "decision": "confirm",
+     "chapters": [...],                       # 用户编辑后的章节;空 = 沿用 LLM-1
+     "selected_chapter_ids": [...] | null}
+
+    # revise 路径:让 LLM-1 重新生成
+    {"kind": "outline_confirm",
+     "decision": "revise",
+     "feedback": "用户写给 LLM-1 的修改意见"}
+
+graph 中 ``_route_after_outline_review`` 据 ``_outline_review_decision`` 分支:
+- revise → 回 ``generate_outline`` 重跑
+- confirm(默认)→ 进 ``pick_chapter`` 章节循环
 """
 from __future__ import annotations
 
@@ -59,13 +71,27 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         {"kind": "outline_confirm", "current_chapters": chapters}
     )
 
-    # resume 后:Project 回到 running,准备进章节循环
+    payload = payload or {}
+    decision = payload.get("decision") or "confirm"
+
+    # —— revise 分支:用户在 textarea 写了反馈,让 LLM-1 整体重出一版 ——
+    if decision == "revise":
+        feedback = (payload.get("feedback") or "").strip()
+        # status 回 running,因为下一轮 generate_outline 会重新出大纲
+        if _real_project(pid):
+            await sync_project_status(pid, "running")
+        return {
+            "_outline_review_decision": "revise",
+            "_outline_revision_feedback": feedback,
+        }
+
+    # —— confirm 分支(默认):用户已编辑或沿用 ——
     if _real_project(pid):
         await sync_project_status(pid, "running")
 
-    edited = (payload or {}).get("chapters")
+    edited = payload.get("chapters")
     # PR-M9-1:用户勾选的章节 ids;空 → 全选 (保持 None,pick_chapter 据此判断)
-    selected_ids = (payload or {}).get("selected_chapter_ids") or None
+    selected_ids = payload.get("selected_chapter_ids") or None
 
     if edited:
         if _real_run(run_id):
@@ -80,6 +106,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
                     "outline_review_edited_sync_failed", run_id=run_id
                 )
         return {
+            "_outline_review_decision": "confirm",
             "chapters": edited,
             "current_index": 0,
             "_outline_confirmed_chapters": edited,
@@ -87,6 +114,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         }
 
     return {
+        "_outline_review_decision": "confirm",
         "current_index": 0,
         "_outline_confirmed_chapters": chapters,
         "selected_chapter_ids": selected_ids,

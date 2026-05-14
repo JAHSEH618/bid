@@ -200,6 +200,9 @@ export interface ConfirmOutlinePayload {
   chapters: OutlineChapterIn[]
   // PR-M9-1:用户勾选的章节 id 列表。空 / null → 全选
   selected_chapter_ids?: string[] | null
+  // textarea TOC + revise:默认 'confirm';'revise' 时只发 feedback
+  decision?: 'confirm' | 'revise'
+  feedback?: string | null
 }
 
 export function useConfirmOutline() {
@@ -209,14 +212,20 @@ export function useConfirmOutline() {
       projectId,
       chapters,
       selected_chapter_ids,
+      decision,
+      feedback,
     }: {
       projectId: number
       chapters: OutlineChapterIn[]
       selected_chapter_ids?: string[] | null
+      decision?: 'confirm' | 'revise'
+      feedback?: string | null
     }) =>
       apiFetch<{ ok: boolean }>(`/api/projects/${projectId}/outline`, {
         method: 'PUT',
         body: JSON.stringify({
+          decision: decision ?? 'confirm',
+          feedback: feedback ?? null,
           chapters,
           selected_chapter_ids: selected_chapter_ids ?? null,
         }),

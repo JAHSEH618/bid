@@ -26,9 +26,9 @@ from ..core.security import hash_password, verify_password
 from ..deps import get_current_user, get_current_user_lax, get_db
 from ..models import ApiKey, User
 from ..schemas.auth import (
+    KNOWN_MODELS,
     ApiKeyInfoResponse,
     ChangePasswordRequest,
-    KNOWN_MODELS,
     ModelConfigResponse,
     SetApiKeyRequest,
     SetModelConfigRequest,
