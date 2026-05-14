@@ -108,7 +108,14 @@ def ensure_v2_state(state: WorkflowState) -> None:
     校验失败抛 ``WorkflowSchemaMismatch``,worker 顶层捕获后把项目标
     ``aborted_schema_v1``。**不会修改 state**;v1 → v2 没有自动迁移路径
     (字段语义变化太大),只能由用户重建项目(D1 断旧续新)。
+
+    ⚠️ LangGraph 0.6 在节点触发 ``interrupt()`` 时,``astream`` 会 yield
+    一个只含 ``__interrupt__`` 键的 sentinel 状态(channel values 未一起
+    冒泡)。这种 yield 不代表 checkpoint,跳过校验避免误判成 v1 不兼容。
     """
+    # LangGraph 中断 sentinel — 不是真正的 state snapshot,跳过
+    if "__interrupt__" in state:
+        return
     found = state.get("schema_version")
     if found != CURRENT_WORKFLOW_SCHEMA_VERSION:
         raise WorkflowSchemaMismatch(

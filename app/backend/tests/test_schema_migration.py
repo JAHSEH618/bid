@@ -47,3 +47,12 @@ def test_exception_message_includes_versions() -> None:
     msg = str(exc.value)
     assert str(CURRENT_WORKFLOW_SCHEMA_VERSION) in msg
     assert "rebuild the project" in msg
+
+
+def test_interrupt_sentinel_state_is_skipped() -> None:
+    """LangGraph 0.6 interrupt 节点会 yield 只含 __interrupt__ 的 sentinel state;
+    该 yield 不是 checkpoint,必须跳过校验,否则所有走到 interrupt 的工作流
+    都会被误判为 v1 不兼容并标 aborted_schema_v1。"""
+    state = {"__interrupt__": ("opaque-tuple-from-langgraph",)}
+    # 不抛 = pass
+    ensure_v2_state(state)  # type: ignore[arg-type]
