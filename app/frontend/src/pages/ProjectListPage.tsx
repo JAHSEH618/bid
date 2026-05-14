@@ -216,7 +216,7 @@ export function ProjectListPage() {
                         })}
                       </p>
                       <p className="text-meta text-mute">
-                        创建者 #{p.created_by}
+                        创建者 {p.created_by_username ?? `#${p.created_by}`}
                       </p>
                     </div>
                     <div

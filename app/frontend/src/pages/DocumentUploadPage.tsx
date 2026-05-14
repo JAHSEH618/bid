@@ -7,6 +7,7 @@ import {
   FileText,
   Loader2,
   Play,
+  Trash2,
   Upload,
 } from 'lucide-react'
 import {
@@ -20,6 +21,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import {
+  useDeleteDocument,
   useProject,
   useProjectDocuments,
   useStartProject,
@@ -55,8 +57,16 @@ const KIND_META: Record<
 const ACCEPT = '.docx,.doc,.md,.txt'
 const ACCEPT_MIME =
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,text/markdown,text/plain'
-const MAX_BYTES = 50 * 1024 * 1024
+// PR-M7-2 / D5:与后端 settings.max_file_upload_bytes (200MB) 对齐。
+const MAX_BYTES = 200 * 1024 * 1024
+const MAX_MB_LABEL = '200MB'
 const ALLOWED_EXTS = ['docx', 'doc', 'md', 'txt']
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
+}
 
 export function DocumentUploadPage() {
   const { id } = useParams<{ id: string }>()
@@ -70,14 +80,17 @@ export function DocumentUploadPage() {
   const [outlineModel, setOutlineModel] = useState('')
   const [visualsModel, setVisualsModel] = useState('')
 
-  const uploadedByKind = useMemo<Partial<Record<DocumentKind, DocumentDTO>>>(
+  // PR-M7-2 多文件:每个 kind 保留全部文档(按上传时间从旧到新)。
+  const documentsByKind = useMemo<Record<DocumentKind, DocumentDTO[]>>(
     () => {
-      const acc: Partial<Record<DocumentKind, DocumentDTO>> = {}
+      const acc: Record<DocumentKind, DocumentDTO[]> = {
+        tech_spec: [],
+        scoring: [],
+        template: [],
+      }
       for (const d of documents.data ?? []) {
-        // PR-M7-2:kind 现在可空;无 kind 的文档不进 by-kind 桶,
-        // 但仍在 documents.data 完整列表里显示。
-        if (d.kind) {
-          acc[d.kind] = d
+        if (d.kind && d.kind in acc) {
+          acc[d.kind].push(d)
         }
       }
       return acc
@@ -102,13 +115,13 @@ export function DocumentUploadPage() {
     )
   }, [modelConfig.data])
 
-  const techSpec = uploadedByKind.tech_spec
-  const scoring = uploadedByKind.scoring
-  const requiredCount = (techSpec ? 1 : 0) + (scoring ? 1 : 0)
+  const hasTechSpec = documentsByKind.tech_spec.length > 0
+  const hasScoring = documentsByKind.scoring.length > 0
+  const requiredCount = (hasTechSpec ? 1 : 0) + (hasScoring ? 1 : 0)
 
   const canStart = Boolean(
-    techSpec &&
-      scoring &&
+    hasTechSpec &&
+      hasScoring &&
       project.data &&
       project.data.status === 'init' &&
       (modelConfig.data?.available_models.length ?? 0) > 0,
@@ -184,7 +197,7 @@ export function DocumentUploadPage() {
           {project.data.name}
         </h1>
         <p className="text-sm text-muted-foreground">
-          上传招标文档以启动 AI 工作流。支持 .docx / .doc / .md / .txt,单文件 ≤ 50MB
+          上传招标文档以启动 AI 工作流。支持 .docx / .doc / .md / .txt,单文件 ≤ {MAX_MB_LABEL},每个模块可上传多个文件
         </p>
       </header>
 
@@ -205,7 +218,7 @@ export function DocumentUploadPage() {
         <p className="mt-2 text-xs text-muted-foreground">
           {canStart
             ? '所有必传文档已就绪,可以启动工作流'
-            : '上传「技术需求书」与「评分细则」后即可启动'}
+            : '上传「技术需求书」与「评分细则」各至少一份后即可启动'}
         </p>
       </div>
 
@@ -215,7 +228,7 @@ export function DocumentUploadPage() {
             key={kind}
             kind={kind}
             projectId={projectId}
-            existing={uploadedByKind[kind]}
+            existing={documentsByKind[kind]}
           />
         ))}
       </div>
@@ -252,7 +265,7 @@ export function DocumentUploadPage() {
       <div className="flex items-center justify-end gap-3 rounded-xl border border-border/70 bg-card p-4 shadow-sm">
         {!canStart && (
           <p className="flex-1 text-xs text-muted-foreground">
-            上传「技术需求书」与「评分细则」并至少配置一个模型后可启动 AI 工作流
+            上传「技术需求书」与「评分细则」各至少一份并配置模型后可启动 AI 工作流
           </p>
         )}
         <Button
@@ -333,11 +346,12 @@ function UploadSlot({
 }: {
   kind: DocumentKind
   projectId: number
-  existing: DocumentDTO | undefined
+  existing: DocumentDTO[]
 }) {
   const meta = KIND_META[kind]
   const fileRef = useRef<HTMLInputElement>(null)
   const upload = useUploadDocument()
+  const remove = useDeleteDocument()
   const [error, setError] = useState<string | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const { toast } = useToast()
@@ -346,7 +360,7 @@ function UploadSlot({
 
   const validate = (file: File): string | null => {
     if (file.size > MAX_BYTES) {
-      return `文件 ≤ 50MB,当前 ${(file.size / 1024 / 1024).toFixed(1)}MB`
+      return `文件 ≤ ${MAX_MB_LABEL},当前 ${(file.size / 1024 / 1024).toFixed(1)}MB`
     }
     const ext = file.name.split('.').pop()?.toLowerCase()
     if (!ALLOWED_EXTS.includes(ext ?? '')) {
@@ -379,25 +393,47 @@ function UploadSlot({
     }
   }
 
+  const submitFiles = async (files: File[]) => {
+    for (const file of files) {
+      await submitFile(file)
+    }
+  }
+
   const handleChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
+    const files = Array.from(e.target.files ?? [])
     e.target.value = ''
-    if (!file) return
-    await submitFile(file)
+    if (files.length === 0) return
+    await submitFiles(files)
   }
 
   const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     setDragActive(false)
-    const file = e.dataTransfer.files?.[0]
-    if (file) await submitFile(file)
+    const files = Array.from(e.dataTransfer.files ?? [])
+    if (files.length > 0) await submitFiles(files)
   }
+
+  const handleRemove = async (doc: DocumentDTO) => {
+    setError(null)
+    try {
+      await remove.mutateAsync({ projectId, documentId: doc.id })
+      toast({
+        title: `${doc.original_filename} 已删除`,
+        variant: 'success',
+      })
+    } catch (err) {
+      const msg = readApiError(err, '删除失败')
+      toast({ title: '删除失败', description: msg, variant: 'destructive' })
+    }
+  }
+
+  const hasFiles = existing.length > 0
 
   return (
     <Card
       className={cn(
         'flex flex-col border-border/70 transition-shadow',
-        existing && 'bg-emerald-50/40',
+        hasFiles && 'bg-emerald-50/40',
       )}
     >
       <CardHeader className="pb-3">
@@ -413,94 +449,98 @@ function UploadSlot({
             </Badge>
           )}
         </div>
-        <CardDescription className="text-xs">{meta.description}</CardDescription>
+        <CardDescription className="text-xs">
+          {meta.description}
+          {hasFiles && (
+            <span className="ml-1 text-muted-foreground">· 已 {existing.length} 份</span>
+          )}
+        </CardDescription>
       </CardHeader>
       <CardContent className="flex-1 space-y-2">
-        {existing ? (
-          <div className="space-y-2.5">
-            <div className="flex items-start gap-2 rounded-md border border-emerald-200/70 bg-white p-2.5">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-emerald-100">
-                <CheckCircle2 className="h-4 w-4 text-emerald-700" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="line-clamp-1 text-sm font-medium text-foreground">
-                  {existing.original_filename}
-                </p>
-                <p className="text-[11px] text-muted-foreground">
-                  {(existing.file_size / 1024).toFixed(1)} KB
-                  {existing.extract_error && (
-                    <span className="ml-2 text-destructive">· 抽取失败</span>
-                  )}
-                </p>
-              </div>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full"
-              onClick={handlePick}
-              disabled={upload.isPending}
-            >
-              {upload.isPending ? (
-                <>
-                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                  替换中…
-                </>
-              ) : (
-                <>
-                  <Upload className="mr-1.5 h-3.5 w-3.5" />
-                  替换文件
-                </>
-              )}
-            </Button>
-          </div>
-        ) : (
-          <div
-            role="button"
-            tabIndex={0}
-            onClick={handlePick}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault()
-                handlePick()
-              }
-            }}
-            onDragOver={(e) => {
-              e.preventDefault()
-              setDragActive(true)
-            }}
-            onDragLeave={() => setDragActive(false)}
-            onDrop={handleDrop}
-            className={cn(
-              'flex min-h-[120px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-border bg-background/80 px-3 py-4 text-center transition-[background-color,border-color,transform] duration-150',
-              'hover:border-primary/50 hover:bg-primary/5',
-              'focus-visible:outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/30',
-              dragActive && 'border-primary bg-primary/10 scale-[1.01]',
-              upload.isPending && 'pointer-events-none opacity-70',
-            )}
-          >
-            {upload.isPending ? (
-              <>
-                <Loader2 className="h-6 w-6 animate-spin text-primary" />
-                <p className="text-xs font-medium text-muted-foreground">
-                  上传中…
-                </p>
-              </>
-            ) : (
-              <>
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                  <Upload className="h-4 w-4 text-primary" />
+        {hasFiles && (
+          <ul className="space-y-2">
+            {existing.map((doc) => (
+              <li
+                key={doc.id}
+                className="flex items-start gap-2 rounded-md border border-emerald-200/70 bg-white p-2.5"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-emerald-100">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-700" />
                 </div>
-                <p className="text-xs font-medium text-foreground">
-                  点击或拖拽文件到此
-                </p>
-                <p className="text-[10px] text-muted-foreground">
-                  .docx / .doc / .md / .txt · ≤50MB
-                </p>
-              </>
-            )}
-          </div>
+                <div className="min-w-0 flex-1">
+                  <p className="line-clamp-1 text-sm font-medium text-foreground">
+                    {doc.original_filename}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {formatBytes(doc.byte_size ?? doc.file_size)}
+                    {doc.extract_error && (
+                      <span className="ml-2 text-destructive">· 抽取失败</span>
+                    )}
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="iconSm"
+                  className="shrink-0 text-muted-foreground hover:text-destructive"
+                  onClick={() => handleRemove(doc)}
+                  disabled={remove.isPending}
+                  aria-label={`删除 ${doc.original_filename}`}
+                >
+                  {remove.isPending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-3.5 w-3.5" />
+                  )}
+                </Button>
+              </li>
+            ))}
+          </ul>
         )}
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={handlePick}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              handlePick()
+            }
+          }}
+          onDragOver={(e) => {
+            e.preventDefault()
+            setDragActive(true)
+          }}
+          onDragLeave={() => setDragActive(false)}
+          onDrop={handleDrop}
+          className={cn(
+            'flex min-h-[110px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-border bg-background/80 px-3 py-4 text-center transition-[background-color,border-color,transform] duration-150',
+            'hover:border-primary/50 hover:bg-primary/5',
+            'focus-visible:outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/30',
+            dragActive && 'border-primary bg-primary/10 scale-[1.01]',
+            upload.isPending && 'pointer-events-none opacity-70',
+          )}
+        >
+          {upload.isPending ? (
+            <>
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              <p className="text-xs font-medium text-muted-foreground">
+                上传中…
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
+                <Upload className="h-4 w-4 text-primary" />
+              </div>
+              <p className="text-xs font-medium text-foreground">
+                {hasFiles ? '继续添加文件' : '点击或拖拽文件到此'}
+              </p>
+              <p className="text-[10px] text-muted-foreground">
+                .docx / .doc / .md / .txt · 单文件 ≤ {MAX_MB_LABEL} · 可多选
+              </p>
+            </>
+          )}
+        </div>
         {error && (
           <p className="flex items-start gap-1 text-xs text-destructive">
             <FileText className="mt-0.5 h-3 w-3 shrink-0" />
@@ -511,6 +551,7 @@ function UploadSlot({
           ref={fileRef}
           type="file"
           accept={`${ACCEPT},${ACCEPT_MIME}`}
+          multiple
           onChange={handleChange}
           className="hidden"
         />

@@ -69,6 +69,8 @@ class ProjectResponse(BaseModel):
     description: str | None
     status: ProjectStatus
     created_by: int
+    # JOIN users.username 后填入;User 被删的极端情况留 None。
+    created_by_username: str | None = None
     pages_per_chapter: int
     max_retry_per_chapter: int
     created_at: datetime

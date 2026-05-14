@@ -172,6 +172,30 @@ export function useUploadDocument() {
   })
 }
 
+// PR-M7-2 多文件:支持删除单个上传文档,后端约束同 upload(项目仍处可编辑态)。
+export function useDeleteDocument() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      projectId,
+      documentId,
+    }: {
+      projectId: number
+      documentId: number
+    }) =>
+      apiFetch<{ ok: boolean }>(
+        `/api/projects/${projectId}/documents/${documentId}`,
+        { method: 'DELETE' },
+      ),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({
+        queryKey: ['projects', vars.projectId, 'documents'],
+      })
+      qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })
+    },
+  })
+}
+
 export interface ConfirmOutlinePayload {
   chapters: OutlineChapterIn[]
   // PR-M9-1:用户勾选的章节 id 列表。空 / null → 全选

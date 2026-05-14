@@ -37,12 +37,14 @@ export type ProjectStatus =
 // 与后端 ProjectResponse(schemas/projects.py)对齐。
 //   - 没有 current_index / total_chapters(由前端从 /outline 派生)
 //   - 没有 updated_at(只有 created_at)
+//   - created_by_username:JOIN users 表后的展示名(创建者被删时 null)
 export interface ProjectDTO {
   id: number
   name: string
   description: string | null
   status: ProjectStatus
   created_by: number
+  created_by_username: string | null
   api_key_owner: number | null
   dir_path: string
   pages_per_chapter: number

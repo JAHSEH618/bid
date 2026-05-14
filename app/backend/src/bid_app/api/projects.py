@@ -101,6 +101,28 @@ def _project_dir_for(project_id: int) -> Path:
     return Path(settings.projects_dir) / str(project_id)
 
 
+def _project_to_response(
+    project: Project, username: str | None
+) -> ProjectResponse:
+    """ORM Project + JOIN 出来的 username → API 响应。
+
+    显式构造而不是 ``model_validate(project)``,避免 ProjectResponse 漏掉
+    JOIN 字段 ``created_by_username``;同时把内部专属字段 (dir_path /
+    encrypted_api_key_snapshot) 挡在 schema 外。
+    """
+    return ProjectResponse(
+        id=project.id,
+        name=project.name,
+        description=project.description,
+        status=project.status,
+        created_by=project.created_by,
+        created_by_username=username,
+        pages_per_chapter=project.pages_per_chapter,
+        max_retry_per_chapter=project.max_retry_per_chapter,
+        created_at=project.created_at,
+    )
+
+
 def _normalize_selected_model(model: str | None, user: User) -> str | None:
     selected = (model or "").strip()
     if not selected:
@@ -121,7 +143,7 @@ async def create_project(
     body: ProjectCreateRequest,
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> Project:
+) -> ProjectResponse:
     """创建空项目(状态 init)。需要后续 ``POST /documents`` 上传 3 份文档 +
     ``POST /start`` 启动。"""
     # 占位 dir_path:先 INSERT 拿 id,再 update dir_path
@@ -144,17 +166,21 @@ async def create_project(
         Path(project.dir_path).mkdir(parents=True, exist_ok=True)
     except Exception:
         log.exception("project_dir_mkdir_failed", path=project.dir_path)
-    return project
+    return _project_to_response(project, user.username)
 
 
 @router.get("", response_model=list[ProjectResponse])
 async def list_projects(
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[User, Depends(get_current_user)],
-) -> list[Project]:
+) -> list[ProjectResponse]:
     """团队共享池:列出全部项目(创建者无关)。"""
-    rows = await db.execute(select(Project).order_by(Project.created_at.desc()))
-    return list(rows.scalars().all())
+    rows = await db.execute(
+        select(Project, User.username)
+        .join(User, User.id == Project.created_by)
+        .order_by(Project.created_at.desc())
+    )
+    return [_project_to_response(p, username) for p, username in rows.all()]
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
@@ -162,8 +188,14 @@ async def get_project(
     project_id: int,
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[User, Depends(get_current_user)],
-) -> Project:
-    return await _get_project_or_404(db, project_id)
+) -> ProjectResponse:
+    project = await _get_project_or_404(db, project_id)
+    username = (
+        await db.execute(
+            select(User.username).where(User.id == project.created_by)
+        )
+    ).scalar_one_or_none()
+    return _project_to_response(project, username)
 
 
 @router.delete("/{project_id}")
@@ -415,6 +447,58 @@ def _document_to_response(doc: Document) -> DocumentUploadResponse:
         extract_error=doc.extract_error,
         extract_status=extract_status,
     )
+
+
+@router.delete(
+    "/{project_id}/documents/{document_id}",
+    status_code=status.HTTP_200_OK,
+)
+async def delete_document(
+    project_id: int,
+    document_id: int,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, bool]:
+    """删除单个上传文档(PR-M7-2 多文件模式)。
+
+    与上传同步:只在工作流未启动的几个状态下允许删除,避免抽取中 / 已下游
+    使用的文档被悄悄抽掉。磁盘上的 markdown 副本尽力删,失败仅 log;原始
+    上传文件目前未在 Document 行里持久化路径,留待项目删除时 ``rmtree``
+    统一清理。
+    """
+    project = await _get_project_or_404(db, project_id)
+    if project.status not in ("init", "extracting", "outlining", "outline_ready"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"project status '{project.status}' does not accept document edits",
+        )
+
+    doc = (
+        await db.execute(
+            select(Document).where(
+                Document.id == document_id,
+                Document.project_id == project_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+
+    if doc.markdown_path:
+        try:
+            Path(doc.markdown_path).unlink(missing_ok=True)
+        except Exception:
+            log.exception(
+                "document_markdown_unlink_failed",
+                project_id=project_id,
+                document_id=document_id,
+                path=doc.markdown_path,
+            )
+
+    await db.delete(doc)
+    await db.commit()
+    _ = user
+    return {"ok": True}
 
 
 # ========== /start ==========

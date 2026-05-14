@@ -80,6 +80,7 @@ const projects: ProjectDTO[] = [
     description: '某市政务云一期 IaaS + PaaS 招标',
     status: 'awaiting_review',
     created_by: 2,
+    created_by_username: 'zhangsan',
     api_key_owner: 2,
     dir_path: '/var/lib/bid-app/projects/101',
     pages_per_chapter: 3,
@@ -92,6 +93,7 @@ const projects: ProjectDTO[] = [
     description: '门禁 + 视频监控 + 一卡通',
     status: 'done',
     created_by: 3,
+    created_by_username: 'lisi',
     api_key_owner: 3,
     dir_path: '/var/lib/bid-app/projects/102',
     pages_per_chapter: 3,
@@ -104,6 +106,7 @@ const projects: ProjectDTO[] = [
     description: 'HIS 系统从 2.0 升级到 4.0',
     status: 'queued',
     created_by: 1,
+    created_by_username: 'admin',
     api_key_owner: 1,
     dir_path: '/var/lib/bid-app/projects/103',
     pages_per_chapter: 3,
@@ -116,6 +119,7 @@ const projects: ProjectDTO[] = [
     description: '边端 + 中心一体化监控数据归集',
     status: 'failed',
     created_by: 2,
+    created_by_username: 'zhangsan',
     api_key_owner: 2,
     dir_path: '/var/lib/bid-app/projects/104',
     pages_per_chapter: 3,
@@ -530,6 +534,7 @@ function route(ctx: ResolveContext): unknown {
       description: b.description ?? null,
       status: 'init',
       created_by: currentUser.id,
+      created_by_username: currentUser.username,
       api_key_owner: null,
       dir_path: `/var/lib/bid-app/projects/${id}`,
       pages_per_chapter: b.pages_per_chapter ?? 3,
@@ -655,6 +660,17 @@ function route(ctx: ResolveContext): unknown {
       }
       projectDocuments[pid] = [...(projectDocuments[pid] ?? []), doc]
       return doc
+    }
+    // PR-M7-2 多文件:DELETE /documents/{document_id}
+    const docDeleteMatch = sub.match(/^\/documents\/(\d+)$/)
+    if (docDeleteMatch && method === 'DELETE') {
+      const docId = Number(docDeleteMatch[1])
+      const list = projectDocuments[pid] ?? []
+      const ix = list.findIndex((d) => d.id === docId)
+      if (ix < 0) throw apiError(404, { detail: 'document not found' })
+      list.splice(ix, 1)
+      projectDocuments[pid] = list
+      return { ok: true }
     }
     if (sub === '/outline' && method === 'GET') {
       const chs = projectChapters[pid] ?? []
