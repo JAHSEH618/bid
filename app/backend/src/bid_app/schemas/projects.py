@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 # ⭐ M1 contract:Project.status 全集(单一来源,API 收紧用)
 # init / queued:刚建项目还没 /start
 # extracting / outlining:/start 后 LangGraph 阶段
+# awaiting_material_understanding (PR-M8-1):material_understanding_review 节点
+#   interrupt,等用户在 MaterialUnderstandingPage 上点 pass / revise / skip
 # outline_ready:LLM-1 跑完,等用户在 P4 编辑提纲并 /confirm-outline
 # running / awaiting_review:章节循环阶段(P5)
 # done / failed / aborted:终态
@@ -20,6 +22,7 @@ ProjectStatus = Literal[
     "init",
     "queued",
     "extracting",
+    "awaiting_material_understanding",
     "outlining",
     "outline_ready",
     "running",
