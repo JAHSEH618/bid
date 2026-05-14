@@ -55,13 +55,13 @@ const KIND_META: Record<
   },
 }
 
-const ACCEPT = '.docx,.doc,.md,.txt'
+const ACCEPT = '.docx,.doc,.pdf,.md,.txt'
 const ACCEPT_MIME =
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,text/markdown,text/plain'
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,application/pdf,text/markdown,text/plain'
 // PR-M7-2 / D5:与后端 settings.max_file_upload_bytes (200MB) 对齐。
 const MAX_BYTES = 200 * 1024 * 1024
 const MAX_MB_LABEL = '200MB'
-const ALLOWED_EXTS = ['docx', 'doc', 'md', 'txt']
+const ALLOWED_EXTS = ['docx', 'doc', 'pdf', 'md', 'txt']
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
@@ -202,7 +202,7 @@ export function DocumentUploadPage() {
           {project.data.name}
         </h1>
         <p className="text-sm text-muted-foreground">
-          上传招标文档以启动 AI 工作流。支持 .docx / .doc / .md / .txt,单文件&nbsp;≤&nbsp;{MAX_MB_LABEL},每个模块可上传多个文件
+          上传招标文档以启动 AI 工作流。支持 .docx / .doc / .pdf / .md / .txt,单文件&nbsp;≤&nbsp;{MAX_MB_LABEL},每个模块可上传多个文件
         </p>
       </header>
 
@@ -370,7 +370,7 @@ function UploadSlot({
     }
     const ext = file.name.split('.').pop()?.toLowerCase()
     if (!ALLOWED_EXTS.includes(ext ?? '')) {
-      return '仅支持 .docx / .doc / .md / .txt'
+      return '仅支持 .docx / .doc / .pdf / .md / .txt'
     }
     return null
   }
@@ -543,7 +543,7 @@ function UploadSlot({
                 {hasFiles ? '继续添加文件' : '点击或拖拽文件到此'}
               </p>
               <p className="text-[10px] text-muted-foreground">
-                .docx / .doc / .md / .txt · 单文件&nbsp;≤&nbsp;{MAX_MB_LABEL} · 可多选
+                .docx / .doc / .pdf / .md / .txt · 单文件&nbsp;≤&nbsp;{MAX_MB_LABEL} · 可多选
               </p>
             </>
           )}

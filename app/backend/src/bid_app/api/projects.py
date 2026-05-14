@@ -60,11 +60,10 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 log = structlog.get_logger()
 
 # 上传白名单 + 单文件大小上限(FR-1.4)
-# ⚠️ 不含 .pdf:虽然 markitdown 名义支持 PDF,但加密 / 扫描型 PDF 抽不出文字,
-# 我们的 LibreOffice fallback 只转 .doc 不转 .pdf。前端
-# DocumentUploadPage 也只 accept docx/doc/md/txt — 后端列表与前端对齐,
-# 防止用户传上来后端默默存但抽取失败。如需 .pdf 支持是更大工作量(单独 task)。
-_ALLOWED_UPLOAD_EXT = {".docx", ".doc", ".md", ".markdown", ".txt"}
+# ⚠️ .pdf:markitdown 自带 pdfminer 能抽文字型 PDF;扫描型 / 加密型 PDF 会
+# 抽不出来 → ``DocumentExtractError`` → 写到 ``Document.extract_error``,前端
+# 角标提示用户重传清晰版本(不会让流水线静默崩溃)。
+_ALLOWED_UPLOAD_EXT = {".docx", ".doc", ".md", ".markdown", ".txt", ".pdf"}
 _VALID_DOC_KINDS = {"tech_spec", "scoring", "template"}
 
 
