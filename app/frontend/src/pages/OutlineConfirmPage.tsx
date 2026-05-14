@@ -30,14 +30,11 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
-import {
-  useConfirmOutline,
-  useProject,
-  useProjectOutline,
-} from '@/api/projects'
+import { useConfirmOutline, useProject, useProjectOutline } from '@/api/projects'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
 import { cn } from '@/lib/utils'
+import { statusHref } from '@/lib/projectRoute'
 import type { OutlineChapterIn } from '@/lib/types'
 
 // PR-M8-2:editorial 提纲编辑 — 拖拽排序 + 增删改 + 锁定目录。
@@ -96,6 +93,25 @@ export function OutlineConfirmPage() {
     setEdited(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [outline.data?.run_id, outline.data?.chapters.length])
+
+  // 状态跑到目录阶段以外(典型:awaiting_material_understanding 还没确认理解)
+  // 时把用户送去对应页面;状态枚举里只有 outline 相关的几个真正属于本页。
+  useEffect(() => {
+    const status = project.data?.status
+    if (!status) return
+    const ownStatuses = new Set([
+      'extracting',
+      'outlining',
+      'outline_ready',
+      'queued',
+    ])
+    if (!ownStatuses.has(status)) {
+      const target = statusHref(projectId, status)
+      if (target !== `/projects/${projectId}/outline`) {
+        navigate(target, { replace: true })
+      }
+    }
+  }, [project.data?.status, navigate, projectId])
 
   const isReady = project.data?.status === 'outline_ready'
   const totalPages = chapters.reduce(

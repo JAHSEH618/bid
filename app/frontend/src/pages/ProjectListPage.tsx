@@ -7,6 +7,7 @@ import { useCurrentUser } from '@/hooks/useAuth'
 import { useToast } from '@/hooks/useToast'
 import { confirmDialog } from '@/components/ConfirmDialog'
 import { cn } from '@/lib/utils'
+import { projectHref } from '@/lib/projectRoute'
 import type { ProjectDTO, ProjectStatus } from '@/lib/types'
 
 const STATUS_LABEL: Record<ProjectStatus, string> = {
@@ -64,23 +65,13 @@ const STAGE_HINT: Record<ProjectStatus, string> = {
 const ACTIVE_STATUSES = new Set<ProjectStatus>([
   'queued',
   'extracting',
+  'awaiting_material_understanding',
   'outlining',
   'running',
 ])
 
-// 推导每个项目卡点击后的目标路由;改成 <Link> 后给 href 用。
-function projectHref(p: ProjectDTO): string {
-  if (p.status === 'init') return `/projects/${p.id}/upload`
-  if (
-    p.status === 'queued' ||
-    p.status === 'extracting' ||
-    p.status === 'outlining' ||
-    p.status === 'outline_ready'
-  )
-    return `/projects/${p.id}/outline`
-  if (p.status === 'done') return `/projects/${p.id}/proposal`
-  return `/projects/${p.id}/review`
-}
+// 注:projectHref 已经抽到 @/lib/projectRoute,GlobalProgressBanner / 上传页
+// / 目录页都共用同一份,避免新增 status 时漏改某个入口(踩过一次)。
 
 // PR-UI-2 retrofit:editorial 列表 — 左侧大数字 + 中间 serif 标题 + 右侧 meta。
 export function ProjectListPage() {

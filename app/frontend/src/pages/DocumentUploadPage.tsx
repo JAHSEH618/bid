@@ -31,6 +31,7 @@ import { useModelConfig } from '@/api/me'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
 import { cn } from '@/lib/utils'
+import { statusHref } from '@/lib/projectRoute'
 import type { DocumentDTO, DocumentKind } from '@/lib/types'
 
 const KIND_META: Record<
@@ -100,7 +101,9 @@ export function DocumentUploadPage() {
 
   useEffect(() => {
     if (project.data && project.data.status !== 'init') {
-      navigate(`/projects/${projectId}/outline`, { replace: true })
+      // 用共享 helper 找正确的下一站,避免 awaiting_material_understanding 等
+      // 状态被硬塞到 /outline 卡死。
+      navigate(statusHref(projectId, project.data.status), { replace: true })
     }
   }, [project.data, navigate, projectId])
 
@@ -152,7 +155,9 @@ export function DocumentUploadPage() {
       } else {
         toast({ title: '工作流已启动', variant: 'success' })
       }
-      navigate(`/projects/${projectId}/outline`)
+      // 走共享 helper:start 之后状态可能直接跳到 extracting → ... →
+      // awaiting_material_understanding,不能再死路由到 /outline。
+      navigate(statusHref(projectId, 'extracting'))
     } catch (err) {
       const msg = readApiError(err, '启动失败')
       toast({ title: '启动失败', description: msg, variant: 'destructive' })

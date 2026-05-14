@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 import { Activity, ChevronRight } from 'lucide-react'
 import { useProjects } from '@/api/projects'
 import { Badge } from '@/components/ui/badge'
+import { projectHref } from '@/lib/projectRoute'
 import type { ProjectDTO, ProjectStatus } from '@/lib/types'
 
 // R-12 全局进度条:在 AppShell 顶部展示当前用户/团队所有 in-flight 项目的状态摘要。
@@ -72,7 +73,7 @@ export function GlobalProgressBanner() {
         {active.map((p) => (
           <li key={p.id} className="flex items-center gap-1.5">
             <Link
-              to={routeFor(p)}
+              to={projectHref(p)}
               className="line-clamp-1 max-w-[200px] font-medium text-sky-900 underline-offset-2 transition-colors hover:underline"
             >
               {p.name}
@@ -91,20 +92,4 @@ export function GlobalProgressBanner() {
       </Link>
     </div>
   )
-}
-
-function routeFor(p: ProjectDTO): string {
-  if (p.status === 'awaiting_material_understanding') {
-    return `/projects/${p.id}/understanding`
-  }
-  if (
-    p.status === 'outline_ready' ||
-    p.status === 'extracting' ||
-    p.status === 'outlining' ||
-    p.status === 'queued'
-  ) {
-    return `/projects/${p.id}/outline`
-  }
-  if (p.status === 'done') return `/projects/${p.id}/proposal`
-  return `/projects/${p.id}/review`
 }
