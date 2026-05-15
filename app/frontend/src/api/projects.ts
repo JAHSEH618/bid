@@ -136,6 +136,15 @@ export function useProjectDocuments(projectId: number | null) {
     queryFn: () =>
       apiFetch<DocumentDTO[]>(`/api/projects/${projectId}/documents`),
     enabled: projectId != null,
+    // 抽取是后台 arq 任务,.doc 走 LibreOffice 可能 5s+。任一文档 extract_status=pending
+    // 时 2s 轮询,抽完后停止;让 DocumentUploadPage 的开始按钮能自动从 disabled 翻到可用。
+    refetchInterval: (query) => {
+      const data = query.state.data
+      const hasPending = (data ?? []).some(
+        (d) => d.extract_status === 'pending',
+      )
+      return hasPending ? 2_000 : false
+    },
   })
 }
 

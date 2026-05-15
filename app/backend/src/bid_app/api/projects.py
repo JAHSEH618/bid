@@ -520,6 +520,28 @@ async def start_workflow(
             f"project status is '{project.status}', /start only allowed when init",
         )
 
+    # 防 race:文档抽取 (markitdown / LibreOffice 转 .doc) 是后台 arq 任务,/start
+    # 不等抽取就跑会导致 LLM-1 拿到旧 / 空 ``tech_spec_md``,产出残缺目录。
+    # extract_for_project 跳过 markdown_path=NULL 的行,被覆盖逻辑也救不回来。
+    # 这里复用 _document_to_response 的 pending 判定 (没 markdown_path & 没
+    # structured_html & 没 extract_error),命中即 409 让前端等几秒重试。
+    pending_docs = (
+        await db.execute(
+            select(Document.id, Document.original_filename).where(
+                Document.project_id == project_id,
+                Document.markdown_path.is_(None),
+                Document.structured_html.is_(None),
+                Document.extract_error.is_(None),
+            )
+        )
+    ).all()
+    if pending_docs:
+        names = ", ".join(name or f"#{doc_id}" for doc_id, name in pending_docs)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"以下文档仍在抽取中,请等抽取完成再点开始生成:{names}",
+        )
+
     api_key = (
         await db.execute(
             select(ApiKey).where(

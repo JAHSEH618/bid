@@ -118,6 +118,10 @@ async def run(state: WorkflowState) -> dict[str, str]:
         project_id=project_id,
         run_id=run_id,
         timeout_seconds=settings.llm_outline_timeout_seconds,
+        # 显式给到 8192:prompt 要求 25-50 个叶子 + 每叶 summary/key_points/
+        # matched_scoring_items,JSON 体积容易撞默认 max_tokens (DashScope flash
+        # 档常见 2-4k) 被截断;留 8k 给 LLM-1 充分展开,LiteLLM 会按模型上限自动 clamp。
+        max_tokens=8192,
     )
 
     return {"_outline_json": sr.text, "_outline_revision_feedback": ""}

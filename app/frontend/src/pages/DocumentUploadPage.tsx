@@ -122,9 +122,16 @@ export function DocumentUploadPage() {
   const hasScoring = documentsByKind.scoring.length > 0
   const requiredCount = (hasTechSpec ? 1 : 0) + (hasScoring ? 1 : 0)
 
+  // 任一上传文档还在抽取中 (markitdown / LibreOffice 转 .doc) 时禁用开始按钮——
+  // 后端 /start 现在也会 409 拦,但前端先 disabled 体验更好,避免点了再看 toast。
+  const hasPendingExtract = (documents.data ?? []).some(
+    (d) => d.extract_status === 'pending',
+  )
+
   const canStart = Boolean(
     hasTechSpec &&
       hasScoring &&
+      !hasPendingExtract &&
       project.data &&
       project.data.status === 'init' &&
       (modelConfig.data?.available_models.length ?? 0) > 0,
