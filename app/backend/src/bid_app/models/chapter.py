@@ -41,6 +41,9 @@ class Chapter(Base, TimestampMixin):
     index: Mapped[int] = mapped_column(Integer)
     # PR-M8-2 follow-up:层级编号 "1.1" / "2.3.1";老项目 NULL 时前端 fallback。
     section: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # textarea TOC editor 用:从根到父节点的祖先标题列表
+    # ``["项目背景", "招标方现状"]`` — 让 chaptersToTocText 能重建分组行。
+    parent_titles: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     title: Mapped[str] = mapped_column(String(255))
     summary: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     key_points: Mapped[list[str]] = mapped_column(JSON, default=list)

@@ -114,6 +114,7 @@ async def sync_outline_to_db(
                     run_id=run_id,
                     index=i,
                     section=c.get("section"),
+                    parent_titles=c.get("parent_titles"),
                     title=c["title"],
                     summary=c.get("summary"),
                     key_points=c.get("key_points", []),
@@ -124,6 +125,7 @@ async def sync_outline_to_db(
                     index_elements=["run_id", "index"],
                     set_={
                         "section": sa.text("EXCLUDED.section"),
+                        "parent_titles": sa.text("EXCLUDED.parent_titles"),
                         "title": sa.text("EXCLUDED.title"),
                         "summary": sa.text("EXCLUDED.summary"),
                         "key_points": sa.text("EXCLUDED.key_points"),

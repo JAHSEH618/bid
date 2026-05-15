@@ -100,6 +100,8 @@ class OutlineChapterIn(BaseModel):
     id: str | None = None
     # PR-M8-2 follow-up:层级编号 "1.1" / "2.3.1";None 时后端按 index+1 兜底
     section: str | None = None
+    # 祖先分组标题(["项目背景", "招标方现状"]);新增节传 None 即可
+    parent_titles: list[str] | None = None
     title: str = Field(..., min_length=1)
     summary: str | None = None
     key_points: list[str] = Field(..., min_length=1)
@@ -143,6 +145,8 @@ class OutlineChapterDTO(BaseModel):
     id: str
     # PR-M8-2 follow-up:层级目录编号 "1.1" / "2.3.1";老项目可能 None
     section: str | None = None
+    # 祖先分组标题列表;老项目 None 时前端按 "第 N 章" 兜底
+    parent_titles: list[str] | None = None
     title: str
     summary: str | None = None
     key_points: list[str] = Field(default_factory=list)

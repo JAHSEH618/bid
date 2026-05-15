@@ -646,6 +646,7 @@ async def get_outline(
             OutlineChapterDTO(
                 id=f"ch_{c.index + 1:02d}",
                 section=c.section,
+                parent_titles=c.parent_titles,
                 title=c.title,
                 summary=c.summary,
                 key_points=c.key_points or [],

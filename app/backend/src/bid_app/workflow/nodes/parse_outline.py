@@ -34,14 +34,21 @@ from ..state import WorkflowState
 log = structlog.get_logger()
 
 
-def _normalize_chapter(ch: dict[str, Any], section: str, idx: int) -> dict[str, Any]:
+def _normalize_chapter(
+    ch: dict[str, Any],
+    section: str,
+    idx: int,
+    parent_titles: list[str],
+) -> dict[str, Any]:
     """把单个叶子节点 normalize 成 chapters[] 一条记录。
 
     ``section`` 是层级编号 "1.1" / "2.3.1";``idx`` 是展平后的 0-based 位置,
-    用作 fallback id。
+    用作 fallback id;``parent_titles`` 是从根到父节点的祖先标题列表
+    (chaptersToTocText 重建分组行时用)。
     """
     ch.setdefault("id", f"ch_{idx + 1:02d}")
     ch["section"] = section
+    ch["parent_titles"] = list(parent_titles)
     ch.setdefault("title", f"第 {section} 节")
     ch.setdefault("summary", "")
     ch.setdefault("key_points", [])
@@ -66,13 +73,13 @@ def _flatten_toc(toc: list[Any]) -> list[dict[str, Any]]:
 
     section 编号按深度优先生成:一级 "1" / "2",二级 "1.1" / "1.2",
     三级 "1.1.1" 以此类推。**只有叶子进入结果**(下游 write_chapter 只
-    生成叶子);分组的 title 在 frontend 重建层级时通过 section 前缀
-    匹配显示。
+    生成叶子);分组的 title 会被记录到每个后代叶子的 ``parent_titles``
+    数组里,让前端 textarea 重建分组行。
     """
     leaves: list[dict[str, Any]] = []
     idx_counter = [0]
 
-    def walk(nodes: list[Any], prefix: list[int]) -> None:
+    def walk(nodes: list[Any], prefix: list[int], titles: list[str]) -> None:
         for i, node in enumerate(nodes):
             if not isinstance(node, dict):
                 continue
@@ -80,15 +87,16 @@ def _flatten_toc(toc: list[Any]) -> list[dict[str, Any]]:
             section = ".".join(str(n) for n in path)
             children = node.get("children")
             if isinstance(children, list) and len(children) > 0:
-                walk(children, path)
+                # 分组:把自己的 title 加到 titles 栈,继续往下走
+                walk(children, path, [*titles, str(node.get("title") or "")])
             else:
                 # 叶子:加入结果
                 leaf = dict(node)
                 leaf.pop("children", None)
-                leaves.append(_normalize_chapter(leaf, section, idx_counter[0]))
+                leaves.append(_normalize_chapter(leaf, section, idx_counter[0], titles))
                 idx_counter[0] += 1
 
-    walk(toc, [])
+    walk(toc, [], [])
     return leaves
 
 
@@ -125,7 +133,7 @@ def _normalize(outline_json: str) -> list[dict[str, Any]]:
     for i, ch in enumerate(legacy):
         if not isinstance(ch, dict):
             continue
-        normalized.append(_normalize_chapter(dict(ch), str(i + 1), i))
+        normalized.append(_normalize_chapter(dict(ch), str(i + 1), i, []))
     return normalized
 
 

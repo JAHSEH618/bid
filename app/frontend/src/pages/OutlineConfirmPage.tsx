@@ -69,7 +69,14 @@ function parseTocTextLenient(text: string): ParsedNode[] {
   return out
 }
 
-/** 把节点列表展平成 chapters[](只取叶子)。 */
+/** 把节点列表展平成 chapters[](只取叶子)。
+ *
+ * 判叶子规则:下一行 level 不大于自己,即"自己没有更深的子节点紧跟"。
+ * 末尾的孤立分组行(下一行不存在)也会被当叶子 — 这是 textarea 编辑
+ * 的常见副作用,用户写了一个章标题但没来得及加节。为避免吞掉无内容
+ * 的分组,要求叶子必须有原始 LLM-1 元数据 (meta) 或显式带 ``-``
+ * (下面 handleConfirm 会再校验)。
+ */
 function nodesToChapters(
   nodes: ParsedNode[],
   metaBySection: Map<string, OutlineChapterDTO>,
@@ -77,13 +84,21 @@ function nodesToChapters(
   const chapters: OutlineChapterIn[] = []
   for (let i = 0; i < nodes.length; i++) {
     const cur = nodes[i]
-    const next = nodes[i + 1]
-    // 下一个节点 level 更深 → 当前是分组,不进 chapters
-    if (next && next.level > cur.level) continue
+    // 检查后面是否有更深 level 的节点存在(到再次见到 <=cur.level 之前)
+    let hasDeeperChild = false
+    for (let j = i + 1; j < nodes.length; j++) {
+      if (nodes[j].level <= cur.level) break
+      if (nodes[j].level > cur.level) {
+        hasDeeperChild = true
+        break
+      }
+    }
+    if (hasDeeperChild) continue
     const meta = metaBySection.get(cur.section)
     chapters.push({
       id: meta?.id ?? null,
       section: cur.section,
+      parent_titles: meta?.parent_titles ?? null,
       title: cur.title,
       summary: meta?.summary ?? null,
       key_points: meta?.key_points.length ? meta.key_points : DEFAULT_KEY_POINTS,
@@ -93,29 +108,32 @@ function nodesToChapters(
   return chapters
 }
 
-/** chapters[] → markdown 文本(供 textarea 初始化和重写后回灌)。 */
+/** chapters[] → markdown 文本(供 textarea 初始化和重写后回灌)。
+ * 用每个叶子的 ``parent_titles`` 重建分组行(LLM-1 原始标题);老项目
+ * ``parent_titles=null`` 时按 ``"第 N 章"`` 中文数字兜底,避免出现
+ * ``"章节分组"`` 占位。 */
 function chaptersToTocText(chapters: OutlineChapterDTO[]): string {
-  // 把扁平叶子重建出非叶子分组行:遍历 section 前缀,首次见到的前缀作为分组发一行
   const lines: string[] = []
-  const seenPrefixes = new Set<string>()
+  // section 前缀 → 已发出过的分组行 (避免重复)
+  const emittedPrefixes = new Set<string>()
 
   for (const c of chapters) {
     const section = c.section ?? ''
     if (!section) {
-      // 老项目 section=null:用 index+1 当 section,单层
+      // 老项目 section=null:按 index+1 当 section,单层
       lines.push(`# ${c.index + 1} ${c.title}`)
       continue
     }
     const parts = section.split('.')
-    // 先发分组行(level=1..parts.length-1),title 用空("项目目录")
+    const parents = c.parent_titles ?? []
     for (let i = 1; i < parts.length; i++) {
       const prefix = parts.slice(0, i).join('.')
-      if (!seenPrefixes.has(prefix)) {
-        seenPrefixes.add(prefix)
-        lines.push(`${'#'.repeat(i)} ${prefix} 章节分组`)
-      }
+      if (emittedPrefixes.has(prefix)) continue
+      emittedPrefixes.add(prefix)
+      const parentTitle =
+        parents[i - 1] || (i === 1 ? `第 ${prefix} 章` : `小节 ${prefix}`)
+      lines.push(`${'#'.repeat(i)} ${prefix} ${parentTitle}`)
     }
-    // 叶子行(深度 = parts.length)
     const level = Math.min(4, parts.length)
     lines.push(`${'#'.repeat(level)} ${section} ${c.title}`)
   }
@@ -138,12 +156,19 @@ export function OutlineConfirmPage() {
   // 把 key_points / target_pages / summary 带回 submit。
   const lastChaptersRef = useRef<OutlineChapterDTO[]>([])
 
+  // LLM-1 重出新一版可能 chapter 数一致但每条 section / title 变了:
+  // 把每个叶子的 section + title 串成签名作为 useEffect 的 dep,
+  // 触发 textarea 重灌(纯 length 比较会漏)。
+  const chaptersFingerprint = (outline.data?.chapters ?? [])
+    .map((c) => `${c.section ?? c.index}:${c.title}`)
+    .join('|')
+
   useEffect(() => {
     const chs = outline.data?.chapters ?? []
     if (chs.length === 0) return
     lastChaptersRef.current = chs
     // 用户在 textarea 改过但还没提交:避免覆盖,只在第一次 / chapters 真换了
-    // 才重置。判定:if textarea 跟旧重建一致或为空。
+    // 才重置。判定:textarea 跟旧重建一致或为空。
     const rebuilt = chaptersToTocText(chs)
     setTocText((cur) => {
       if (!cur.trim()) return rebuilt
@@ -151,7 +176,7 @@ export function OutlineConfirmPage() {
       return cur === prevRebuilt ? rebuilt : cur
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [outline.data?.run_id, outline.data?.chapters.length])
+  }, [outline.data?.run_id, chaptersFingerprint])
 
   // 状态跑到目录阶段以外(典型:awaiting_material_understanding 还没确认理解)
   // 时把用户送去对应页面;状态枚举里只有 outline 相关的几个真正属于本页。
@@ -169,7 +194,13 @@ export function OutlineConfirmPage() {
 
   const status = project.data?.status
   const isReady = status === 'outline_ready'
-  const isGenerating = status === 'extracting' || status === 'outlining' || status === 'queued'
+  // revise 路径中工作流会把 status 切回 running 重新跑 generate_outline,
+  // 此时也要显示 hero 而不是带着上版目录的旧 textarea。
+  const isGenerating =
+    status === 'extracting' ||
+    status === 'outlining' ||
+    status === 'queued' ||
+    status === 'running'
 
   // 实时解析当前 textarea,显示节点统计(用户写错时也能看到节数)
   const parsedSummary = useMemo(() => {
@@ -191,6 +222,20 @@ export function OutlineConfirmPage() {
       toast({
         title: '目录为空',
         description: '请至少填一行 "# 1 标题",或让模型重新生成',
+        variant: 'warning',
+      })
+      return
+    }
+    // 重复 section 校验:用户手敲两次 ## 1.1 会导致后端章节冲突,前置拦
+    const seen = new Map<string, number>()
+    for (const n of nodes) {
+      seen.set(n.section, (seen.get(n.section) ?? 0) + 1)
+    }
+    const dup = [...seen.entries()].find(([, n]) => n > 1)
+    if (dup) {
+      toast({
+        title: `编号 ${dup[0]} 出现 ${dup[1]} 次`,
+        description: '请检查目录,保证每个章节编号唯一',
         variant: 'warning',
       })
       return

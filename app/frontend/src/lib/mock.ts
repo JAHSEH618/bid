@@ -180,6 +180,7 @@ function makeChapter(
   return {
     id: `ch_${(idx + 1).toString().padStart(2, '0')}`,
     section: `${top}.${sub}`,
+    parent_titles: [`第 ${top} 章 模拟章节分组`],
     title,
     summary: '示例章节简介(LLM-1 生成)',
     key_points: ['要点 A', '要点 B', '要点 C'],
@@ -686,6 +687,7 @@ function route(ctx: ResolveContext): unknown {
         chapters: chs.map((c) => ({
           id: c.id,
           section: c.section,
+          parent_titles: c.parent_titles ?? null,
           title: c.title,
           summary: c.summary,
           key_points: c.key_points,
@@ -720,6 +722,7 @@ function route(ctx: ResolveContext): unknown {
         projectChapters[pid] = b.chapters.map((c, i) => ({
           id: `ch_${(i + 1).toString().padStart(2, '0')}`,
           section: c.section ?? `${Math.floor(i / 3) + 1}.${(i % 3) + 1}`,
+          parent_titles: null,
           title: c.title,
           summary: c.summary ?? null,
           key_points: c.key_points,

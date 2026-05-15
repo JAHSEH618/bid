@@ -81,6 +81,41 @@ def test_three_level_toc_flattens_to_leaves_only() -> None:
     chapters = _run(json.dumps(payload))
     assert [c["section"] for c in chapters] == ["1.1.1", "1.1.2"]
     assert [c["title"] for c in chapters] == ["数据库选型", "缓存策略"]
+    # textarea TOC editor:祖先标题 round-trip 用,前端 chaptersToTocText 重建分组行
+    assert chapters[0]["parent_titles"] == ["技术方案", "数据层"]
+    assert chapters[1]["parent_titles"] == ["技术方案", "数据层"]
+
+
+def test_four_level_toc_preserves_parent_titles() -> None:
+    """4 级目录的叶子保留 3 个祖先标题。"""
+    payload = {
+        "toc": [
+            {
+                "title": "项目背景",
+                "children": [
+                    {
+                        "title": "招标方现状",
+                        "children": [
+                            {
+                                "title": "组织架构",
+                                "children": [
+                                    {
+                                        "title": "总部与分支",
+                                        "key_points": ["x"],
+                                        "target_pages": 1,
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+        ]
+    }
+    chapters = _run(json.dumps(payload))
+    assert len(chapters) == 1
+    assert chapters[0]["section"] == "1.1.1.1"
+    assert chapters[0]["parent_titles"] == ["项目背景", "招标方现状", "组织架构"]
 
 
 def test_legacy_flat_chapters_still_parsed_with_fallback_section() -> None:

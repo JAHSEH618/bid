@@ -83,6 +83,9 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         return {
             "_outline_review_decision": "revise",
             "_outline_revision_feedback": feedback,
+            # 清掉上一轮 confirm 残留,避免 pick_chapter 误读
+            "_outline_confirmed_chapters": None,
+            "selected_chapter_ids": None,
         }
 
     # —— confirm 分支(默认):用户已编辑或沿用 ——

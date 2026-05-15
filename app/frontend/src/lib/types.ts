@@ -74,6 +74,8 @@ export type ChapterStatus =
 export interface OutlineChapterDTO {
   id: string
   section: string | null
+  // 祖先分组标题(["项目背景", "招标方现状"]);老项目 null
+  parent_titles: string[] | null
   title: string
   summary: string | null
   key_points: string[]
@@ -112,10 +114,11 @@ export interface OutlineResponseDTO {
 }
 
 // /outline PUT body 中的章节(用户编辑后)。
-// PR-M8-2 follow-up:section 跟着 chapters 一起 round-trip。
+// PR-M8-2 follow-up:section / parent_titles 跟着 chapters 一起 round-trip。
 export interface OutlineChapterIn {
   id?: string | null
   section?: string | null
+  parent_titles?: string[] | null
   title: string
   summary?: string | null
   key_points: string[]
