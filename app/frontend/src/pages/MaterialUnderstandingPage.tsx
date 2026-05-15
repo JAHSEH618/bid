@@ -16,6 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { useProject } from '@/api/projects'
 import { useToast } from '@/hooks/useToast'
 import { apiFetch, readApiError } from '@/lib/apiFetch'
+import type { ProjectDTO } from '@/lib/types'
 
 // PR-M8-1:材料理解评审页。
 // LLM-0 把招标材料黑板拆成 5 个分组 JSON;用户在这里 pass / revise / skip。
@@ -109,8 +110,16 @@ export function MaterialUnderstandingPage() {
       qc.invalidateQueries({
         queryKey: ['projects', projectId, 'material-understanding'],
       })
-      qc.invalidateQueries({ queryKey: ['projects', projectId] })
       if (decision === 'pass' || decision === 'skip') {
+        // 后端 decision 端点只是入队 resume_review_task,DB 里 status 还会维持
+        // awaiting_material_understanding 一小段时间。如果直接 navigate 到 /outline,
+        // OutlineConfirmPage 的 status 守卫会把用户弹回 /understanding(甚至再到 /review)。
+        // 乐观更新到 "outlining",让 /outline 页面接得住;真实 status 后续 useProject
+        // 轮询会自然覆盖。
+        qc.setQueryData<ProjectDTO | undefined>(
+          ['projects', projectId],
+          (prev) => (prev ? { ...prev, status: 'outlining' } : prev),
+        )
         toast({
           variant: 'success',
           title: '已提交',
@@ -118,6 +127,7 @@ export function MaterialUnderstandingPage() {
         })
         navigate(`/projects/${projectId}/outline`, { replace: true })
       } else {
+        qc.invalidateQueries({ queryKey: ['projects', projectId] })
         toast({
           variant: 'info',
           title: 'LLM 正在重新理解材料',

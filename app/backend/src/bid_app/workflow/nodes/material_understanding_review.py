@@ -49,11 +49,17 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         }
     )
 
-    if _real_project(pid_raw):
-        await sync_project_status(int(pid_raw or 0), "running")
-
     decision = (payload or {}).get("decision") or "pass"
     feedback = (payload or {}).get("feedback") or ""
+
+    if _real_project(pid_raw):
+        # pass / skip 紧接 generate_outline,用 "outlining" 让 OutlineConfirmPage
+        # 的 status 守卫 (ownStatuses = {extracting,outlining,outline_ready,queued})
+        # 留住用户;否则 "running" 会被 statusHref 派到 /review。
+        # revise 会回到 material_understanding 重跑 LLM-0,用户停在 /understanding,
+        # 那个页面本身不按 status 自动跳,沿用 "running" 即可。
+        next_status = "outlining" if decision != "revise" else "running"
+        await sync_project_status(int(pid_raw or 0), next_status)
 
     return {
         "_material_review_decision": decision,
