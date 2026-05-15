@@ -403,6 +403,13 @@ export function ChapterReviewPage() {
                 {generateButtonLabel}
               </Button>
             )}
+            {/* 只要本章有 final_text 就允许导出 .docx —— 不止 approved。
+                后端 _load_chapter_for_export 同步放开,prefetch / awaiting_review
+                状态都能导一份留底。approved/skipped 章节正文不再回前端,所以由
+                ChapterEmptyHint 的兜底分支负责显示按钮。 */}
+            {hasGeneratedBody && chapterDetail.data?.id != null && (
+              <ChapterExportButton chapterId={chapterDetail.data.id} />
+            )}
             {project.data.status === 'done' && (
               <Button asChild size="sm" className="shadow-sm">
                 <Link to={`/projects/${projectId}/proposal`}>

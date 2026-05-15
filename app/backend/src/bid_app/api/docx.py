@@ -393,7 +393,13 @@ def _display_chapter_filename(project_name: str, chapter_title: str) -> str:
 async def _load_chapter_for_export(
     db: AsyncSession, chapter_id: int
 ) -> tuple[Chapter, Project]:
-    """取章节 + 关联项目;鉴权交给 deps.get_current_user。pass 状态才允许导出。"""
+    """取章节 + 关联项目;鉴权交给 deps.get_current_user。
+
+    导出门槛:有 ``final_text`` 即可。原先只放行 ``approved`` 章节,但用户
+    经常想在工作流走到这一章之前(prefetch 完成 / awaiting_review 但还没决策)
+    就把已生成的版本单章导出留底。导出是只读操作,不动 DB,后续 workflow 在
+    这一章上跑 visual/merge 写出的最终版本不受影响。
+    """
     row = (
         await db.execute(
             sa.text(
@@ -409,15 +415,10 @@ async def _load_chapter_for_export(
     ).mappings().one_or_none()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
-    if row["status"] != "approved":
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"chapter not approved yet, status={row['status']}",
-        )
     if not row["final_text"]:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "chapter has no final text — cannot export",
+            f"chapter has no final text yet (status={row['status']})",
         )
     # 实例化轻量对象,避免再次 query
     chapter = Chapter()
