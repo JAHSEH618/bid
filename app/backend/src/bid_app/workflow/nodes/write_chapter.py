@@ -219,6 +219,7 @@ async def _prefetch_chapter_body(
             revision_feedback="",
             retry_count=0,
             previous_text="",
+            blackboard_entities=state.get("blackboard_entities"),
         )
         chapter_model = await resolve_chapter_model(project_id, run_id, index, chapter)
         from ..sync import flush_chapter_partial
@@ -376,6 +377,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         revision_feedback=revision_feedback,
         retry_count=retry_count,
         previous_text=previous_text,  # ⭐ R-18
+        blackboard_entities=state.get("blackboard_entities"),
     )
 
     # ⭐ R-14:periodic flush 回调 —— call_llm_stream 内部每 100 chunks /

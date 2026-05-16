@@ -135,26 +135,93 @@ def build_messages(
     scoring_md: str,
     template_md: str,
     revision_feedback: str = "",
+    blackboard_entities: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """构造 LLM-1 messages 数组。
 
     ``revision_feedback`` 非空时表示用户在目录确认页点了"请模型修改",
     把意见注入 prompt,LLM-1 据此重出目录(状态由 outline_review →
     generate_outline 的 conditional edge 触发)。
+
+    ⭐ Phase 1B (2026-05-16):``blackboard_entities`` 是 categorize_blackboard
+    节点产出的 10 桶 JSON。给到时优先用它(结构化 + 分类好的关键条款),
+    比原 ``tech_spec_md[:8000]`` 截断信息密度高。Phase 1A 通常会有产出;
+    为空 / None(LLM-0 失败 / 老项目) → 降级回 markdown 截断。
     """
+    from .categorize_blackboard import (
+        has_any_entries,
+        render_buckets_for_prompt,
+    )
+
     fb = revision_feedback.strip()
     revision_section = (
         REVISION_TEMPLATE.format(revision_feedback=fb) if fb else ""
     )
+
+    if has_any_entries(blackboard_entities):
+        # 全 10 桶都给 LLM-1,模型自己决定哪些重要;每桶截 5k 控总长
+        # (10 桶 × 5k = 50k 字符,远小于 256k context 上限)
+        material_section = render_buckets_for_prompt(
+            blackboard_entities, per_bucket_char_limit=5000
+        )
+        user_content = (
+            f"请基于以下结构化材料黑板,为本次投标设计技术方案的**层级目录**。\n\n"
+            f"## 材料黑板(10 个实体桶)\n\n{material_section}\n\n"
+            f"{revision_section}\n\n"
+            + _OUTLINE_SCHEMA_TAIL
+        )
+    else:
+        # 实体黑板没生成 / 为空 → 降级:走老的 markdown 截断输入
+        user_content = LLM1_USER_TEMPLATE.format(
+            tech_spec_excerpt=_excerpt(tech_spec_md, 8000),
+            scoring_excerpt=_excerpt(scoring_md, 4000),
+            template_excerpt=_excerpt(template_md, 4000),
+            revision_section=revision_section,
+        )
     return [
         {"role": "system", "content": LLM1_SYSTEM},
-        {
-            "role": "user",
-            "content": LLM1_USER_TEMPLATE.format(
-                tech_spec_excerpt=_excerpt(tech_spec_md, 8000),
-                scoring_excerpt=_excerpt(scoring_md, 4000),
-                template_excerpt=_excerpt(template_md, 4000),
-                revision_section=revision_section,
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
+
+
+# 把原 user template 里「请输出 JSON 格式目录,严格遵循以下 schema...」
+# 这段尾巴拆出来,Phase 1B 走结构化材料黑板路径时复用,避免重复维护
+# 两套 schema 描述。
+_OUTLINE_SCHEMA_TAIL = """---
+
+请输出 JSON 格式目录,严格遵循以下 schema(**最多 4 级**,只有叶子节点带
+key_points / target_pages):
+
+{
+  "toc": [
+    {
+      "title": "项目背景与理解",
+      "children": [
+        {
+          "title": "招标方现状概览",
+          "children": [
+            {
+              "title": "公司规模与组织架构",
+              "summary": "本节核心要点摘要(80 字以内)",
+              "key_points": ["要点 1", "要点 2", "要点 3"],
+              "target_pages": 2,
+              "matched_scoring_items": ["对应的打分项名称"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+要求:
+- 一级 5-8 个,叶子总数 25-50 个为宜
+- **优先把权重大的一级章节展开到 3 级 / 4 级**,体现深度
+- 层级最多 4 级,**只在叶子上**给 ``summary`` / ``key_points`` / ``target_pages``
+  / ``matched_scoring_items``;有 ``children`` 的节点只给 ``title``
+- target_pages 根据打分权重和内容深度分配 1-6 页
+- key_points 每个叶子 3-7 个
+- matched_scoring_items 列出本节主要覆盖的打分项
+
+请只输出 JSON 字符串,不要任何其他文字。
+"""

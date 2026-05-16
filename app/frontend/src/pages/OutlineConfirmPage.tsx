@@ -4,6 +4,7 @@ import { ArrowLeft, ArrowRight, Loader2, Sparkles, Wand2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
+import { BlackboardEntitiesPanel } from '@/components/BlackboardEntitiesPanel'
 import { useConfirmOutline, useProject, useProjectOutline } from '@/api/projects'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
@@ -400,6 +401,12 @@ export function OutlineConfirmPage() {
           )}
         </div>
       </header>
+
+      {/* Phase 1C:实体黑板面板,默认折叠在大目录上方,用户随时展开看 LLM
+          拆出来的 10 桶,出错可以回上一步用「修订」反馈。 */}
+      <section className="mb-8">
+        <BlackboardEntitiesPanel projectId={projectId} />
+      </section>
 
       <label
         htmlFor="toc-textarea"

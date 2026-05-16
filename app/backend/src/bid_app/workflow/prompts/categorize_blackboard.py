@@ -142,3 +142,89 @@ def normalize_entities(parsed: Any) -> dict[str, list[dict[str, Any]]]:
             cleaned.append(entry)
         out[bucket] = cleaned
     return out
+
+
+# Phase 1B (2026-05-16):把实体桶 dict 渲染成给下游 LLM-1 / LLM-2 prompt 用的
+# Markdown 文本。每个桶一个 ##,空桶给「(本项目无相关条目)」让模型不要瞎猜。
+_BUCKET_LABELS_ZH = {
+    "project_info": "项目背景信息",
+    "company_info": "公司 / 组织信息",
+    "personnel_info": "人员资质要求",
+    "scoring_rules": "评分细则与权重",
+    "technical_requirements": "技术要求 / SLA / 参数",
+    "qualification_requirements": "投标资质 / 业绩门槛",
+    "timeline_constraints": "工期 / 时间节点",
+    "commercial_terms": "商务条款 / 报价规则",
+    "compliance_constraints": "法律 / 合规 / 强制条款",
+    "risk_signals": "风险信号 / 一票否决项",
+}
+
+
+def render_buckets_for_prompt(
+    entities: dict[str, Any] | None,
+    *,
+    bucket_filter: list[str] | None = None,
+    per_bucket_char_limit: int = 4000,
+) -> str:
+    """实体桶 → prompt-ready Markdown。
+
+    - ``bucket_filter`` 给定时只渲染指定桶(LLM-2 按 chapter 关键字过滤用);
+      None 渲染全部 10 桶(LLM-1 用)
+    - 单桶超过 ``per_bucket_char_limit`` 截断,尾部 ``(已截断,见黑板)`` 提示;
+      单条 entry 自身超 limit 时硬截 entry 内容,保证至少有产出
+    - entities 为 None / 全空 → 返回 ``"(实体黑板暂未生成或为空)"``,
+      调用方应据此回退到老的 ``tech_spec_md`` 截断输入
+    """
+    if not has_any_entries(entities):
+        return "(实体黑板暂未生成或为空)"
+    assert entities is not None  # has_any_entries 保证
+    buckets = bucket_filter or list(ENTITY_BUCKETS)
+    sections: list[str] = []
+    for bucket in buckets:
+        items = entities.get(bucket) or []
+        label = _BUCKET_LABELS_ZH.get(bucket, bucket)
+        if not items:
+            sections.append(f"### {label} ({bucket})\n(本项目无相关条目)")
+            continue
+        lines: list[str] = [f"### {label} ({bucket})"]
+        used = 0
+        for i, entry in enumerate(items, 1):
+            if not isinstance(entry, dict):
+                continue
+            content = entry.get("content") or ""
+            if not isinstance(content, str) or not content.strip():
+                continue
+            meta_bits: list[str] = []
+            source = entry.get("source_doc")
+            section = entry.get("section")
+            if isinstance(source, str) and source:
+                meta_bits.append(source)
+            if isinstance(section, str) and section:
+                meta_bits.append(section)
+            meta = f" *({' · '.join(meta_bits)})*" if meta_bits else ""
+            line = f"{i}. {content.strip()}{meta}"
+            remaining = per_bucket_char_limit - used
+            if remaining <= 0:
+                lines.append("...(已截断,完整内容查实体黑板原文)")
+                break
+            if len(line) > remaining:
+                # 单条 entry 太长,硬截一段 + 提示截断,然后停
+                lines.append(line[: max(remaining - 40, 80)] + "…(已截断)")
+                lines.append("...(已截断,完整内容查实体黑板原文)")
+                break
+            lines.append(line)
+            used += len(line) + 1
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
+def has_any_entries(entities: dict[str, Any] | None) -> bool:
+    """是否至少有一条 entry(回退判定用)。"""
+    if not entities:
+        return False
+    for v in entities.values():
+        if isinstance(v, list) and any(
+            isinstance(it, dict) and it.get("content") for it in v
+        ):
+            return True
+    return False

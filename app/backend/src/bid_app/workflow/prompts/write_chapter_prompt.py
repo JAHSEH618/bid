@@ -189,6 +189,46 @@ def _bullet_list(items: list[str]) -> str:
     return "\n".join(f"- {it}" for it in items)
 
 
+# Phase 1B (2026-05-16):章标题关键词 → 实体桶过滤规则。LLM-2 单章生成
+# 不需要全 10 桶上下文(否则 prompt 太长),按章标题命中关键字挑相关桶。
+# 命中不到任何关键字时回退到 [scoring_rules, technical_requirements] 两桶,
+# 这两个对所有投标章节都通用。
+_CHAPTER_KEYWORD_TO_BUCKETS: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+    (("背景", "项目概况", "需求理解"), ("project_info", "company_info")),
+    (("方案", "架构", "技术", "设计", "实施", "部署"), ("technical_requirements", "scoring_rules")),
+    (("人员", "团队", "项目经理", "组织"), ("personnel_info", "qualification_requirements")),
+    (("资质", "业绩", "证书", "资格"), ("qualification_requirements", "company_info")),
+    (("计划", "工期", "进度", "里程碑", "节点"), ("timeline_constraints", "scoring_rules")),
+    (("报价", "商务", "付款", "费用", "造价"), ("commercial_terms", "compliance_constraints")),
+    (("合规", "法律", "条款", "强制"), ("compliance_constraints", "risk_signals")),
+    (("风险", "管控", "质量", "应急", "保障", "运维"), ("risk_signals", "technical_requirements", "compliance_constraints")),
+    (("评分", "打分", "评价"), ("scoring_rules",)),
+]
+_CHAPTER_FALLBACK_BUCKETS = ("scoring_rules", "technical_requirements")
+
+
+def _pick_buckets_for_chapter(chapter: dict[str, Any]) -> list[str]:
+    """根据章节 title / parent_titles / matched_scoring_items 命中关键字,
+    挑相关实体桶。最多返回 4 桶避免 prompt 过长。"""
+    haystack_parts: list[str] = [str(chapter.get("title") or "")]
+    parents = chapter.get("parent_titles") or []
+    if isinstance(parents, list):
+        haystack_parts.extend(str(p) for p in parents)
+    matched = chapter.get("matched_scoring_items") or []
+    if isinstance(matched, list):
+        haystack_parts.extend(str(m) for m in matched)
+    haystack = " ".join(haystack_parts)
+    hits: list[str] = []
+    for keywords, buckets in _CHAPTER_KEYWORD_TO_BUCKETS:
+        if any(kw in haystack for kw in keywords):
+            for b in buckets:
+                if b not in hits:
+                    hits.append(b)
+    if not hits:
+        hits = list(_CHAPTER_FALLBACK_BUCKETS)
+    return hits[:4]
+
+
 def build_messages(
     *,
     chapter: dict[str, Any],
@@ -197,6 +237,7 @@ def build_messages(
     revision_feedback: str = "",
     retry_count: int = 0,
     previous_text: str = "",
+    blackboard_entities: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """构造 LLM-2 messages 数组。
 
@@ -208,7 +249,16 @@ def build_messages(
 
     previous_text 不截断:qwen3.6-max-preview 上下文 256K,5-10K 字 partial
     完全装得下,patch 式 LLM-2 才能精准对齐用户意见。
+
+    ⭐ Phase 1B (2026-05-16):``blackboard_entities`` 是 categorize_blackboard
+    产出的 10 桶 JSON。给到时按本章题目关键词挑 2-4 个相关桶塞进 prompt,
+    比原 ``tech_spec_md[:4000]`` 信息密度高。无 entities 时回退 markdown 截断。
     """
+    from .categorize_blackboard import (
+        has_any_entries,
+        render_buckets_for_prompt,
+    )
+
     target_pages = int(chapter.get("target_pages", 3) or 3)
     if not revision_feedback or retry_count <= 0:
         revision_section = ""
@@ -224,22 +274,44 @@ def build_messages(
             retry_count=retry_count,
             revision_feedback=revision_feedback.strip(),
         )
+
+    if has_any_entries(blackboard_entities):
+        # 走结构化实体桶路径:按章节关键词挑桶
+        relevant_buckets = _pick_buckets_for_chapter(chapter)
+        bb_section = render_buckets_for_prompt(
+            blackboard_entities,
+            bucket_filter=relevant_buckets,
+            per_bucket_char_limit=3000,
+        )
+        context_block = (
+            f"## 上下文(从实体黑板按本章选出的相关条目)\n\n{bb_section}"
+        )
+    else:
+        # 回退:实体黑板未生成 / 为空 → 老 markdown 截断输入
+        context_block = (
+            f"## 上下文(技术需求摘要)\n{_excerpt(tech_spec_md, 4000)}\n\n"
+            f"## 上下文(打分规则摘要)\n{_excerpt(scoring_md, 2000)}"
+        )
+
+    user_content = (
+        f"请撰写以下章节的完整 Markdown 正文。\n\n"
+        f"## 章节信息\n"
+        f"- **章节编号(section)**: {chapter.get('section') or '1'}  ← 标题首行必须用 ``## {chapter.get('section') or '1'} {chapter.get('title', '(未命名章节)')}``\n"
+        f"- **章节标题**: {chapter.get('title', '(未命名章节)')}\n"
+        f"- **章节 ID**: {chapter.get('id', 'ch_unknown')}\n"
+        f"- **要点摘要**: {chapter.get('summary', '')}\n"
+        f"- **目标页数**: {target_pages} 页\n"
+        f"- **目标字数**: {target_pages * 800} 字以上\n\n"
+        f"### 必须覆盖的关键点\n\n"
+        f"{_bullet_list(chapter.get('key_points') or [])}\n\n"
+        f"### 对应的打分项\n\n"
+        f"{_bullet_list(chapter.get('matched_scoring_items') or [])}\n\n"
+        f"{context_block}\n\n"
+        f"{revision_section}\n\n"
+        f"请直接输出本章 Markdown 正文,不要前后缀说明。\n"
+    )
+
     return [
         {"role": "system", "content": LLM2_SYSTEM},
-        {
-            "role": "user",
-            "content": LLM2_USER_TEMPLATE.format(
-                title=chapter.get("title", "(未命名章节)"),
-                chapter_id=chapter.get("id", "ch_unknown"),
-                section=chapter.get("section") or "1",
-                summary=chapter.get("summary", ""),
-                target_pages=target_pages,
-                target_chars=target_pages * 800,
-                key_points_block=_bullet_list(chapter.get("key_points") or []),
-                scoring_items_block=_bullet_list(chapter.get("matched_scoring_items") or []),
-                tech_spec_excerpt=_excerpt(tech_spec_md, 4000),
-                scoring_excerpt=_excerpt(scoring_md, 2000),
-                revision_section=revision_section,
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]

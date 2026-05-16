@@ -831,6 +831,30 @@ async def get_material_understanding(
     return {"project_id": project_id, "material_understanding": payload}
 
 
+# ========== /blackboard-entities (Phase 1C, 2026-05-16) ==========
+
+
+@router.get("/{project_id}/blackboard-entities")
+async def get_blackboard_entities(
+    project_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_user)],
+) -> dict[str, Any]:
+    """读 ``Project.blackboard_entities`` 10 桶 JSON。
+
+    数据源:``categorize_blackboard`` 节点写入(material_understanding 用户
+    pass/skip 后才跑)。NULL 时返 404 让前端知道还没就绪。
+    """
+    project = await _get_project_or_404(db, project_id)
+    payload = getattr(project, "blackboard_entities", None)
+    if not payload:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"blackboard_entities 暂未就绪 (project status={project.status})",
+        )
+    return {"project_id": project_id, "blackboard_entities": payload}
+
+
 class MaterialUnderstandingDecisionRequest(BaseModel):
     """``POST /material-understanding/decision`` 请求体。
 

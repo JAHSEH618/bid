@@ -106,6 +106,9 @@ async def run(state: WorkflowState) -> dict[str, str]:
         scoring_md=state.get("scoring_md", ""),
         template_md=state.get("template_md", ""),
         revision_feedback=revision_feedback,
+        # Phase 1B:优先用结构化实体桶;为空时 build_messages 内部回退到
+        # markdown 截断,行为与 Phase 1A 之前一致。
+        blackboard_entities=state.get("blackboard_entities"),
     )
 
     await publish_event(project_id, "outline_started")

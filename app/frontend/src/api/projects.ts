@@ -62,6 +62,42 @@ export function useProjectOutline(projectId: number | null) {
   })
 }
 
+// Phase 1C (2026-05-16):实体黑板 10 桶 JSON。404 = categorize_blackboard
+// 还没跑或失败,前端展示「等 LLM 拆桶完成」占位。轮询逻辑:项目在
+// extracting / outlining / queued 这几个还没看到桶的阶段每 3s 轮询,
+// 有 payload 就停。
+interface BlackboardEntitiesResponseDTO {
+  project_id: number
+  blackboard_entities: Record<string, BlackboardEntryDTO[]>
+}
+export interface BlackboardEntryDTO {
+  tags: string[]
+  content: string
+  source_doc?: string
+  section?: string
+}
+export function useBlackboardEntities(projectId: number | null) {
+  return useQuery({
+    queryKey: ['projects', projectId, 'blackboard-entities'],
+    queryFn: () =>
+      apiFetch<BlackboardEntitiesResponseDTO>(
+        `/api/projects/${projectId}/blackboard-entities`,
+      ),
+    enabled: projectId != null,
+    retry: false, // 404 是预期态(还没生成),不做指数退避
+    refetchInterval: (q) => {
+      if (q.state.data) return false
+      const err = q.state.error
+      if (!err) return false
+      const msg = err instanceof Error ? err.message : String(err)
+      // 只在「暂未就绪」的 404 上继续轮询;其它错(401/403/500)停
+      return msg.includes('404') || msg.includes('暂未就绪')
+        ? 3_000
+        : false
+    },
+  })
+}
+
 export interface CreateProjectPayload {
   name: string
   description?: string | null
