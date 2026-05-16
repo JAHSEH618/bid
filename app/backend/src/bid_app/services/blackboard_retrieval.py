@@ -198,3 +198,117 @@ class BlackboardIndex:
 def build_index(entities: dict[str, Any] | None) -> BlackboardIndex:
     """便捷构造函数。"""
     return BlackboardIndex(entities)
+
+
+# Phase 2B (2026-05-16):LiteLLM tool 定义 + handler 工厂。LLM-1 outline
+# 节点把这个工具注入到 acompletion 调用,模型据此自主检索实体黑板。
+# entity_types 枚举与 categorize_blackboard.ENTITY_BUCKETS 一致;改这里要回头同步。
+
+SEARCH_BLACKBOARD_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "search_blackboard",
+        "description": (
+            "从招标项目的实体黑板里检索相关条目。当你需要查找招标方信息、"
+            "评分细则、技术要求、人员资质、风险条款等具体内容时主动调用。"
+            "返回 list,每条带 bucket / content / source_doc / section。"
+            "推荐用法:针对你正在设计的章节主题或某一类评分项,先调一次拿到"
+            "相关材料原文,再据此组织目录或正文。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "entity_types": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "project_info",
+                            "company_info",
+                            "personnel_info",
+                            "scoring_rules",
+                            "technical_requirements",
+                            "qualification_requirements",
+                            "timeline_constraints",
+                            "commercial_terms",
+                            "compliance_constraints",
+                            "risk_signals",
+                        ],
+                    },
+                    "description": (
+                        "要检索的实体桶类型(可多选)。每桶含义:project_info=项目背景, "
+                        "company_info=公司组织, personnel_info=人员资质, scoring_rules=评分细则, "
+                        "technical_requirements=技术要求/SLA, qualification_requirements=投标资质, "
+                        "timeline_constraints=工期, commercial_terms=商务条款, "
+                        "compliance_constraints=法律合规, risk_signals=风险信号。"
+                    ),
+                },
+                "query": {
+                    "type": "string",
+                    "description": "关键字查询(支持中英文混合);留空则按 entity_types 返桶内前 top_k 条。",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "返回前 K 条,默认 5,建议不超过 10。",
+                    "default": 5,
+                },
+            },
+            "required": ["entity_types"],
+        },
+    },
+}
+
+
+def make_blackboard_tool_handler(
+    entities: dict[str, Any] | None,
+) -> Any:
+    """生成 ``search_blackboard`` tool 的异步 handler,绑定一份 BlackboardIndex。
+
+    返回 ``async (name, args) -> str``,内部 dispatch tool name 后调
+    ``BlackboardIndex.search`` 返 JSON 字符串(LiteLLM tool result 期望 str)。
+    未知 tool 名 / 错参数 / index 空都返结构化 error JSON,LLM 据此判断改 query。
+    """
+    import json as _json
+
+    index = BlackboardIndex(entities)
+
+    async def handler(name: str, args: dict[str, Any]) -> str:
+        if name != "search_blackboard":
+            return _json.dumps({"error": f"unknown tool: {name}"}, ensure_ascii=False)
+        entity_types = args.get("entity_types")
+        if isinstance(entity_types, str):
+            # 模型偶尔会用字符串而不是数组,容错
+            entity_types = [entity_types]
+        if not isinstance(entity_types, list):
+            return _json.dumps(
+                {"error": "entity_types must be a list of bucket names"},
+                ensure_ascii=False,
+            )
+        query = args.get("query") or ""
+        if not isinstance(query, str):
+            query = str(query)
+        top_k_raw = args.get("top_k", 5)
+        try:
+            top_k = max(1, min(20, int(top_k_raw)))
+        except (TypeError, ValueError):
+            top_k = 5
+        hits = index.search(
+            entity_types=[str(t) for t in entity_types],
+            query=query,
+            top_k=top_k,
+        )
+        # 返最小信息给 LLM,省 token;score 不传(对生成无帮助)
+        slim = [
+            {
+                "bucket": h["bucket"],
+                "content": h["content"],
+                **({"source_doc": h["source_doc"]} if h.get("source_doc") else {}),
+                **({"section": h["section"]} if h.get("section") else {}),
+            }
+            for h in hits
+        ]
+        return _json.dumps(
+            {"hits": slim, "count": len(slim)}, ensure_ascii=False
+        )
+
+    return handler

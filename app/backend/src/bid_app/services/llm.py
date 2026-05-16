@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -447,6 +448,268 @@ async def call_llm_json(
         ) from te
 
     raise LLMRetryFailed(str(last_err))
+
+
+# Phase 2B (2026-05-16):tool calling 版本的 JSON 调用。LLM 可以在最终输
+# 出 JSON 前发起多轮 search_blackboard 工具调用,模型自主决定调什么 / 调
+# 几次。与 ``call_llm_json`` 同一份重试 / 超时 / token 计费骨架,差别只在
+# 内层加 tool loop。
+#
+# 限制:
+# - response_format=json_object 跟 tools 在 DashScope 上不能同时给(模型
+#   收到 tools 时不响应 response_format),所以本路径**不**强制 JSON,
+#   完全依赖 system prompt 引导。最终 content 走 ``json.loads`` + 容错抽取。
+# - 单轮 LLM call 不重试,只整个 round 失败时整体重试。max_tool_rounds
+#   超出时强迫终止:把 conversation 加一条「don't call any more tools,
+#   give the final answer」再问一次,仍 tool_call 就抛 LLMRetryFailed。
+
+ToolHandler = Any  # async callable: (name: str, args: dict) -> str  (JSON-encoded result)
+
+
+async def call_llm_with_tools_json(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    api_key: str,
+    user_id: int | str,
+    project_id: int,
+    tools: list[dict[str, Any]],
+    tool_handler: ToolHandler,
+    max_tool_rounds: int = 6,
+    run_id: int | None = None,
+    timeout_seconds: int | None = None,
+    redaction_ctx: RedactionContext | None = None,
+    **kw: Any,
+) -> tuple[dict[str, Any], StreamResult]:
+    """Tool calling 形式的 JSON 调用。
+
+    流程:
+    1. system / user prompt 进 conversation
+    2. 一轮 acompletion(带 tools);LLM 返 tool_calls → 执行 → tool result 入 conversation → 下一轮
+    3. LLM 返纯 content(无 tool_calls)→ ``json.loads`` 解析,返结果
+    4. round 超过 max_tool_rounds 仍 tool_call → 抛 ``LLMRetryFailed``
+
+    所有 round 的 token 累加后一次性 ``record_token_usage``。
+    """
+    if _FAKE:
+        return await _fake_json(model, messages, project_id)
+
+    if redaction_ctx is None:
+        redaction_ctx = RedactionContext()
+    # 注意:tool result 也可能含原文(虽然 entities 已经是脱敏的),为安全
+    # 起见,每次拼 conversation 时只对原始 messages 脱敏(已经做过),
+    # tool result 由 handler 自己保证不含敏感信息(实体黑板本来就经过
+    # categorize → 我们的 redaction 在 extract 阶段已经完成)。
+    conversation = list(redact_messages(messages, redaction_ctx))
+    total_prompt = 0
+    total_completion = 0
+    timeout = timeout_seconds or 600  # tool calling 多轮,留长
+
+    async def _one_round() -> Any:
+        """单轮 acompletion + 重试(transient 网络错误)。"""
+        backoffs = [int(s) for s in settings.llm_retry_backoff_s.split(",")]
+        last: Exception | None = None
+        for attempt in range(settings.llm_retry_max + 1):
+            try:
+                return await litellm.acompletion(
+                    model=model,
+                    messages=conversation,
+                    api_key=api_key,
+                    tools=tools,
+                    tool_choice="auto",
+                    stream=False,
+                    **kw,
+                )
+            except (
+                RateLimitError,
+                ServiceUnavailableError,
+                APIConnectionError,
+                Timeout,
+            ) as e:
+                last = e
+                log.warning(
+                    "llm_tool_round_retry",
+                    model=model,
+                    attempt=attempt,
+                    error=str(e),
+                )
+                if attempt < settings.llm_retry_max:
+                    await asyncio.sleep(backoffs[attempt])
+                    continue
+                await _write_llm_error(
+                    project_id,
+                    "LLM tool round exhausted",
+                    model=model,
+                    mode="tools",
+                    total_attempts=attempt + 1,
+                    last_error=str(e),
+                )
+                raise LLMRetryFailed(str(e)) from e
+        raise LLMRetryFailed(str(last) if last else "unknown")
+
+    try:
+        async with asyncio.timeout(timeout):
+            for round_idx in range(max_tool_rounds + 2):
+                response = await _one_round()
+                msg = response.choices[0].message
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    total_prompt += int(getattr(usage, "prompt_tokens", 0) or 0)
+                    total_completion += int(
+                        getattr(usage, "completion_tokens", 0) or 0
+                    )
+                tool_calls = getattr(msg, "tool_calls", None) or []
+
+                if not tool_calls:
+                    # —— 最终 content,解析 JSON 返回 ——
+                    content = msg.content or "{}"
+                    await record_token_usage(
+                        user_id=user_id,
+                        project_id=project_id,
+                        run_id=run_id,
+                        model=model,
+                        prompt_tokens=total_prompt,
+                        completion_tokens=total_completion,
+                    )
+                    try:
+                        parsed = json.loads(content)
+                    except json.JSONDecodeError:
+                        # 容错:从混合输出里抽第一个 {...}
+                        m = re.search(r"\{[\s\S]*\}", content)
+                        if not m:
+                            raise LLMRetryFailed(
+                                f"tool-calling final answer not JSON: {content[:200]}"
+                            ) from None
+                        try:
+                            parsed = json.loads(m.group())
+                        except json.JSONDecodeError as je:
+                            raise LLMRetryFailed(
+                                f"tool-calling final json parse: {je}"
+                            ) from je
+                    return parsed, StreamResult(
+                        text=content,
+                        prompt_tokens=total_prompt,
+                        completion_tokens=total_completion,
+                    )
+
+                # —— 仍在 tool 阶段;到 cap 后强制终止 ——
+                if round_idx >= max_tool_rounds:
+                    log.warning(
+                        "llm_tool_loop_force_terminate",
+                        model=model,
+                        max_rounds=max_tool_rounds,
+                    )
+                    conversation.append(
+                        {
+                            "role": "assistant",
+                            "content": msg.content or "",
+                            "tool_calls": [
+                                {
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function.name,
+                                        "arguments": tc.function.arguments,
+                                    },
+                                }
+                                for tc in tool_calls
+                            ],
+                        }
+                    )
+                    # 兜底回 dummy tool result + 系统催「输出最终答案」
+                    for tc in tool_calls:
+                        conversation.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": json.dumps(
+                                    {
+                                        "error": (
+                                            "max tool rounds reached, "
+                                            "no more tool calls allowed"
+                                        )
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        )
+                    conversation.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "已达到工具调用上限,请基于已收集的信息直接"
+                                "输出最终 JSON 答案,不要再调用任何工具。"
+                            ),
+                        }
+                    )
+                    continue
+
+                # —— 正常路径:把 tool_calls + tool result 入 conversation ——
+                conversation.append(
+                    {
+                        "role": "assistant",
+                        "content": msg.content or "",
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in tool_calls
+                        ],
+                    }
+                )
+                for tc in tool_calls:
+                    fn_name = tc.function.name
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    try:
+                        result_str = await tool_handler(fn_name, args)
+                    except Exception as e:
+                        log.exception(
+                            "llm_tool_handler_failed",
+                            tool=fn_name,
+                            args=args,
+                        )
+                        result_str = json.dumps(
+                            {"error": f"tool handler crashed: {e}"},
+                            ensure_ascii=False,
+                        )
+                    if not isinstance(result_str, str):
+                        result_str = json.dumps(result_str, ensure_ascii=False)
+                    log.info(
+                        "llm_tool_called",
+                        round=round_idx,
+                        tool=fn_name,
+                        args=args,
+                        result_chars=len(result_str),
+                    )
+                    conversation.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result_str,
+                        }
+                    )
+                # 进入下一轮
+    except TimeoutError as te:
+        await _write_llm_error(
+            project_id,
+            "LLM tool loop total timeout",
+            model=model,
+            mode="tools",
+            timeout_seconds=timeout,
+        )
+        raise LLMTimeoutExceeded(
+            f"LLM tool loop exceeded {timeout}s total timeout"
+        ) from te
+
+    raise LLMRetryFailed("tool loop exhausted without final answer")
 
 
 async def _fake_stream(

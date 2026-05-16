@@ -11,7 +11,11 @@ from sqlalchemy import select
 
 from ...config import settings
 from ...db import session_factory
-from ...services.llm import call_llm_json
+from ...services.blackboard_retrieval import (
+    SEARCH_BLACKBOARD_TOOL,
+    make_blackboard_tool_handler,
+)
+from ...services.llm import call_llm_json, call_llm_with_tools_json
 from ..prompts.outline_prompt import build_messages
 from ..resolve import resolve_models
 from ..state import WorkflowState
@@ -101,31 +105,65 @@ async def run(state: WorkflowState) -> dict[str, str]:
     # 清空(返回 ""),避免下次启动残留。
     revision_feedback = state.get("_outline_revision_feedback") or ""
 
+    blackboard_entities = state.get("blackboard_entities")
+    # Phase 2B (2026-05-16):tool calling 路径要求实体黑板已就绪 +
+    # settings 开关打开。LLM 通过 search_blackboard 自主检索黑板,而不是
+    # build_messages 把 50k 桶 dump 全塞进 prompt。
+    use_tool_calling = (
+        settings.llm_tool_calling_enabled
+        and bool(blackboard_entities)
+        and any(blackboard_entities.values())  # type: ignore[union-attr]
+    )
+
     messages = build_messages(
         tech_spec_md=state.get("tech_spec_md", ""),
         scoring_md=state.get("scoring_md", ""),
         template_md=state.get("template_md", ""),
         revision_feedback=revision_feedback,
-        # Phase 1B:优先用结构化实体桶;为空时 build_messages 内部回退到
-        # markdown 截断,行为与 Phase 1A 之前一致。
-        blackboard_entities=state.get("blackboard_entities"),
+        blackboard_entities=blackboard_entities,
+        tool_calling_enabled=use_tool_calling,
     )
 
     await publish_event(project_id, "outline_started")
     models = await resolve_models(project_id)
-    _parsed, sr = await call_llm_json(
-        model=models.outline_model,
-        messages=messages,
-        api_key=api_key,
-        user_id=user_id,
-        project_id=project_id,
-        run_id=run_id,
-        timeout_seconds=settings.llm_outline_timeout_seconds,
-        # 显式给到 16384:prompt 要求 25-50 个叶子 + 每叶 summary/key_points/
-        # matched_scoring_items,JSON 体积容易撞默认 max_tokens (DashScope flash
-        # 档常见 2-4k) 被截断;v4-pro 深目录 4 级展开过 8k 也撞过限,放到 16k。
-        # LiteLLM 会按模型实际上限自动 clamp,不会超过模型能力。
-        max_tokens=16384,
-    )
+
+    if use_tool_calling:
+        log.info(
+            "outline_tool_calling_enabled",
+            project_id=project_id,
+            model=models.outline_model,
+            max_rounds=settings.llm_tool_max_rounds,
+        )
+        tool_handler = make_blackboard_tool_handler(blackboard_entities)
+        _parsed, sr = await call_llm_with_tools_json(
+            model=models.outline_model,
+            messages=messages,
+            api_key=api_key,
+            user_id=user_id,
+            project_id=project_id,
+            run_id=run_id,
+            tools=[SEARCH_BLACKBOARD_TOOL],
+            tool_handler=tool_handler,
+            max_tool_rounds=settings.llm_tool_max_rounds,
+            timeout_seconds=settings.llm_outline_timeout_seconds,
+            # tool calling 不传 response_format(DashScope 二选一);system
+            # prompt 已经强引导 JSON 输出
+            max_tokens=16384,
+        )
+    else:
+        _parsed, sr = await call_llm_json(
+            model=models.outline_model,
+            messages=messages,
+            api_key=api_key,
+            user_id=user_id,
+            project_id=project_id,
+            run_id=run_id,
+            timeout_seconds=settings.llm_outline_timeout_seconds,
+            # 显式给到 16384:prompt 要求 25-50 个叶子 + 每叶 summary/key_points/
+            # matched_scoring_items,JSON 体积容易撞默认 max_tokens (DashScope flash
+            # 档常见 2-4k) 被截断;v4-pro 深目录 4 级展开过 8k 也撞过限,放到 16k。
+            # LiteLLM 会按模型实际上限自动 clamp,不会超过模型能力。
+            max_tokens=16384,
+        )
 
     return {"_outline_json": sr.text, "_outline_revision_feedback": ""}

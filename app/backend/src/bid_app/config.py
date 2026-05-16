@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     llm_outline_timeout_seconds: int = 600
     llm_retry_max: int = 2
     llm_retry_backoff_s: str = "2,5"
+    # Phase 2B (2026-05-16):tool calling 自主检索黑板。默认开;
+    # 模型 tool calling 行为异常时可在 .env 关掉,降级回 Phase 1B 静态注入。
+    llm_tool_calling_enabled: bool = True
+    # tool 调用最大轮数(防死循环 / 模型疯狂调工具);超出后强制 LLM 给最终答
+    llm_tool_max_rounds: int = 6
     global_rate_limit: str = "100/minute"
     login_fail_max_per_minute: int = 5
     login_lock_seconds: int = 300

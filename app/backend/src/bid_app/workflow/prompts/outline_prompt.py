@@ -136,6 +136,7 @@ def build_messages(
     template_md: str,
     revision_feedback: str = "",
     blackboard_entities: dict[str, Any] | None = None,
+    tool_calling_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     """构造 LLM-1 messages 数组。
 
@@ -147,6 +148,12 @@ def build_messages(
     节点产出的 10 桶 JSON。给到时优先用它(结构化 + 分类好的关键条款),
     比原 ``tech_spec_md[:8000]`` 截断信息密度高。Phase 1A 通常会有产出;
     为空 / None(LLM-0 失败 / 老项目) → 降级回 markdown 截断。
+
+    ⭐ Phase 2B (2026-05-16):``tool_calling_enabled=True`` 时**不**把 10
+    桶 dump 进 user prompt(避免上下文撑爆 + 与 tool 调用结果重复),
+    改为告知 LLM「黑板已分桶,需要时调 search_blackboard 取」。entities
+    本身仍传到 prompt 头部给一份 ``bucket_counts`` 概览,让 LLM 知道有
+    什么可问。要 entities 为空时退到 markdown 截断,不开 tool。
     """
     from .categorize_blackboard import (
         has_any_entries,
@@ -158,9 +165,36 @@ def build_messages(
         REVISION_TEMPLATE.format(revision_feedback=fb) if fb else ""
     )
 
-    if has_any_entries(blackboard_entities):
-        # 全 10 桶都给 LLM-1,模型自己决定哪些重要;每桶截 5k 控总长
-        # (10 桶 × 5k = 50k 字符,远小于 256k context 上限)
+    if tool_calling_enabled and has_any_entries(blackboard_entities):
+        # Tool 路径:只给 bucket_counts 概览 + 引导 LLM 主动检索
+        assert blackboard_entities is not None
+        counts: list[str] = []
+        for bucket in [
+            "project_info", "company_info", "personnel_info",
+            "scoring_rules", "technical_requirements",
+            "qualification_requirements", "timeline_constraints",
+            "commercial_terms", "compliance_constraints", "risk_signals",
+        ]:
+            n = len(blackboard_entities.get(bucket) or [])
+            counts.append(f"- ``{bucket}``: {n} 条")
+        bucket_summary = "\n".join(counts)
+        user_content = (
+            "请为本次投标设计技术方案的**层级目录**。\n\n"
+            "## 招标材料实体黑板(已分桶,共 10 类)\n\n"
+            f"{bucket_summary}\n\n"
+            "你必须**至少调用 `search_blackboard` 工具 2-4 次**,先把"
+            "**评分细则**、**技术要求**、**风险信号** 三类拉出来读完,"
+            "再据此设计目录。需要 confirm 资质 / 人员要求时再调一次。\n\n"
+            "调用建议:\n"
+            "- 第 1 次:`entity_types=[\"scoring_rules\"]`,query 留空,top_k=10\n"
+            "- 第 2 次:`entity_types=[\"technical_requirements\"]`,query 按你想覆盖的子主题写,top_k=8\n"
+            "- 第 3 次:`entity_types=[\"risk_signals\", \"compliance_constraints\"]`,top_k=6\n"
+            "- 视需要再问其它桶\n\n"
+            f"{revision_section}\n\n"
+            + _OUTLINE_SCHEMA_TAIL
+        )
+    elif has_any_entries(blackboard_entities):
+        # Phase 1B 静态注入:全 10 桶 dump
         material_section = render_buckets_for_prompt(
             blackboard_entities, per_bucket_char_limit=5000
         )
@@ -171,7 +205,7 @@ def build_messages(
             + _OUTLINE_SCHEMA_TAIL
         )
     else:
-        # 实体黑板没生成 / 为空 → 降级:走老的 markdown 截断输入
+        # 回退:实体黑板没生成 / 为空 → 老 markdown 截断输入
         user_content = LLM1_USER_TEMPLATE.format(
             tech_spec_excerpt=_excerpt(tech_spec_md, 8000),
             scoring_excerpt=_excerpt(scoring_md, 4000),
