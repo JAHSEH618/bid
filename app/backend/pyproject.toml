@@ -37,6 +37,10 @@ dependencies = [
   # PR-M7-3 / D2:HTML 黑板 — markdown → HTML 转换 + bleach 白名单清洗。
   "markdown>=3.7,<4",
   "bleach>=6.1,<7",
+  # Phase 2A (2026-05-16):实体黑板 BM25 检索 + 中文 jieba 分词。
+  # rank_bm25 纯 Python 无 C 扩展;jieba 拉 ~5MB 字典,启动时一次性加载。
+  "rank-bm25>=0.2.2,<0.3",
+  "jieba>=0.42,<0.43",
 ]
 
 [project.optional-dependencies]
@@ -92,8 +96,17 @@ plugins = ["pydantic.mypy"]
 # langgraph 0.6 / langgraph-checkpoint-postgres 2.0 的 stub 偶尔与运行时
 # 不符(AsyncPostgresSaver.conn 期待 dict_row 泛型但 pool 推 tuple),为防止
 # 未来 untype 的 internal 模块漏出 missing-import,显式宽松。
+# jieba / rank_bm25 (Phase 2A) 上游无 py.typed,运行时调用都是简单 list/float
+# 没有 type ambiguity,豁免 missing-import 即可。
 [[tool.mypy.overrides]]
-module = ["langgraph.*", "langgraph_checkpoint_postgres.*"]
+module = [
+    "langgraph.*",
+    "langgraph_checkpoint_postgres.*",
+    "jieba",
+    "jieba.*",
+    "rank_bm25",
+    "rank_bm25.*",
+]
 ignore_missing_imports = true
 
 # redis-py 5.x async client 的 stub 设计是 ``Awaitable[X] | X`` union(同步/集群
