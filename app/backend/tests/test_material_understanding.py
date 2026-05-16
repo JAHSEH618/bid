@@ -35,14 +35,16 @@ def test_prompt_empty_blackboard_fallback() -> None:
     assert "(空)" in user
 
 
-def test_route_pass_goes_to_outline() -> None:
+def test_route_pass_goes_to_categorize() -> None:
+    """Phase 1A:pass 后走 categorize_blackboard,再到 generate_outline。"""
     state = {"_material_review_decision": "pass"}
-    assert _route_after_material_review(state) == "generate_outline"
+    assert _route_after_material_review(state) == "categorize_blackboard"
 
 
-def test_route_skip_goes_to_outline() -> None:
+def test_route_skip_goes_to_categorize() -> None:
+    """skip 也跑 categorize_blackboard(用户选择跳过材料理解审核但仍要拆桶)。"""
     state = {"_material_review_decision": "skip"}
-    assert _route_after_material_review(state) == "generate_outline"
+    assert _route_after_material_review(state) == "categorize_blackboard"
 
 
 def test_route_revise_loops_back() -> None:
@@ -52,7 +54,7 @@ def test_route_revise_loops_back() -> None:
     )
 
 
-def test_route_default_is_outline() -> None:
-    """无 _material_review_decision (老 checkpoint) 默认走 outline。"""
+def test_route_default_is_categorize() -> None:
+    """无 _material_review_decision (老 checkpoint) 默认走 pass 路径,即 categorize。"""
     state: dict[str, object] = {}
-    assert _route_after_material_review(state) == "generate_outline"
+    assert _route_after_material_review(state) == "categorize_blackboard"

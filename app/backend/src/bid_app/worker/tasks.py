@@ -47,7 +47,7 @@ from ..workflow.state import (
     CURRENT_WORKFLOW_SCHEMA_VERSION,
     WorkflowSchemaMismatch,
     WorkflowState,
-    ensure_v2_state,
+    ensure_current_state,
 )
 
 
@@ -186,6 +186,9 @@ async def build_initial_state(project_id: int, run_id: int) -> WorkflowState:
         "retry_count": 0,
         "finalized_chapters": [],
         "revision_feedback": "",
+        # Phase 1A:实体桶字段在 schema v3 起算 state 必填,初始为 None,
+        # 由 categorize_blackboard 节点填充。
+        "blackboard_entities": None,
     }
 
 
@@ -443,7 +446,7 @@ async def start_workflow_task(
                 initial, config, stream_mode="values"
             ):
                 # ⭐ PR-M7-1:每个 state snapshot 校验 schema_version
-                ensure_v2_state(state)
+                ensure_current_state(state)
                 if lost_event.is_set() or not await ensure_project_slot(
                     project_id, token
                 ):
@@ -549,7 +552,7 @@ async def resume_review_task(
                 stream_mode="values",
             ):
                 # ⭐ PR-M7-1:resume 路径上也要校验 v1 → v2 不兼容 checkpoint
-                ensure_v2_state(state)
+                ensure_current_state(state)
                 if lost_event.is_set() or not await ensure_project_slot(
                     project_id, token
                 ):
@@ -735,7 +738,7 @@ async def retry_failed_chapter_task(
             await graph.aupdate_state(config, {"retry_count": 0})
             async for state in graph.astream(None, config, stream_mode="values"):
                 # ⭐ PR-M7-1:retry 也走 checkpoint resume,同样校验 schema
-                ensure_v2_state(state)
+                ensure_current_state(state)
                 if lost_event.is_set() or not await ensure_project_slot(
                     project_id, token
                 ):

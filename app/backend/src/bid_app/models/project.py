@@ -14,7 +14,9 @@ disk + DB 双写;备份脚本同步覆盖该目录。
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Index, LargeBinary, String, Text
+from typing import Any
+
+from sqlalchemy import JSON, ForeignKey, Index, LargeBinary, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, TimestampMixin
@@ -55,3 +57,10 @@ class Project(Base, TimestampMixin):
 
     # ⭐ PR-M7-3:HTML 黑板的磁盘路径
     blackboard_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ⭐ Phase 1A (2026-05-16):结构化实体桶 JSON,categorize_blackboard
+    # 节点写入,LLM-1 / LLM-2 从这里读结构化上下文(取代直接吃 markdown 截断)。
+    # 形状 {bucket_name: [{tags, content, source_doc?, section?}, ...]}。
+    blackboard_entities: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )

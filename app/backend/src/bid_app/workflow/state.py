@@ -6,17 +6,22 @@
 ⭐ PR-M7-1:``schema_version`` 是 v2 graph 拒绝 v1 checkpoint 的版本闸门。
 新启动的 workflow 由 ``build_initial_state`` 写入 ``schema_version=2``;
 老 checkpoint 反序列化后没有这个 key,worker / 关键节点入口调用
-``ensure_v2_state`` 校验,不匹配抛 ``WorkflowSchemaMismatch``。
-``flush_running_workflows`` CLI 在 v2 上线时清退所有遗留的 v1 项目。
+``ensure_current_state`` 校验,不匹配抛 ``WorkflowSchemaMismatch``。
+``flush_running_workflows`` CLI 在 schema bump 上线时清退所有遗留项目。
 """
 
 from __future__ import annotations
 
 from typing import Any, TypedDict
 
-CURRENT_WORKFLOW_SCHEMA_VERSION = 2
+CURRENT_WORKFLOW_SCHEMA_VERSION = 3
 """每次 WorkflowState 不向后兼容地变更字段时,**必须**bump 本常量并实现
-对应迁移 / flush 流程(D1)。"""
+对应迁移 / flush 流程(D1)。
+
+v2 → v3 (2026-05-16, Phase 1A):新增 ``blackboard_entities`` 字段,
+``categorize_blackboard`` 节点写入,LLM-1 / LLM-2 prompt 从结构化桶取
+上下文(取代字符截断)。老 v2 checkpoint 没有此字段,resume 会被拒。
+上线前必须跑 ``flush_running_workflows`` CLI 清退在跑项目。"""
 
 
 class WorkflowSchemaMismatch(Exception):
@@ -103,12 +108,17 @@ class WorkflowState(TypedDict, total=False):
     outline_json: list[OutlineNode] | None
     # PR-M9-1:用户勾选要生成的章节 id 列表;空 / None → 全选
     selected_chapter_ids: list[str] | None
+    # Phase 1A (2026-05-16):categorize_blackboard 节点写入的 10 桶实体 JSON。
+    # 形状 ``{bucket_name: [{tags, content, source_doc?, section?}, ...]}``。
+    # LLM-1 outline / LLM-2 chapter prompt 从这里取结构化上下文。
+    # None 表示尚未跑 categorize_blackboard(老 v2 项目 / 节点失败兜底)。
+    blackboard_entities: dict[str, Any] | None
 
     # === 输出 ===
     final_proposal: str | None
 
 
-def ensure_v2_state(state: WorkflowState) -> None:
+def ensure_current_state(state: WorkflowState) -> None:
     """在 worker / 关键节点入口校验 checkpoint 与当前 graph 兼容。
 
     校验失败抛 ``WorkflowSchemaMismatch``,worker 顶层捕获后把项目标

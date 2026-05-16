@@ -38,6 +38,7 @@ from langgraph.graph import END, StateGraph
 
 from .nodes import (
     assemble,
+    categorize_blackboard,
     chapter_generate_gate,
     extract_documents,
     gen_visuals,
@@ -79,15 +80,16 @@ def _route_after_pick(state: WorkflowState) -> str:
 
 
 def _route_after_material_review(state: WorkflowState) -> str:
-    """PR-M8-1:material_understanding_review 之后的分支。
+    """PR-M8-1 + Phase 1A:material_understanding_review 之后的分支。
 
     - revise → 回到 material_understanding 节点重新跑 LLM-0 (revision_feedback 已写)
-    - pass / skip → 进 generate_outline
+    - pass / skip → 进 categorize_blackboard 拆 10 桶,再 generate_outline
+      (用户在材料理解页 revise 时**不跑** categorize,节省 LLM 调用)
     """
     decision = state.get("_material_review_decision") or "pass"
     if decision == "revise":
         return "material_understanding"
-    return "generate_outline"
+    return "categorize_blackboard"
 
 
 def _route_after_outline_review(state: WorkflowState) -> str:
@@ -120,6 +122,7 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     g.add_node(
         "material_understanding_review", material_understanding_review.run
     )
+    g.add_node("categorize_blackboard", categorize_blackboard.run)
     g.add_node("generate_outline", generate_outline.run)
     g.add_node("parse_outline", parse_outline.run)
     g.add_node("outline_review", outline_review.run)  # ⭐ P4 interrupt(D-K)
@@ -135,15 +138,18 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     g.set_entry_point("extract_documents")
     g.add_edge("extract_documents", "material_understanding")
     g.add_edge("material_understanding", "material_understanding_review")
-    # PR-M8-1:material_review 之后按 decision 分支
+    # PR-M8-1 + Phase 1A:material_review 之后按 decision 分支。
+    # pass / skip 走 categorize_blackboard;revise 回 material_understanding
+    # (重读材料理解时不重跑实体桶,节省 LLM 调用)。
     g.add_conditional_edges(
         "material_understanding_review",
         _route_after_material_review,
         {
             "material_understanding": "material_understanding",
-            "generate_outline": "generate_outline",
+            "categorize_blackboard": "categorize_blackboard",
         },
     )
+    g.add_edge("categorize_blackboard", "generate_outline")
     g.add_edge("generate_outline", "parse_outline")
     g.add_edge("parse_outline", "outline_review")
     # textarea TOC + revise:outline_review 之后按 decision 分支
