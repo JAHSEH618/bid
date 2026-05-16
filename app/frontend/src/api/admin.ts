@@ -4,12 +4,12 @@
 //   - GET    /api/admin/users              list[AdminUserResponse]
 //   - POST   /api/admin/users              {username, password, role} → AdminUserResponse(201)
 //   - PATCH  /api/admin/users/{id}         {role?, is_active?, reset_password?} → AdminUserResponse
-//   - DELETE /api/admin/users/{id}         → {ok}
 //   - GET    /api/admin/token-usage?period=month|all → AdminTokenUsageSummary
 //
 // 注意:
 //   - 改密 / 禁用 / 改角色都走同一个 PATCH(不再是分离端点)
-//   - 删除是 DELETE(不是 PUT /disable;DELETE 端点也存在)
+//   - **不提供删除账号端点**(FR-6.5):账号删除会让 Project.created_by /
+//     ReviewEvent / TokenUsage 归属断链。"禁用"走 PATCH is_active=false。
 //   - 全局 token usage 路径是 /token-usage(不是 /usage)
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/apiFetch'
@@ -62,19 +62,6 @@ export function useUpdateAdminUser() {
       apiFetch<UserDTO>(`/api/admin/users/${userId}`, {
         method: 'PATCH',
         body: JSON.stringify(body),
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['admin', 'users'] })
-    },
-  })
-}
-
-export function useDeleteAdminUser() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (userId: number) =>
-      apiFetch<{ ok: boolean }>(`/api/admin/users/${userId}`, {
-        method: 'DELETE',
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['admin', 'users'] })

@@ -62,10 +62,9 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 log = structlog.get_logger()
 
 # 上传白名单 + 单文件大小上限(FR-1.4)
-# ⚠️ .pdf:markitdown 自带 pdfminer 能抽文字型 PDF;扫描型 / 加密型 PDF 会
-# 抽不出来 → ``DocumentExtractError`` → 写到 ``Document.extract_error``,前端
-# 角标提示用户重传清晰版本(不会让流水线静默崩溃)。
-_ALLOWED_UPLOAD_EXT = {".docx", ".doc", ".md", ".markdown", ".txt", ".pdf"}
+# FR-2.4:**PDF 一律拒绝**。如需 PDF 走 OCR 链路,不在本期范围;前端
+# accept 同步收紧,但绕过前端直传时后端必须自己把关 → 415。
+_ALLOWED_UPLOAD_EXT = {".docx", ".doc", ".md", ".markdown", ".txt"}
 _VALID_DOC_KINDS = {"tech_spec", "scoring", "template"}
 
 
@@ -77,6 +76,16 @@ async def _get_project_or_404(db: AsyncSession, project_id: int) -> Project:
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found")
     return project
+
+
+def _require_owner_or_admin(project: Project, user: User) -> None:
+    """FR-1.4 / FR-1.5:init 阶段的写操作(上传 / 删除材料 / 启动工作流)
+    都收紧到 creator / admin。审核动作走另一条路径(团队共享池)。"""
+    if project.created_by != user.id and user.role != "admin":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "只有项目创建者或管理员可执行该操作",
+        )
 
 
 async def _get_active_run(db: AsyncSession, project_id: int) -> Run:
@@ -203,8 +212,7 @@ async def delete_project(
     路径主要是 DB-side 字段清空 + log 信号(future event listener 兜底用)。
     """
     project = await _get_project_or_404(db, project_id)
-    if project.created_by != user.id and user.role != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "only creator or admin can delete")
+    _require_owner_or_admin(project, user)
 
     # 禁止删除运行 / 等待用户输入中的项目:worker 可能正在写 checkpoint /
     # proposal / DOCX,直接 rmtree 会出竞态。让用户先走到终态(done /
@@ -341,6 +349,10 @@ async def upload_document(
             f"project status '{project.status}' 已启动工作流,材料已冻结;如需更换请新建项目",
         )
 
+    # 只有创建者 / admin 能改材料(防止他人改别人的 init 项目然后用对方
+    # API Key 启动)
+    _require_owner_or_admin(project, user)
+
     if kind is not None and kind not in _VALID_DOC_KINDS:
         # ⭐ PR-M7-2:kind 仍允许传入(老 UI 兼容),但只校验取值集合
         raise HTTPException(
@@ -351,6 +363,13 @@ async def upload_document(
     if not file.filename:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "filename required")
     suffix = Path(file.filename).suffix.lower()
+    if suffix == ".pdf":
+        # FR-2.4:本期 PDF 一律不支持(扫描型需 OCR,文字型表格解析不稳)。
+        # 给一条明确文案,不要让用户以为是"暂时性故障"。
+        raise HTTPException(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            "PDF 暂不支持,请上传 DOCX/DOC/MD/TXT 格式",
+        )
     if suffix not in _ALLOWED_UPLOAD_EXT:
         raise HTTPException(
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -521,6 +540,7 @@ async def delete_document(
             status.HTTP_409_CONFLICT,
             f"project status '{project.status}' 已启动工作流,材料已冻结;如需更换请新建项目",
         )
+    _require_owner_or_admin(project, user)
 
     doc = (
         await db.execute(
@@ -575,6 +595,11 @@ async def start_workflow(
             f"project status is '{project.status}', /start only allowed when init",
         )
 
+    # 只有创建者 / admin 能启动该项目 — 否则任意登录用户能用自己的
+    # API Key 跑别人的项目(FR-1.5 / FR-7.5 真快照机制下,启动者的
+    # API Key 会被永久绑死到该项目)
+    _require_owner_or_admin(project, user)
+
     # 防 race:文档抽取 (markitdown / LibreOffice 转 .doc) 是后台 arq 任务,/start
     # 不等抽取就跑会导致 LLM-1 拿到旧 / 空 ``tech_spec_md``,产出残缺目录。
     # extract_for_project 跳过 markdown_path=NULL 的行,被覆盖逻辑也救不回来。
@@ -595,6 +620,40 @@ async def start_workflow(
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"以下文档仍在抽取中,请等抽取完成再点开始生成:{names}",
+        )
+
+    # ⭐ 必传文档校验:绕过前端直接 /start 时,后端必须自己把关。FR-2.1 /
+    # P3 要求 tech_spec + scoring 各 ≥1 份且抽取成功;extract_error 文档
+    # 先要求用户删除或重传(否则 LLM 拿到空材料生成空提纲)。
+    all_docs = (
+        (await db.execute(select(Document).where(Document.project_id == project_id)))
+        .scalars()
+        .all()
+    )
+    failed_docs = [d for d in all_docs if d.extract_error]
+    if failed_docs:
+        names = ", ".join(d.original_filename or f"#{d.id}" for d in failed_docs)
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"以下文档抽取失败,请删除或重传后再启动:{names}",
+        )
+
+    def _has_done_for(kind: str) -> bool:
+        for d in all_docs:
+            matches = d.kind == kind or (d.tags and kind in d.tags)
+            if matches and (d.markdown_path or d.structured_html):
+                return True
+        return False
+
+    missing = [
+        label
+        for kind, label in (("tech_spec", "技术需求书"), ("scoring", "评分细则"))
+        if not _has_done_for(kind)
+    ]
+    if missing:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"启动前必须上传:{','.join(missing)}",
         )
 
     api_key = (

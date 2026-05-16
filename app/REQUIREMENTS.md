@@ -134,7 +134,7 @@
 
 ### FR-2 文档处理
 
-- FR-2.1 接受 **DOCX / DOC / MD / TXT** 四种格式上传,单文件 ≤ 50MB。
+- FR-2.1 接受 **DOCX / DOC / MD / TXT** 四种格式上传,单文件 ≤ 200MB,单项目累计 ≤ 500MB(PR-M7-2 / D5:从 v1 的 50MB/file + 单用户日 500MB 改为 200MB/file + 项目级 500MB —— 一份招标书+附件就常 80-150MB,旧 50MB 上限频繁挡用户;改为项目级配额也避免"开多个项目绕过单用户日额度"的口子)。
 - FR-2.2 用 `markitdown` 库统一抽取为 markdown 文本,落盘存项目目录。
 - FR-2.3 抽取失败的文档允许用户重传。
 - FR-2.4 **PDF 不支持**(D2):
@@ -292,7 +292,7 @@
 - JWT secret 通过环境变量注入。
 - HttpOnly + SameSite=Strict cookie,防 XSS 窃取 token。
 - 登录端点限流(FR-6.7);全局每 IP 100 req/min。
-- 单文件上传 ≤ 50MB;单用户每日总上传 ≤ 500MB。
+- 单文件上传 ≤ 200MB;单项目累计上传 ≤ 500MB(PR-M7-2 / D5)。
 - HTTP 头加 `X-Content-Type-Options: nosniff` / `X-Frame-Options: DENY`。
 - **HTTP-only 内网部署的明文密码风险**(D7):**已用户接受**。理论威胁是同网段嗅探,实际威胁低(公司内网信任边界 + 密码强制首次改 + bcrypt 落库)。如未来上公网必须切 HTTPS。
 
@@ -380,7 +380,7 @@
 | **User** | `id` / `username` / `password_hash` / `role`(`user`/`admin`)/ `is_active` / `must_change_password` / `created_at` / `last_login_at` | 自建账号,bcrypt 哈希;新建账号(含默认 admin)`must_change_password=true` |
 | **ApiKey** | `id` / `user_id`(unique) / `provider`(=`dashscope`)/ `encrypted_key`(AES-GCM)/ `last_validated_at` / `created_at` / `updated_at` | 1 用户 1 把 Key,加密落库,前端不可读 |
 | **Project** | `id` / `name` / `description` / `status` / `created_by` / `api_key_owner`(启动者 user_id,审计用) / `encrypted_api_key_snapshot`(启动时拷贝的 AES-GCM 密文,运行时解密 LLM 调用用) / `created_at` / `dir_path` | 团队共享池,任何登录用户可见;FR-7.5 双重快照 |
-| **Document** | `id` / `project_id` / `kind`(`tech_spec`/`scoring`/`template`)/ `original_filename` / `markdown_path` / `file_size`(字节) / `extract_error`(可空) / `created_at` | 上传的原始文件 + 抽取后 md;文件类型限于 docx/doc/md/txt;`file_size` 用于日上传配额聚合(NFR-4 单用户日 500MB) |
+| **Document** | `id` / `project_id` / `kind`(`tech_spec`/`scoring`/`template`,v2 可空)/ `tags`(自定义分类)/ `original_filename` / `stored_path`(原始文件)/ `markdown_path`(抽取后 md)/ `file_size`(字节)/ `byte_size`(精确字节,配额聚合用)/ `extract_error`(可空)/ `created_at` | 上传的原始文件 + 抽取后 md;文件类型限于 docx/doc/md/txt(PDF 不支持);`byte_size` 用于项目级配额聚合(NFR-4 单项目累计 ≤ 500MB) |
 | **Run** | `id` / `project_id` / `langgraph_thread_id` / `started_at` / `finished_at` / `status` | 一次完整工作流执行 |
 | **Chapter** | `id` / `run_id` / `index` / `title` / `summary` / `key_points` / `target_pages` / `final_text` / `status`(`pending`/`generating`/`awaiting_review`/`reviewing`/`approved`/`skipped`/**`failed`**/`retrying`)/ `processing_started_at`(实现层) | 提纲解析后落库;`failed` 见 FR-4.7;`reviewing`/`retrying` 见 FR-4.7 中间态说明;`processing_started_at` 仅实现层 cleanup 用,不暴露 API |
 | **ChapterVersion** | `id` / `chapter_id` / `version` / `body_markdown` / `feedback_in` / `decision` / `abandoned` / `created_at` | 每次重写一条记录,保留历史;`abandoned`见 FR-4.7 retry_failed 语义 |

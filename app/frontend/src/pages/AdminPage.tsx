@@ -36,7 +36,6 @@ import {
   useAdminTokenUsage,
   useAdminUsers,
   useCreateAdminUser,
-  useDeleteAdminUser,
   useUpdateAdminUser,
 } from '@/api/admin'
 import type { UsagePeriod } from '@/api/me'
@@ -53,7 +52,6 @@ export function AdminPage() {
   const users = useAdminUsers()
   const create = useCreateAdminUser()
   const update = useUpdateAdminUser()
-  const remove = useDeleteAdminUser()
   const { toast } = useToast()
   const [open, setOpen] = useState(false)
   const [resetTarget, setResetTarget] = useState<ResetPwdTarget | null>(null)
@@ -148,26 +146,26 @@ export function AdminPage() {
   }
 
   const handleDelete = async (userId: number, username: string) => {
+    // FR-6.5:不删账号(保留历史归属);改成"禁用"语义,走 PATCH is_active=false
     const ok = await confirmDialog({
-      title: `永久删除 ${username}?`,
+      title: `禁用 ${username}?`,
       description: (
         <span>
-          将连带 API Key 与 token 消费记录一起删除,
-          <strong className="text-destructive">不可恢复</strong>。
-          注意:如该用户名下有项目会失败
+          禁用后该用户将无法登录。历史项目、审核记录、token 消费保留。
+          后续可再次启用。
         </span>
       ),
-      confirmText: '删除',
+      confirmText: '禁用',
       destructive: true,
     })
     if (!ok) return
     try {
-      await remove.mutateAsync(userId)
-      toast({ title: '已删除', variant: 'success' })
+      await update.mutateAsync({ userId, body: { is_active: false } })
+      toast({ title: '已禁用', variant: 'success' })
     } catch (err) {
       toast({
-        title: '删除失败',
-        description: readApiError(err, '删除失败'),
+        title: '操作失败',
+        description: readApiError(err, '操作失败'),
         variant: 'destructive',
       })
     }
@@ -363,9 +361,9 @@ export function AdminPage() {
                               variant="ghost"
                               size="iconSm"
                               onClick={() => handleDelete(u.id, u.username)}
-                              disabled={remove.isPending}
-                              aria-label={`删除 ${u.username}`}
-                              title="删除"
+                              disabled={update.isPending || !u.is_active}
+                              aria-label={`禁用 ${u.username}`}
+                              title="禁用"
                               className="text-muted-foreground hover:text-destructive"
                             >
                               <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />

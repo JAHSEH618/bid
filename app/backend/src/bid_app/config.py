@@ -50,8 +50,10 @@ class Settings(BaseSettings):
     max_concurrent_chapter_generations: int = 3
     max_file_size_mb: int = 50
     daily_upload_quota_mb: int = 500
-    # PR-M7-2 / D5:v2 上限。单文件 200MB,项目总和 500MB。
-    # 旧 max_file_size_mb / daily_upload_quota_mb 保留做向后兼容(老 path 已不读)。
+    # PR-M7-2 / D5:实际生效的上限。单文件 200MB,项目累计 500MB
+    # —— v1 用过的 ``max_file_size_mb`` / ``daily_upload_quota_mb``
+    # **已停用**,字段保留仅为旧 .env 不报错;新代码统一读下面两个。
+    # 配额口径变更见 REQUIREMENTS FR-2.1 / NFR-4(D5 决策)。
     max_file_upload_bytes: int = 200 * 1024 * 1024
     max_project_upload_bytes: int = 500 * 1024 * 1024
     single_chapter_timeout_seconds: int = 600

@@ -24,6 +24,7 @@ Dockerfile ``libreoffice-core libreoffice-writer`` 提供;本地 dev 没装
 
 CLI ``run_local`` 走 ``extract_file``,不需要 DB。
 """
+
 from __future__ import annotations
 
 import shutil
@@ -58,8 +59,7 @@ class DocumentExtractError(Exception):
 # postgres JSON 拒 C0 控制字符(0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F),
 # 保留 \t (0x09) / \n (0x0A) / \r (0x0D)。
 _FORBIDDEN_CONTROLS = frozenset(
-    chr(c)
-    for c in (*range(0x00, 0x09), 0x0B, 0x0C, *range(0x0E, 0x20))
+    chr(c) for c in (*range(0x00, 0x09), 0x0B, 0x0C, *range(0x0E, 0x20))
 )
 
 
@@ -123,9 +123,7 @@ def _convert_doc_to_docx(doc_path: Path) -> Path:
 
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace")[:500]
-        raise DocumentExtractError(
-            f"LibreOffice 转换 .doc 失败 (rc={proc.returncode}): {stderr}"
-        )
+        raise DocumentExtractError(f"LibreOffice 转换 .doc 失败 (rc={proc.returncode}): {stderr}")
 
     # LibreOffice 生成 ``<doc_stem>.docx``(同名换扩展)
     docx_path = out_dir / f"{doc_path.stem}.docx"
@@ -153,9 +151,7 @@ def _markitdown_convert(path: Path) -> str:
         if text is None:
             text = getattr(result, "markdown", None)
         if text is None:
-            raise DocumentExtractError(
-                f"markitdown returned empty result for {path.name}"
-            )
+            raise DocumentExtractError(f"markitdown returned empty result for {path.name}")
         return _sanitize_for_json(text)
     except UnsupportedFormatException as e:
         log.warning(
@@ -165,24 +161,19 @@ def _markitdown_convert(path: Path) -> str:
             error=str(e),
         )
         raise DocumentExtractError(
-            f"markitdown 不支持该格式 {path.suffix!r}(可能是扫描 PDF / "
-            f"加密文档 / 损坏文件): {e}"
+            f"markitdown 不支持该格式 {path.suffix!r}(可能是扫描 PDF / 加密文档 / 损坏文件): {e}"
         ) from e
     except FileConversionException as e:
         log.warning("markitdown_file_conversion_failed", path=str(path), error=str(e))
         raise DocumentExtractError(f"markitdown 转换失败:{e}") from e
     except MarkItDownException as e:
         log.warning("markitdown_other_failure", path=str(path), error=str(e))
-        raise DocumentExtractError(
-            f"markitdown 失败:{type(e).__name__}: {e}"
-        ) from e
+        raise DocumentExtractError(f"markitdown 失败:{type(e).__name__}: {e}") from e
     except DocumentExtractError:
         raise
     except Exception as e:
         log.exception("markitdown_extract_unexpected_failure", path=str(path))
-        raise DocumentExtractError(
-            f"抽取失败:{type(e).__name__}: {e}"
-        ) from e
+        raise DocumentExtractError(f"抽取失败:{type(e).__name__}: {e}") from e
 
 
 def extract_file(path: str | Path) -> str:
@@ -201,9 +192,7 @@ def extract_file(path: str | Path) -> str:
         raise FileNotFoundError(f"document not found: {p}")
 
     if p.suffix.lower() in _TEXT_KIND_EXT:
-        return _sanitize_for_json(
-            p.read_text(encoding="utf-8", errors="replace")
-        )
+        return _sanitize_for_json(p.read_text(encoding="utf-8", errors="replace"))
 
     # ⭐ R-9:.doc 老 OLE → 先 LibreOffice 转 .docx 再 markitdown
     if p.suffix.lower() in _LEGACY_DOC_EXT:
@@ -220,10 +209,13 @@ async def extract_for_project(project_id: int) -> dict[str, str]:
     """从 DB ``documents`` 表读 3 类文档(tech_spec / scoring / template)
     返回 ``{tech_spec_md, scoring_md, template_md}``,直接喂给 WorkflowState。
 
-    数据来源:``Document.markdown_path`` 是 ``api/projects.py``
-    上传端点用 markitdown 抽取后落盘的 ``{project_dir}/uploads/{kind}.md`` 路径。
+    数据来源:``Document.markdown_path`` 是 ``api/projects.py`` 上传端点用
+    markitdown 抽取后落盘的 ``{project_dir}/uploads/{kind}_{id}.md`` 路径。
 
-    多份同 kind:取 ``id`` 最大的(最新上传)一份。
+    桶归属规则:文档要么 ``kind == bucket``,要么 tags 列表里包含 bucket
+    字符串(对齐 PR-M7-2 自定义 tags 设计)。**同桶多份按 id ASC 顺序拼接**
+    (UI 写"每个模块可上传多个文件");历史的"只取最新一份"逻辑会让用户
+    上传的第 2、3 份材料对 LLM-1 / LLM-2 不可见。
     R-8 防御:读到的文本走 ``_sanitize_for_json`` 过滤,自愈历史脏数据。
     """
     from sqlalchemy import select
@@ -244,17 +236,25 @@ async def extract_for_project(project_id: int) -> dict[str, str]:
 
     async with session_factory() as s:
         rows = (
-            await s.execute(
-                select(Document)
-                .where(Document.project_id == project_id)
-                .order_by(Document.id.asc())
+            (
+                await s.execute(
+                    select(Document)
+                    .where(Document.project_id == project_id)
+                    .order_by(Document.id.asc())
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
-    # 用 id ASC 遍历,后写覆盖前写,等价于"取最新上传(最大 id)"
+    # id ASC 遍历,把同桶多份按上传时间拼接。新一份用 "\n\n---\n\n" 分隔,
+    # 让下游 LLM 看到清晰的文档边界(而不是把两份材料糊成一段)。
+    buckets: dict[str, list[str]] = {k: [] for k in kind_to_field.values()}
     for doc in rows:
         kind = getattr(doc, "kind", None)
-        if kind not in kind_to_field:
+        tags = getattr(doc, "tags", None) or []
+        matched_kinds = {k for k in kind_to_field if k == kind or k in tags}
+        if not matched_kinds:
             continue
         md_path = getattr(doc, "markdown_path", None)
         if not md_path:
@@ -267,7 +267,6 @@ async def extract_for_project(project_id: int) -> dict[str, str]:
             continue
         try:
             raw = Path(md_path).read_text(encoding="utf-8", errors="replace")
-            out[kind_to_field[kind]] = _sanitize_for_json(raw)
         except Exception:
             log.exception(
                 "read_markdown_failed",
@@ -275,6 +274,14 @@ async def extract_for_project(project_id: int) -> dict[str, str]:
                 kind=kind,
                 path=md_path,
             )
+            continue
+        cleaned = _sanitize_for_json(raw)
+        for k in matched_kinds:
+            buckets[kind_to_field[k]].append(cleaned)
+
+    out["tech_spec_md"] = "\n\n---\n\n".join(buckets["tech_spec_md"])
+    out["scoring_md"] = "\n\n---\n\n".join(buckets["scoring_md"])
+    out["template_md"] = "\n\n---\n\n".join(buckets["template_md"])
     return out
 
 

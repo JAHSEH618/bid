@@ -5,9 +5,13 @@
 - ``GET    /api/admin/users``               列用户
 - ``POST   /api/admin/users``               创建用户(must_change_password=true)
 - ``PATCH  /api/admin/users/{id}``          改 role / is_active / 重置密码
-- ``DELETE /api/admin/users/{id}``          删用户(级联删 ApiKey / TokenUsage)
 - ``GET    /api/admin/token-usage``         全局 token 消费汇总
+
+⚠️ **FR-6.5:不提供 DELETE /users/{id}**。Project.created_by / ReviewEvent
+/ TokenUsage / ApiKey 都按 user_id 归属历史记录;真删用户会让审计断链或
+触发 RESTRICT。"禁用账号"走 ``PATCH {is_active: false}``。
 """
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -60,9 +64,7 @@ async def create_user(
         await db.execute(select(User).where(User.username == body.username))
     ).scalar_one_or_none()
     if existing is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, f"username '{body.username}' already exists"
-        )
+        raise HTTPException(status.HTTP_409_CONFLICT, f"username '{body.username}' already exists")
 
     user = User(
         username=body.username,
@@ -89,11 +91,7 @@ async def update_user(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
 
     # ⚠️ 防止 admin 把自己降权后无人可用
-    if (
-        target.id == admin.id
-        and body.role is not None
-        and body.role != "admin"
-    ):
+    if target.id == admin.id and body.role is not None and body.role != "admin":
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "cannot demote yourself; ask another admin",
@@ -115,28 +113,19 @@ async def update_user(
 @router.delete("/users/{user_id}")
 async def delete_user(
     user_id: int,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    admin: Annotated[User, Depends(require_admin)],
+    _db: Annotated[AsyncSession, Depends(get_db)],
+    _admin: Annotated[User, Depends(require_admin)],
 ) -> dict[str, bool]:
-    target = await db.get(User, user_id)
-    if target is None:
-        return {"ok": True}  # 幂等
-    if target.id == admin.id:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "cannot delete yourself",
-        )
-    # ⚠️ Project.created_by ondelete=RESTRICT,有项目时 DB 会拒绝
-    try:
-        await db.delete(target)
-        await db.commit()
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"cannot delete user (likely owns projects): {e}",
-        ) from e
-    return {"ok": True}
+    """⚠️ FR-6.5:不删账号(保留历史归属)。请用 ``PATCH /users/{id}``
+    把 ``is_active`` 设为 false 实现禁用语义。
+
+    端点保留是因为旧前端可能仍在调用;返回 405 让调用方迁移。
+    """
+    _ = user_id
+    raise HTTPException(
+        status.HTTP_405_METHOD_NOT_ALLOWED,
+        "不支持删除账号(保留历史归属);请改用 PATCH 设 is_active=false 禁用",
+    )
 
 
 # ============== Token usage(全局) ==============
@@ -158,19 +147,23 @@ async def get_token_usage(
         where_clause = "WHERE tu.created_at >= date_trunc('month', NOW())"
 
     rows = (
-        await db.execute(
-            sa.text(
-                "SELECT tu.user_id, u.username, tu.model, "
-                "SUM(tu.prompt_tokens)::bigint AS p, "
-                "SUM(tu.completion_tokens)::bigint AS c "
-                "FROM token_usage tu "
-                "JOIN users u ON u.id = tu.user_id "
-                f"{where_clause} "
-                "GROUP BY tu.user_id, u.username, tu.model "
-                "ORDER BY tu.user_id, tu.model"
+        (
+            await db.execute(
+                sa.text(
+                    "SELECT tu.user_id, u.username, tu.model, "
+                    "SUM(tu.prompt_tokens)::bigint AS p, "
+                    "SUM(tu.completion_tokens)::bigint AS c "
+                    "FROM token_usage tu "
+                    "JOIN users u ON u.id = tu.user_id "
+                    f"{where_clause} "
+                    "GROUP BY tu.user_id, u.username, tu.model "
+                    "ORDER BY tu.user_id, tu.model"
+                )
             )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     out = [
         AdminTokenUsageRow(
