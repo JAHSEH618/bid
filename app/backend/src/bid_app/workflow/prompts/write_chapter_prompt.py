@@ -189,44 +189,92 @@ def _bullet_list(items: list[str]) -> str:
     return "\n".join(f"- {it}" for it in items)
 
 
-# Phase 1B (2026-05-16):章标题关键词 → 实体桶过滤规则。LLM-2 单章生成
-# 不需要全 10 桶上下文(否则 prompt 太长),按章标题命中关键字挑相关桶。
-# 命中不到任何关键字时回退到 [scoring_rules, technical_requirements] 两桶,
-# 这两个对所有投标章节都通用。
-_CHAPTER_KEYWORD_TO_BUCKETS: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
-    (("背景", "项目概况", "需求理解"), ("project_info", "company_info")),
-    (("方案", "架构", "技术", "设计", "实施", "部署"), ("technical_requirements", "scoring_rules")),
-    (("人员", "团队", "项目经理", "组织"), ("personnel_info", "qualification_requirements")),
-    (("资质", "业绩", "证书", "资格"), ("qualification_requirements", "company_info")),
-    (("计划", "工期", "进度", "里程碑", "节点"), ("timeline_constraints", "scoring_rules")),
-    (("报价", "商务", "付款", "费用", "造价"), ("commercial_terms", "compliance_constraints")),
-    (("合规", "法律", "条款", "强制"), ("compliance_constraints", "risk_signals")),
-    (("风险", "管控", "质量", "应急", "保障", "运维"), ("risk_signals", "technical_requirements", "compliance_constraints")),
-    (("评分", "打分", "评价"), ("scoring_rules",)),
-]
+# Phase 2A (2026-05-16):用 BM25 替换 Phase 1B 的「章标题关键词 → 桶」静态
+# 映射。Phase 1B 的硬编码关键字表逻辑保留为 BM25 不可用 / 实体为空时的
+# 默认上下文桶,理论上不会被走到(因为这条分支也意味着我们走 markdown 截断
+# 回退路径,不会用 buckets)。Phase 2B 接 tool calling 时同一份 BlackboardIndex
+# 复用,LLM 自己发起查询。
 _CHAPTER_FALLBACK_BUCKETS = ("scoring_rules", "technical_requirements")
 
 
-def _pick_buckets_for_chapter(chapter: dict[str, Any]) -> list[str]:
-    """根据章节 title / parent_titles / matched_scoring_items 命中关键字,
-    挑相关实体桶。最多返回 4 桶避免 prompt 过长。"""
-    haystack_parts: list[str] = [str(chapter.get("title") or "")]
+def _build_chapter_query(chapter: dict[str, Any]) -> str:
+    """从 chapter 元数据拼一段查询文本,喂给 BM25。
+
+    包含 title / parent_titles / key_points / matched_scoring_items。
+    """
+    parts: list[str] = [str(chapter.get("title") or "")]
     parents = chapter.get("parent_titles") or []
     if isinstance(parents, list):
-        haystack_parts.extend(str(p) for p in parents)
+        parts.extend(str(p) for p in parents)
     matched = chapter.get("matched_scoring_items") or []
     if isinstance(matched, list):
-        haystack_parts.extend(str(m) for m in matched)
-    haystack = " ".join(haystack_parts)
-    hits: list[str] = []
-    for keywords, buckets in _CHAPTER_KEYWORD_TO_BUCKETS:
-        if any(kw in haystack for kw in keywords):
-            for b in buckets:
-                if b not in hits:
-                    hits.append(b)
-    if not hits:
-        hits = list(_CHAPTER_FALLBACK_BUCKETS)
-    return hits[:4]
+        parts.extend(str(m) for m in matched)
+    key_points = chapter.get("key_points") or []
+    if isinstance(key_points, list):
+        parts.extend(str(p) for p in key_points)
+    summary = chapter.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        parts.append(summary.strip())
+    return " ".join(p for p in parts if p)
+
+
+def _render_entries_grouped(
+    entries: list[dict[str, Any]],
+    *,
+    char_limit: int = 8000,
+) -> str:
+    """把 BM25 选出的 entries 按 bucket 分组渲染,给 LLM-2 prompt 用。
+
+    保留 BM25 分数顺序(同 bucket 内按分数降序),每个 bucket 一段 ###。
+    超过 char_limit 截断尾部 + 提示。
+    """
+    if not entries:
+        return ""
+    # 按 bucket 分组,保持桶在 ENTITY_BUCKETS 里的顺序(更稳定的读感)
+    from .categorize_blackboard import _BUCKET_LABELS_ZH
+    from .categorize_blackboard import ENTITY_BUCKETS as _ALL_BUCKETS
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        b = entry.get("bucket") or "project_info"
+        grouped.setdefault(b, []).append(entry)
+
+    sections: list[str] = []
+    used = 0
+    for bucket in _ALL_BUCKETS:
+        items = grouped.get(bucket) or []
+        if not items:
+            continue
+        label = _BUCKET_LABELS_ZH.get(bucket, bucket)
+        lines: list[str] = [f"### {label} ({bucket})"]
+        for i, entry in enumerate(items, 1):
+            content = entry.get("content") or ""
+            if not isinstance(content, str):
+                continue
+            meta_bits: list[str] = []
+            source = entry.get("source_doc")
+            section = entry.get("section")
+            if isinstance(source, str) and source:
+                meta_bits.append(source)
+            if isinstance(section, str) and section:
+                meta_bits.append(section)
+            meta = f" *({' · '.join(meta_bits)})*" if meta_bits else ""
+            line = f"{i}. {content}{meta}"
+            if used + len(line) > char_limit:
+                lines.append("...(已截断,完整内容查实体黑板)")
+                sections.append("\n".join(lines))
+                return "\n\n".join(sections)
+            lines.append(line)
+            used += len(line) + 1
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
+def _pick_buckets_for_chapter(chapter: dict[str, Any]) -> list[str]:
+    """Phase 1B 兼容入口:保留给老测试用。BM25 路径不再走这里。
+    返回 ``_CHAPTER_FALLBACK_BUCKETS`` 之外永远不再扩,告诉调用方默认两桶。
+    """
+    return list(_CHAPTER_FALLBACK_BUCKETS)
 
 
 def build_messages(
@@ -250,14 +298,14 @@ def build_messages(
     previous_text 不截断:qwen3.6-max-preview 上下文 256K,5-10K 字 partial
     完全装得下,patch 式 LLM-2 才能精准对齐用户意见。
 
-    ⭐ Phase 1B (2026-05-16):``blackboard_entities`` 是 categorize_blackboard
-    产出的 10 桶 JSON。给到时按本章题目关键词挑 2-4 个相关桶塞进 prompt,
-    比原 ``tech_spec_md[:4000]`` 信息密度高。无 entities 时回退 markdown 截断。
+    ⭐ Phase 2A (2026-05-16):有 ``blackboard_entities`` 时走 BM25 检索:
+    用 chapter title / parent_titles / matched_scoring_items / key_points
+    拼查询,从 10 桶里挑出 top-K 个最相关 entry(跨桶),按 bucket 分组渲染。
+    旧 Phase 1B 的「章标题关键词命中桶」静态规则被替代——BM25 召回率更高,
+    不会因为标题没命中关键字就漏掉真正相关的条款。
+    无 entities 时回退 markdown 截断。
     """
-    from .categorize_blackboard import (
-        has_any_entries,
-        render_buckets_for_prompt,
-    )
+    from .categorize_blackboard import has_any_entries
 
     target_pages = int(chapter.get("target_pages", 3) or 3)
     if not revision_feedback or retry_count <= 0:
@@ -276,16 +324,41 @@ def build_messages(
         )
 
     if has_any_entries(blackboard_entities):
-        # 走结构化实体桶路径:按章节关键词挑桶
-        relevant_buckets = _pick_buckets_for_chapter(chapter)
-        bb_section = render_buckets_for_prompt(
-            blackboard_entities,
-            bucket_filter=relevant_buckets,
-            per_bucket_char_limit=3000,
+        # BM25 路径:章节查询 → 跨桶检索 top_k
+        from ...services.blackboard_retrieval import BlackboardIndex
+
+        index = BlackboardIndex(blackboard_entities)
+        query = _build_chapter_query(chapter)
+        # top_k=12 在大多数项目里能给到 LLM-2 足够信息又不过长;实测每条 entry
+        # 50-300 字符,12 条 ~2-4k 字符,远低于 prompt 长度上限
+        hits = index.search(entity_types=None, query=query, top_k=12)
+        # BM25 严格按 token 重叠召回,章节标题没明确命中黑板原文时可能为空。
+        # 补一份「评分规则 + 技术要求」的前几条作为通用上下文(每个投标章节
+        # 都该看到这两类核心信息),与 hits 去重后合并。
+        baseline = index.search(
+            entity_types=list(_CHAPTER_FALLBACK_BUCKETS),
+            query="",
+            top_k=4,
         )
-        context_block = (
-            f"## 上下文(从实体黑板按本章选出的相关条目)\n\n{bb_section}"
-        )
+        seen_contents = {h["content"] for h in hits}
+        for b in baseline:
+            if b["content"] in seen_contents:
+                continue
+            hits.append(b)
+            seen_contents.add(b["content"])
+        if hits:
+            bb_section = _render_entries_grouped(hits, char_limit=8000)
+            context_block = (
+                f"## 上下文(BM25 从实体黑板按本章主题挑出的 {len(hits)} 条 + "
+                f"评分/技术基线条目)\n\n{bb_section}"
+            )
+        else:
+            # entities 有内容但 BM25 + baseline 全返空(理论不该发生),
+            # 退到 markdown 截断兜底
+            context_block = (
+                f"## 上下文(技术需求摘要)\n{_excerpt(tech_spec_md, 4000)}\n\n"
+                f"## 上下文(打分规则摘要)\n{_excerpt(scoring_md, 2000)}"
+            )
     else:
         # 回退:实体黑板未生成 / 为空 → 老 markdown 截断输入
         context_block = (

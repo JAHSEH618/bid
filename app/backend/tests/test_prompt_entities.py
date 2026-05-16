@@ -106,31 +106,41 @@ def test_outline_prompt_falls_back_when_entities_all_empty() -> None:
     assert "原文 Y" in user
 
 
-def test_pick_buckets_for_chapter_risk_keywords() -> None:
+def test_pick_buckets_for_chapter_returns_baseline_now() -> None:
+    """Phase 2A:`_pick_buckets_for_chapter` 不再做关键字 → 桶映射,
+    始终返回 scoring_rules + technical_requirements 两个通用基线桶,
+    实际的相关性挑选由 BM25 在 build_messages 内完成。"""
     chapter = {"title": "3.2 风险管控体系", "parent_titles": []}
     buckets = _pick_buckets_for_chapter(chapter)
-    assert "risk_signals" in buckets
-    assert "technical_requirements" in buckets or "compliance_constraints" in buckets
+    assert buckets == ["scoring_rules", "technical_requirements"]
 
 
-def test_pick_buckets_for_chapter_personnel() -> None:
-    chapter = {"title": "5.1 项目经理与核心团队", "parent_titles": []}
-    buckets = _pick_buckets_for_chapter(chapter)
-    assert "personnel_info" in buckets
-
-
-def test_pick_buckets_fallback() -> None:
-    """没命中任何关键字 → 回到 scoring_rules + technical_requirements。"""
-    chapter = {"title": "随便瞎写的奇怪标题", "parent_titles": []}
-    buckets = _pick_buckets_for_chapter(chapter)
-    assert "scoring_rules" in buckets
-    assert "technical_requirements" in buckets
+def test_pick_buckets_consistent_regardless_of_title() -> None:
+    """不管 title 长什么样,基线两桶都返回相同(Phase 2A 后语义)。"""
+    for title in (
+        "5.1 项目经理与核心团队",
+        "随便瞎写的奇怪标题",
+        "",
+    ):
+        chapter = {"title": title, "parent_titles": []}
+        assert _pick_buckets_for_chapter(chapter) == [
+            "scoring_rules",
+            "technical_requirements",
+        ]
 
 
 def test_chapter_prompt_uses_entities_when_given() -> None:
+    """Phase 2A:有 entities → BM25 + baseline 路径,prompt 含上下文标题
+    「BM25 从实体黑板...」且查询命中条目 / baseline 条目都出现。"""
     entities = {
-        "risk_signals": [{"content": "缺章节扣 8 分"}],
-        "technical_requirements": [{"content": "RTO ≤ 4h"}],
+        # 这条与章节 query("风险管控" / "PDCA")有 token 重叠,BM25 应该命中
+        "risk_signals": [
+            {"content": "风险管控章节缺失直接扣 8 分,PDCA 闭环必须体现"}
+        ],
+        # 这条无明显关键词重叠,但属于 scoring_rules/technical 基线桶,
+        # 应该被 baseline 补回来
+        "scoring_rules": [{"content": "技术方案 50 分,商务 30 分"}],
+        "technical_requirements": [{"content": "SLA ≥ 99.95%"}],
     }
     chapter = {
         "title": "3.2 风险管控",
@@ -145,8 +155,11 @@ def test_chapter_prompt_uses_entities_when_given() -> None:
         blackboard_entities=entities,
     )
     user = msgs[1]["content"]
-    assert "实体黑板" in user
-    assert "RTO ≤ 4h" in user or "缺章节扣 8 分" in user
+    assert "BM25 从实体黑板" in user
+    # 命中的 risk_signals 条目应出现
+    assert "PDCA 闭环必须体现" in user or "缺失直接扣 8 分" in user
+    # baseline 兜底的 scoring/technical 条目也该出现
+    assert "技术方案 50 分" in user or "SLA" in user
     # 不走 markdown 截断路径
     assert "原 tech md" not in user
 
