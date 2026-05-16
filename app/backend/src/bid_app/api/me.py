@@ -10,8 +10,10 @@
 ⚠️ ``GET /api-key/test`` 走 ``api/me.py`` 但放 M2-5 (#18) 实现(依赖
 ``services/api_key_validator.py``)。
 """
+
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import sqlalchemy as sa
@@ -57,13 +59,9 @@ async def change_password(
     成功后清 ``must_change_password=false``。
     """
     if not verify_password(body.old_password, user.password_hash):
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED, "旧密码错误"
-        )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "旧密码错误")
     if body.old_password == body.new_password:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "新密码不能与旧密码相同"
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "新密码不能与旧密码相同")
 
     user.password_hash = hash_password(body.new_password)
     user.must_change_password = False
@@ -89,15 +87,11 @@ async def get_api_key_info(
     """返回当前用户 ApiKey 元信息(masked,**永不返回明文**)。"""
     api_key = (
         await db.execute(
-            select(ApiKey).where(
-                ApiKey.user_id == user.id, ApiKey.provider == "dashscope"
-            )
+            select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == "dashscope")
         )
     ).scalar_one_or_none()
     if api_key is None:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "尚未配置 API Key"
-        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "尚未配置 API Key")
 
     try:
         plaintext = decrypt_api_key(api_key.encrypted_key)
@@ -126,16 +120,12 @@ async def set_api_key(
     try:
         await validate_dashscope(body.key)
     except ApiKeyValidationFailed as e:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, f"API Key 验证失败:{e}"
-        ) from e
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"API Key 验证失败:{e}") from e
 
     encrypted = encrypt_api_key(body.key)
     existing = (
         await db.execute(
-            select(ApiKey).where(
-                ApiKey.user_id == user.id, ApiKey.provider == "dashscope"
-            )
+            select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == "dashscope")
         )
     ).scalar_one_or_none()
     now = sa.func.now()
@@ -169,15 +159,11 @@ async def test_api_key(
     """
     api_key = (
         await db.execute(
-            select(ApiKey).where(
-                ApiKey.user_id == user.id, ApiKey.provider == "dashscope"
-            )
+            select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == "dashscope")
         )
     ).scalar_one_or_none()
     if api_key is None:
-        raise HTTPException(
-            status.HTTP_412_PRECONDITION_FAILED, "尚未配置 API Key"
-        )
+        raise HTTPException(status.HTTP_412_PRECONDITION_FAILED, "尚未配置 API Key")
 
     try:
         plaintext = decrypt_api_key(api_key.encrypted_key)
@@ -190,9 +176,13 @@ async def test_api_key(
     except ApiKeyValidationFailed as e:
         return {"ok": False, "error": str(e)}
 
-    api_key.last_validated_at = sa.func.now()
+    # ⭐ 与 auth.py R-5 同源:用 Python datetime 而非 sa.func.now()。
+    # sa.func.now() 是 SQL 表达式 token,赋给 ORM attr 后 commit,响应阶段
+    # 序列化时 session 已关 → lazy refresh 触发 MissingGreenlet。
+    validated_at = datetime.now(UTC)
+    api_key.last_validated_at = validated_at
     await db.commit()
-    return {"ok": True, "last_validated_at": api_key.last_validated_at}
+    return {"ok": True, "last_validated_at": validated_at}
 
 
 @router.delete("/api-key")
@@ -203,9 +193,7 @@ async def delete_api_key(
     """删除当前用户的 ApiKey。已启动项目仍能跑(D-C 真快照)。"""
     existing = (
         await db.execute(
-            select(ApiKey).where(
-                ApiKey.user_id == user.id, ApiKey.provider == "dashscope"
-            )
+            select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == "dashscope")
         )
     ).scalar_one_or_none()
     if existing is None:
@@ -251,9 +239,7 @@ def _catalog_models_for(user: User) -> list[str]:
     if raw is None:
         return _default_model_catalog()
     # 兼容旧版本:旧 model_catalog 只保存用户新增模型,系统模型隐式加入。
-    return _normalize_model_list(
-        [*_default_model_catalog(), *_normalize_model_list(raw)]
-    )
+    return _normalize_model_list([*_default_model_catalog(), *_normalize_model_list(raw)])
 
 
 def _custom_models_for(user: User) -> list[str]:
@@ -320,17 +306,21 @@ async def get_token_usage(
         where_clause += " AND created_at >= date_trunc('month', NOW())"
 
     rows = (
-        await db.execute(
-            sa.text(
-                "SELECT model, "
-                "SUM(prompt_tokens)::bigint AS p, "
-                "SUM(completion_tokens)::bigint AS c "
-                f"FROM token_usage {where_clause} "
-                "GROUP BY model ORDER BY model"
-            ),
-            {"u": user.id},
+        (
+            await db.execute(
+                sa.text(
+                    "SELECT model, "
+                    "SUM(prompt_tokens)::bigint AS p, "
+                    "SUM(completion_tokens)::bigint AS c "
+                    f"FROM token_usage {where_clause} "
+                    "GROUP BY model ORDER BY model"
+                ),
+                {"u": user.id},
+            )
         )
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
 
     out_rows = [
         TokenUsageRow(

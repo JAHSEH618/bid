@@ -14,6 +14,7 @@
 - D-CJ:下载放行不只看文件存在,还要 latest DocxJob.status == 'done';
   invalidated 走 409 "请重新生成",其它 in-flight 走 409 "未就绪"
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -73,27 +74,35 @@ async def trigger_docx(
     cached = Path(project.dir_path) / "proposal.docx"
 
     # ⭐ D-BY:命中缓存前先 repair 任何"finalizing 但文件已就位"的孤儿 job
+    # ⭐ scope='project':防止把单章 finalizing job 错刷成整本路径
     if cached.exists():
         await db.execute(
             sa.text(
                 "UPDATE docx_jobs SET status='done', output_path=:p, "
                 "finished_at=NOW(), updated_at=NOW() "
-                "WHERE project_id=:pid AND status='finalizing'"
+                "WHERE project_id=:pid AND scope='project' "
+                "AND status='finalizing'"
             ),
             {"p": str(cached), "pid": project_id},
         )
         await db.commit()
 
     # ⭐ D-CJ:仅看文件存在不够 — invalidated 状态下旧文件可能残留
+    # ⭐ scope='project':只看整本 job,避免被刚跑的单章 job 顶上去
     latest = (
-        await db.execute(
-            sa.text(
-                "SELECT id, status FROM docx_jobs "
-                "WHERE project_id=:p ORDER BY id DESC LIMIT 1"
-            ),
-            {"p": project_id},
+        (
+            await db.execute(
+                sa.text(
+                    "SELECT id, status FROM docx_jobs "
+                    "WHERE project_id=:p AND scope='project' "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"p": project_id},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
 
     if cached.exists() and latest and latest["status"] == "done":
         # ⭐ D-CK:cached=True 时返回 latest done 的 docx_job_id,前端有轮询入口
@@ -104,17 +113,13 @@ async def trigger_docx(
         }
 
     # ⭐ D-AK 顺序:先 commit pending 行,再 enqueue,最后 UPDATE arq_job_id
-    docx_job = DocxJob(
-        project_id=project_id, arq_job_id=None, status="pending"
-    )
+    docx_job = DocxJob(project_id=project_id, arq_job_id=None, status="pending")
     db.add(docx_job)
     try:
         await db.commit()
     except IntegrityError as e:
         await db.rollback()
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "该项目已有 DOCX 生成任务在进行中"
-        ) from e
+        raise HTTPException(status.HTTP_409_CONFLICT, "该项目已有 DOCX 生成任务在进行中") from e
     job_pk = docx_job.id
 
     arq_pool = getattr(request.app.state, "arq_pool", None)
@@ -128,9 +133,7 @@ async def trigger_docx(
             {"i": job_pk},
         )
         await db.commit()
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
-        )
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化")
 
     try:
         job = await arq_pool.enqueue_job(
@@ -188,15 +191,20 @@ async def get_docx_job(
 ) -> dict[str, Any]:
     """轮询 DOCX 任务进度(D-BW + D-CD inline repair)。"""
     row_raw = (
-        await db.execute(
-            sa.text(
-                "SELECT id, project_id, status, error, output_path, "
-                "created_at, updated_at, finished_at "
-                "FROM docx_jobs WHERE id=:i AND project_id=:p"
-            ),
-            {"i": docx_job_id, "p": project_id},
+        (
+            await db.execute(
+                sa.text(
+                    "SELECT id, project_id, status, error, output_path, "
+                    "scope, chapter_id, "
+                    "created_at, updated_at, finished_at "
+                    "FROM docx_jobs WHERE id=:i AND project_id=:p"
+                ),
+                {"i": docx_job_id, "p": project_id},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if row_raw is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "docx job not found")
     # 拷贝成可变 dict;后续 inline-repair 需要覆盖 status / output_path
@@ -204,6 +212,7 @@ async def get_docx_job(
     row: dict[str, Any] = dict(row_raw)
 
     # ⭐ D-CD:轮询路径上 inline finalizing repair
+    # ⭐ 按 scope 决定要 repair 的文件:整本 → proposal.docx;单章 → chapter_{id}.docx
     if row["status"] == "finalizing":
         proj_row = await db.execute(
             sa.text("SELECT dir_path FROM projects WHERE id=:p"),
@@ -211,7 +220,10 @@ async def get_docx_job(
         )
         dir_path = proj_row.scalar_one_or_none()
         if dir_path:
-            file_path = Path(dir_path) / "proposal.docx"
+            if row["scope"] == "chapter" and row["chapter_id"] is not None:
+                file_path = Path(dir_path) / f"chapter_{row['chapter_id']}.docx"
+            else:
+                file_path = Path(dir_path) / "proposal.docx"
             if file_path.exists():
                 upd = await db.execute(
                     sa.text(
@@ -242,9 +254,7 @@ async def get_docx_job(
     # 内部 → 前端的 status 映射:不暴露 finalizing(D-BU 实现层细节)
     raw = row["status"]
     public_status = (
-        "processing"
-        if raw in ("pending", "rendering_mermaid", "pandoc", "finalizing")
-        else raw
+        "processing" if raw in ("pending", "rendering_mermaid", "pandoc", "finalizing") else raw
     )  # done | failed | invalidated(D-CG)
     progress_hint = {
         "pending": "排队中",
@@ -285,27 +295,35 @@ async def download_docx(
     path = Path(project.dir_path) / "proposal.docx"
 
     # ⭐ D-CO:下载端 inline finalizing repair
+    # ⭐ scope='project':下载整本时只 repair 整本 finalizing,别动单章
     if path.exists():
         await db.execute(
             sa.text(
                 "UPDATE docx_jobs SET status='done', output_path=:p, "
                 "finished_at=NOW(), updated_at=NOW() "
-                "WHERE project_id=:pid AND status='finalizing'"
+                "WHERE project_id=:pid AND scope='project' "
+                "AND status='finalizing'"
             ),
             {"p": str(path), "pid": project_id},
         )
         await db.commit()
 
     # ⭐ D-CJ:文件存在 ≠ 可下载;先查 latest DocxJob 状态把关
+    # ⭐ scope='project':避免被刚跑的单章 job 干扰整本下载放行判断
     latest = (
-        await db.execute(
-            sa.text(
-                "SELECT id, status FROM docx_jobs "
-                "WHERE project_id=:p ORDER BY id DESC LIMIT 1"
-            ),
-            {"p": project_id},
+        (
+            await db.execute(
+                sa.text(
+                    "SELECT id, status FROM docx_jobs "
+                    "WHERE project_id=:p AND scope='project' "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"p": project_id},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
 
     # 拒分支 1:latest=invalidated
     if latest and latest["status"] == "invalidated":
@@ -359,14 +377,10 @@ async def download_docx(
     ascii_fallback = "proposal.docx"
     return FileResponse(
         path,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument."
-            "wordprocessingml.document"
-        ),
+        media_type=("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         headers={
             "Content-Disposition": (
-                f'attachment; filename="{ascii_fallback}"; '
-                f"filename*=UTF-8''{quote(fname)}"
+                f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(fname)}"
             ),
         },
     )
@@ -384,15 +398,10 @@ async def download_docx(
 def _display_chapter_filename(project_name: str, chapter_title: str) -> str:
     """``{项目名}_{章节标题}_{YYYYMMDD}.docx``,与全本格式对齐(D-L 风格)。"""
     today = datetime.now(ZoneInfo(settings.tz)).strftime("%Y%m%d")
-    return (
-        f"{sanitize_filename(project_name)}_"
-        f"{sanitize_filename(chapter_title)}_{today}.docx"
-    )
+    return f"{sanitize_filename(project_name)}_{sanitize_filename(chapter_title)}_{today}.docx"
 
 
-async def _load_chapter_for_export(
-    db: AsyncSession, chapter_id: int
-) -> tuple[Chapter, Project]:
+async def _load_chapter_for_export(db: AsyncSession, chapter_id: int) -> tuple[Chapter, Project]:
     """取章节 + 关联项目;鉴权交给 deps.get_current_user。
 
     导出门槛:有 ``final_text`` 即可。原先只放行 ``approved`` 章节,但用户
@@ -401,18 +410,22 @@ async def _load_chapter_for_export(
     这一章上跑 visual/merge 写出的最终版本不受影响。
     """
     row = (
-        await db.execute(
-            sa.text(
-                "SELECT c.id, c.status, c.title, c.final_text, "
-                "p.id AS project_id, p.name, p.dir_path "
-                "FROM chapters c "
-                "JOIN runs r ON r.id = c.run_id "
-                "JOIN projects p ON p.id = r.project_id "
-                "WHERE c.id = :c"
-            ),
-            {"c": chapter_id},
+        (
+            await db.execute(
+                sa.text(
+                    "SELECT c.id, c.status, c.title, c.final_text, "
+                    "p.id AS project_id, p.name, p.dir_path "
+                    "FROM chapters c "
+                    "JOIN runs r ON r.id = c.run_id "
+                    "JOIN projects p ON p.id = r.project_id "
+                    "WHERE c.id = :c"
+                ),
+                {"c": chapter_id},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "chapter not found")
     if not row["final_text"]:
@@ -456,15 +469,19 @@ async def trigger_chapter_docx(
         await db.commit()
 
     latest = (
-        await db.execute(
-            sa.text(
-                "SELECT id, status FROM docx_jobs "
-                "WHERE chapter_id=:c AND scope='chapter' "
-                "ORDER BY id DESC LIMIT 1"
-            ),
-            {"c": chapter_id},
+        (
+            await db.execute(
+                sa.text(
+                    "SELECT id, status FROM docx_jobs "
+                    "WHERE chapter_id=:c AND scope='chapter' "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"c": chapter_id},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
 
     if cached.exists() and latest and latest["status"] == "done":
         return {
@@ -503,9 +520,7 @@ async def trigger_chapter_docx(
             {"i": job_pk},
         )
         await db.commit()
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
-        )
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化")
 
     try:
         arq_job = await arq_pool.enqueue_job(
@@ -582,15 +597,19 @@ async def download_chapter_docx(
         await db.commit()
 
     latest = (
-        await db.execute(
-            sa.text(
-                "SELECT id, status FROM docx_jobs "
-                "WHERE chapter_id=:c AND scope='chapter' "
-                "ORDER BY id DESC LIMIT 1"
-            ),
-            {"c": chapter_id},
+        (
+            await db.execute(
+                sa.text(
+                    "SELECT id, status FROM docx_jobs "
+                    "WHERE chapter_id=:c AND scope='chapter' "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"c": chapter_id},
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
 
     if not latest or latest["status"] != "done":
         raise HTTPException(
@@ -626,14 +645,10 @@ async def download_chapter_docx(
     ascii_fallback = f"chapter_{chapter_id}.docx"
     return FileResponse(
         path,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument."
-            "wordprocessingml.document"
-        ),
+        media_type=("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         headers={
             "Content-Disposition": (
-                f'attachment; filename="{ascii_fallback}"; '
-                f"filename*=UTF-8''{quote(fname)}"
+                f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(fname)}"
             ),
         },
     )

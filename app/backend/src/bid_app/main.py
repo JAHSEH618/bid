@@ -8,6 +8,7 @@ M0/M1/M2/M3 router 全部挂完后末尾加 SPA fallback(§15.6)。
 ⚠️ ``app.state.redis``(异步 redis client)在 lifespan 启动时实例化,
 ``api/health.py`` 用 ``request.app.state.redis.ping()`` 检测连通。
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -48,9 +49,12 @@ def _print_startup_banner() -> None:
 
     print(bar, flush=True, file=sys.stdout)
     print(f"  bid-app 启动完成(端口 {settings.app_port})", flush=True, file=sys.stdout)
+    # ⚠️ 不打默认密码明文到 stdout — docker logs 会被多人 / 集中日志系统读到,
+    # 这是凭据泄露通道。只提示默认账号已启用 + 首次登录必须改密;运维需要
+    # 真值时去 .env 看 ADMIN_DEFAULT_PASSWORD。
     print(
-        f"  ⚠️  默认账号 {settings.admin_default_username} / "
-        f"{settings.admin_default_password} —— 首次登录会强制改密",
+        f"  ⚠️  默认账号 {settings.admin_default_username} 已启用 —— "
+        "首次登录会强制改密;默认密码见 .env(ADMIN_DEFAULT_PASSWORD)",
         flush=True,
         file=sys.stdout,
     )

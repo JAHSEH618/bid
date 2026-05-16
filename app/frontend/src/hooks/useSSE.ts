@@ -14,6 +14,12 @@ export type ProjectEventType =
   // 文档抽取(extract_documents.py)
   | 'extract_documents_passthrough'
   | 'extract_documents_done'
+  // 材料理解(material_understanding.py / material_understanding_review.py)
+  | 'material_understanding_ready'
+  | 'material_understanding_review'
+  // 实体桶(categorize_blackboard.py)
+  | 'blackboard_entities_ready'
+  | 'blackboard_entities_failed'
   // 提纲生成
   | 'outline_started'
   | 'outline_ready'
@@ -24,6 +30,7 @@ export type ProjectEventType =
   | 'chapter_prefetched'
   | 'chapter_token'
   | 'chapter_visuals_ready'
+  | 'chapter_skipped_unselected'
   | 'awaiting_review'
   | 'chapter_failed'
   | 'chapter_approved'

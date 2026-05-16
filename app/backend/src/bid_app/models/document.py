@@ -20,12 +20,14 @@ class Document(Base, TimestampMixin):
     __tablename__ = "documents"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    project_id: Mapped[int] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE")
-    )
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
     # ⭐ PR-M7-1:nullable;v2 后无强约束,保留字段做向后兼容
     kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     original_filename: Mapped[str] = mapped_column(String(255))
+    # ⭐ 原始上传文件落盘的绝对路径(`{project_dir}/uploads/{prefix}_{token}.{ext}`)。
+    # 删除文档时配套 unlink;否则用户「反复传删」会让 byte_size 总和回落
+    # 但磁盘文件仍累积,撑爆 500MB 项目目录上限。
+    stored_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     markdown_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     file_size: Mapped[int] = mapped_column()
     extract_error: Mapped[str | None] = mapped_column(String(2000), nullable=True)

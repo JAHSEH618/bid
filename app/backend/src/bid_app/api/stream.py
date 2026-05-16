@@ -18,6 +18,7 @@ token / chapter_started / chapter_failed / awaiting_review / proposal_ready
 SSE 流,理由是协作场景(团队成员共享 API key 配额、共看进度)。M2 **不**
 按 admin / creator 收紧 —— 这是设计意图,不是 TODO。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -42,9 +43,7 @@ log = structlog.get_logger()
 PING_INTERVAL = 20  # 秒。代理默认静默 30-60s 关连接,20s 心跳留容错
 
 
-async def _project_visible_to_user(
-    db: AsyncSession, project_id: int, user: User
-) -> bool:
+async def _project_visible_to_user(db: AsyncSession, project_id: int, user: User) -> bool:
     """⭐ 团队共享池设计(产品决定,REQUIREMENTS.md 写明):任何 active user
     都可订阅项目流;**M2 不收紧**。
 
@@ -54,9 +53,7 @@ async def _project_visible_to_user(
 
     本函数仅校验 project 存在,通过 get_current_user 已确保 user 是登录态。
     """
-    row = await db.execute(
-        sa.text("SELECT 1 FROM projects WHERE id=:p"), {"p": project_id}
-    )
+    row = await db.execute(sa.text("SELECT 1 FROM projects WHERE id=:p"), {"p": project_id})
     return row.scalar_one_or_none() is not None
 
 
@@ -74,16 +71,14 @@ async def stream(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found")
 
     async def gen() -> AsyncIterator[str]:
-        # 立即推 ready,告诉前端订阅成功
-        yield "event: ready\ndata: {}\n\n"
-
+        # 先 subscribe 后再 yield ready —— 反过来会留出"ready 已发但订阅未建"
+        # 的真空窗,工作流刚发布的事件会绕过这条连接。
         async with event_bus.subscribe(project_id) as events:
+            yield "event: ready\ndata: {}\n\n"
             ev_iter = events.__aiter__()
             while True:
                 try:
-                    ev = await asyncio.wait_for(
-                        ev_iter.__anext__(), timeout=PING_INTERVAL
-                    )
+                    ev = await asyncio.wait_for(ev_iter.__anext__(), timeout=PING_INTERVAL)
                     yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
                 except TimeoutError:
                     yield ": ping\n\n"

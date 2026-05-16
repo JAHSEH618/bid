@@ -29,6 +29,19 @@ import type {
 
 const PROJECTS_KEY = ['projects'] as const
 
+// 项目处于运行 / 等待用户决策态时需要前端持续轮询;命中即让 useProjects /
+// useProject / useProjectOutline 共用同一组 polling 触发条件,避免「列表里
+// 显示 awaiting_review 但详情页一直停在 extracting」之类的漂移。
+const ACTIVE_PROJECT_STATUSES = new Set<string>([
+  'queued',
+  'extracting',
+  'awaiting_material_understanding',
+  'outlining',
+  'outline_ready',
+  'running',
+  'awaiting_review',
+])
+
 export function useProjects() {
   return useQuery({
     queryKey: PROJECTS_KEY,
@@ -38,7 +51,7 @@ export function useProjects() {
     refetchInterval: (query) => {
       const data = query.state.data
       const hasActive = (data ?? []).some((p) =>
-        ['queued', 'extracting', 'outlining', 'outline_ready', 'running', 'awaiting_review'].includes(p.status),
+        ACTIVE_PROJECT_STATUSES.has(p.status),
       )
       return hasActive ? 5_000 : false
     },
@@ -50,6 +63,15 @@ export function useProject(projectId: number | null) {
     queryKey: ['projects', projectId],
     queryFn: () => apiFetch<ProjectDTO>(`/api/projects/${projectId}`),
     enabled: projectId != null,
+    // 项目处运行 / 等待态时 5s 轮询。`OutlineConfirmPage` /
+    // `MaterialUnderstandingPage` / `DocumentUploadPage` 都以 useProject 派生
+    // 按钮可用性;没有 polling 时拿到一次 extracting 后 LLM-0 完成 / 提纲
+    // 完成都不会刷新,UI 卡死。
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      if (!status) return false
+      return ACTIVE_PROJECT_STATUSES.has(status) ? 5_000 : false
+    },
   })
 }
 
@@ -59,6 +81,14 @@ export function useProjectOutline(projectId: number | null) {
     queryFn: () =>
       apiFetch<OutlineResponseDTO>(`/api/projects/${projectId}/outline`),
     enabled: projectId != null,
+    // 提纲在 outlining → outline_ready → running 期间会从空 → 完整;章节
+    // generating 时 partial final_text 也持续 flush。无 polling 时 P4/P5
+    // 永远拿不到后续 chapter 状态。终态(done/failed/aborted)停。
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      if (!status) return 3_000 // 还没拿到 status,3s 重试
+      return ACTIVE_PROJECT_STATUSES.has(status) ? 3_000 : false
+    },
   })
 }
 
@@ -162,6 +192,9 @@ export function useStartProject() {
       }),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })
+      // 让全局列表 / banner 立刻看到 init → extracting 的状态切换,而不是
+      // 等下一个 5s 周期
+      qc.invalidateQueries({ queryKey: PROJECTS_KEY })
     },
   })
 }
@@ -277,6 +310,9 @@ export function useConfirmOutline() {
       }),
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: ['projects', vars.projectId] })
+      // outline_ready → outlining(revise)/ running(confirm)的过渡也要让
+      // 列表 banner 立刻刷一次
+      qc.invalidateQueries({ queryKey: PROJECTS_KEY })
     },
   })
 }

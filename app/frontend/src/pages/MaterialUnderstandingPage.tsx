@@ -110,6 +110,8 @@ export function MaterialUnderstandingPage() {
       qc.invalidateQueries({
         queryKey: ['projects', projectId, 'material-understanding'],
       })
+      // 列表 banner / GlobalProgressBanner 同步刷新 — 不等下一个 5s tick
+      qc.invalidateQueries({ queryKey: ['projects'] })
       if (decision === 'pass' || decision === 'skip') {
         // 后端 decision 端点只是入队 resume_review_task,DB 里 status 还会维持
         // awaiting_material_understanding 一小段时间。如果直接 navigate 到 /outline,

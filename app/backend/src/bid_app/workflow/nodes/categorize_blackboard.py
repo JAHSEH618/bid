@@ -7,11 +7,10 @@
 读 ``state.blackboard_excerpt``(extract_documents 节点写好的清洗 HTML),
 调 LLM 拆 10 桶,落 ``state.blackboard_entities`` + ``Project.blackboard_entities``。
 
-异常:LLM 调用失败 / JSON 不合法 → 抛上去(resume_review_task 走
-``except Exception → _fail_project_and_run`` 把项目标 failed)。Phase 2
-之前下游 LLM-1/2 还在用截断 markdown,本节点失败不影响 outline / chapter
-生成,只是丢失「结构化检索源」这层增强;Phase 2 接 tool calling 后再
-考虑加回退路径。
+⭐ 失败降级:LLM 调用 / JSON 解析失败时**不抛**,落空桶 + publish
+``blackboard_entities_failed`` 事件即返回。Phase 2 之前下游 LLM-1 / LLM-2
+仍以截断 markdown 为主输入,实体桶只是「结构化检索源」增强;让本节点的
+LLM 故障拖垮整条 workflow 与降级设计 + 注释承诺矛盾。
 """
 
 from __future__ import annotations
@@ -32,6 +31,10 @@ from ..sync import publish_event
 log = structlog.get_logger()
 
 
+def _empty_buckets() -> dict[str, list[dict[str, Any]]]:
+    return {b: [] for b in prompt.ENTITY_BUCKETS}
+
+
 async def _save_entities_to_project(
     project_id: int, entities: dict[str, list[dict[str, Any]]]
 ) -> None:
@@ -40,10 +43,7 @@ async def _save_entities_to_project(
     try:
         async with session_factory() as s:
             await s.execute(
-                sa.text(
-                    "UPDATE projects SET blackboard_entities=CAST(:e AS JSONB) "
-                    "WHERE id=:i"
-                ),
+                sa.text("UPDATE projects SET blackboard_entities=CAST(:e AS JSONB) WHERE id=:i"),
                 {"e": _to_jsonb_text(entities), "i": project_id},
             )
             await s.commit()
@@ -72,10 +72,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             "categorize_blackboard_empty_excerpt",
             project_id=project_id,
         )
-        empty: dict[str, list[dict[str, Any]]] = {
-            b: [] for b in prompt.ENTITY_BUCKETS
-        }
-        return {"blackboard_entities": empty}
+        return {"blackboard_entities": _empty_buckets()}
 
     api_key = await resolve_api_key(project_id, run_id=run_id)
     user_id = await resolve_user_id(project_id)
@@ -95,11 +92,33 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             # 10 桶完整 JSON 体积可观,留 16k 防截断 (与 generate_outline 同档)
             max_tokens=16384,
         )
-    except (LLMRetryFailed, LLMTimeoutExceeded):
-        log.exception(
-            "categorize_blackboard_llm_failed", project_id=project_id
+    except (LLMRetryFailed, LLMTimeoutExceeded) as e:
+        # ⭐ 降级:不 raise,落空桶 + 通知前端"实体桶降级,下游照常跑"。
+        # 实体桶只是检索增强层;让它的 LLM 故障拖垮 generate_outline 与
+        # 节点 docstring + 整体降级设计承诺矛盾。
+        log.warning(
+            "categorize_blackboard_llm_failed_fallback_empty",
+            project_id=project_id,
+            error=repr(e),
         )
-        raise
+        await publish_event(
+            project_id,
+            "blackboard_entities_failed",
+            reason=type(e).__name__,
+        )
+        return {"blackboard_entities": _empty_buckets()}
+    except Exception as e:
+        # 兜底:其它意外异常(JSON 解析等)也降级,不抛
+        log.exception(
+            "categorize_blackboard_unexpected_failed_fallback_empty",
+            project_id=project_id,
+        )
+        await publish_event(
+            project_id,
+            "blackboard_entities_failed",
+            reason=type(e).__name__,
+        )
+        return {"blackboard_entities": _empty_buckets()}
 
     entities = prompt.normalize_entities(parsed)
     total = sum(len(v) for v in entities.values())

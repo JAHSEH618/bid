@@ -10,9 +10,11 @@
   · GET    ``/api/projects/{id}/outline``     拉提纲(P4 渲染)
   · PUT    ``/api/projects/{id}/outline``     提纲确认(D-K resume_review_task)
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets
 import shutil
 from datetime import UTC, datetime
@@ -70,9 +72,7 @@ _VALID_DOC_KINDS = {"tech_spec", "scoring", "template"}
 # ========== 工具 helper ==========
 
 
-async def _get_project_or_404(
-    db: AsyncSession, project_id: int
-) -> Project:
+async def _get_project_or_404(db: AsyncSession, project_id: int) -> Project:
     project = await db.get(Project, project_id)
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found")
@@ -81,10 +81,7 @@ async def _get_project_or_404(
 
 async def _get_active_run(db: AsyncSession, project_id: int) -> Run:
     row = await db.execute(
-        select(Run)
-        .where(Run.project_id == project_id)
-        .order_by(Run.started_at.desc())
-        .limit(1)
+        select(Run).where(Run.project_id == project_id).order_by(Run.started_at.desc()).limit(1)
     )
     run = row.scalar_one_or_none()
     if run is None:
@@ -100,9 +97,7 @@ def _project_dir_for(project_id: int) -> Path:
     return Path(settings.projects_dir) / str(project_id)
 
 
-def _project_to_response(
-    project: Project, username: str | None
-) -> ProjectResponse:
+def _project_to_response(project: Project, username: str | None) -> ProjectResponse:
     """ORM Project + JOIN 出来的 username → API 响应。
 
     显式构造而不是 ``model_validate(project)``,避免 ProjectResponse 漏掉
@@ -190,9 +185,7 @@ async def get_project(
 ) -> ProjectResponse:
     project = await _get_project_or_404(db, project_id)
     username = (
-        await db.execute(
-            select(User.username).where(User.id == project.created_by)
-        )
+        await db.execute(select(User.username).where(User.id == project.created_by))
     ).scalar_one_or_none()
     return _project_to_response(project, username)
 
@@ -211,8 +204,45 @@ async def delete_project(
     """
     project = await _get_project_or_404(db, project_id)
     if project.created_by != user.id and user.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only creator or admin can delete")
+
+    # 禁止删除运行 / 等待用户输入中的项目:worker 可能正在写 checkpoint /
+    # proposal / DOCX,直接 rmtree 会出竞态。让用户先走到终态(done /
+    # failed / aborted)或让 cron 把僵尸 evict 后再删。
+    active_states = {
+        "extracting",
+        "awaiting_material_understanding",
+        "outlining",
+        "outline_ready",
+        "running",
+        "awaiting_review",
+        "queued",
+    }
+    if project.status in active_states:
         raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "only creator or admin can delete"
+            status.HTTP_409_CONFLICT,
+            f"项目状态为 {project.status},正在执行或等待用户决策,"
+            "请先等待结束 / 切换为 failed/aborted 再删除",
+        )
+
+    # ⭐ 已 done / failed / aborted 也可能挂着 in-flight DOCX(pending /
+    # rendering_mermaid / pandoc / finalizing)。rmtree 之后 worker 还会
+    # 写 proposal.docx / chapter_*.docx 到不存在的目录,留下孤儿文件 +
+    # 制造看不见的写错误。先确认 DOCX 任务都进了终态。
+    inflight_docx = (
+        await db.execute(
+            sa.text(
+                "SELECT id FROM docx_jobs WHERE project_id=:p "
+                "AND status IN ('pending','rendering_mermaid','pandoc','finalizing') "
+                "LIMIT 1"
+            ),
+            {"p": project_id},
+        )
+    ).scalar_one_or_none()
+    if inflight_docx is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "存在进行中的 DOCX 生成任务,请等待其完成或失败后再删除",
         )
 
     dir_path = Path(project.dir_path) if project.dir_path else None
@@ -223,9 +253,7 @@ async def delete_project(
     try:
         await delete_blackboard(project_id)
     except Exception:
-        log.exception(
-            "blackboard_delete_failed_non_fatal", project_id=project_id
-        )
+        log.exception("blackboard_delete_failed_non_fatal", project_id=project_id)
 
     await db.delete(project)
     try:
@@ -265,9 +293,7 @@ async def list_documents(
     """
     await _get_project_or_404(db, project_id)
     rows = await db.execute(
-        select(Document)
-        .where(Document.project_id == project_id)
-        .order_by(Document.id.asc())
+        select(Document).where(Document.project_id == project_id).order_by(Document.id.asc())
     )
     return [_document_to_response(d) for d in rows.scalars().all()]
 
@@ -290,9 +316,7 @@ async def upload_document(
     tags: Annotated[
         str | None,
         Form(
-            description=(
-                "用户自定义标签,逗号分隔。例如 'tech_spec, draft'。"
-            ),
+            description=("用户自定义标签,逗号分隔。例如 'tech_spec, draft'。"),
         ),
     ] = None,
 ) -> DocumentUploadResponse:
@@ -306,10 +330,15 @@ async def upload_document(
       看 ``extract_status`` 翻 done / failed。
     """
     project = await _get_project_or_404(db, project_id)
-    if project.status not in ("init", "extracting", "outlining", "outline_ready"):
+    # ⭐ 启动后冻结材料:worker 在 build_initial_state 已把 tech_spec_md /
+    # scoring_md / template_md 拷进 WorkflowState,后续 generate_outline /
+    # write_chapter 都从 state 读不会重新拉 DB。允许在 extracting/outlining
+    # 期间换材料会让 UI 显示的"已上传"和 LLM 实际看到的不一致。要换材料
+    # 就重建项目。
+    if project.status != "init":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"project status '{project.status}' does not accept document uploads",
+            f"project status '{project.status}' 已启动工作流,材料已冻结;如需更换请新建项目",
         )
 
     if kind is not None and kind not in _VALID_DOC_KINDS:
@@ -325,23 +354,11 @@ async def upload_document(
     if suffix not in _ALLOWED_UPLOAD_EXT:
         raise HTTPException(
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            f"unsupported file type {suffix!r}; allowed: "
-            f"{sorted(_ALLOWED_UPLOAD_EXT)}",
+            f"unsupported file type {suffix!r}; allowed: {sorted(_ALLOWED_UPLOAD_EXT)}",
         )
 
-    # 读流并校验大小(file.size 在 starlette 0.36+ 给的是 Content-Length,
-    # 不一定准;以读完后的字节数为准)
-    raw = await file.read()
-    file_size = len(raw)
-    # ⭐ PR-M7-2 / D5:单文件 200MB
-    if file_size > settings.max_file_upload_bytes:
-        raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            f"file too large: {file_size // 1024 // 1024}MB > "
-            f"{settings.max_file_upload_bytes // 1024 // 1024}MB",
-        )
-
-    # ⭐ PR-M7-2 / D5:项目总和 500MB
+    # 读流并校验大小:**分块流式落盘**,200MB 文件不再常驻内存。
+    # 受两条上限约束,同步累计 size,任一超限提前 413 并清理 partial。
     project_total = (
         await db.execute(
             sa.text(
@@ -351,22 +368,48 @@ async def upload_document(
             {"p": project_id},
         )
     ).scalar_one()
-    if int(project_total) + file_size > settings.max_project_upload_bytes:
-        raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            f"项目总上传 {int(project_total) // 1024 // 1024}MB 已接近上限,"
-            f"再传本文件 ({file_size // 1024 // 1024}MB) 会超过 "
-            f"{settings.max_project_upload_bytes // 1024 // 1024}MB",
-        )
+    remaining_in_project = settings.max_project_upload_bytes - int(project_total)
 
-    # 落盘
+    # 落盘(分块)
     project_dir = Path(project.dir_path)
     uploads_dir = project_dir / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     name_prefix = kind or "doc"
     safe_name = f"{name_prefix}_{secrets.token_hex(4)}{suffix}"
     stored_path = uploads_dir / safe_name
-    await asyncio.to_thread(stored_path.write_bytes, raw)
+
+    chunk_size = 1024 * 1024  # 1 MiB
+    file_size = 0
+    fp = await asyncio.to_thread(stored_path.open, "wb")
+    try:
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            file_size += len(chunk)
+            # 单文件 200MB
+            if file_size > settings.max_file_upload_bytes:
+                raise HTTPException(
+                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    f"file too large: > {settings.max_file_upload_bytes // 1024 // 1024}MB",
+                )
+            # 项目总和 500MB
+            if file_size > remaining_in_project:
+                raise HTTPException(
+                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    f"项目总上传 {int(project_total) // 1024 // 1024}MB 已接近上限,"
+                    f"再传本文件会超过 "
+                    f"{settings.max_project_upload_bytes // 1024 // 1024}MB",
+                )
+            await asyncio.to_thread(fp.write, chunk)
+    except BaseException:
+        # 包含 HTTPException / 网络中断 / 磁盘满:清理半成品避免占盘
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(fp.close)
+        stored_path.unlink(missing_ok=True)
+        raise
+    else:
+        await asyncio.to_thread(fp.close)
 
     parsed_tags: list[str] | None = None
     if tags:
@@ -376,6 +419,7 @@ async def upload_document(
         project_id=project_id,
         kind=kind,
         original_filename=file.filename,
+        stored_path=str(stored_path),
         markdown_path=None,
         file_size=file_size,
         byte_size=file_size,
@@ -388,7 +432,11 @@ async def upload_document(
     await db.refresh(doc)
 
     # ⭐ PR-M7-2:把抽取异步化,不阻塞 HTTP 响应
+    # 入队失败 → 原地同步抽取一次(同 arq_pool 缺失分支),不让文档永久卡在
+    # pending,否则后续 /start 会被 "等抽取完成" 校验永久拒绝,而前端没有
+    # 单独的重抽端点。
     arq_pool = getattr(request.app.state, "arq_pool", None)
+    enqueued = False
     if arq_pool is not None:
         try:
             await arq_pool.enqueue_job(
@@ -396,15 +444,16 @@ async def upload_document(
                 document_id=doc.id,
                 stored_path=str(stored_path),
             )
+            enqueued = True
         except Exception:
-            # 入队失败不阻挡 201 — 用户可手动 retry(后续 PR 加端点)
             log.exception(
-                "extract_document_enqueue_failed",
+                "extract_document_enqueue_failed_fallback_inline",
                 document_id=doc.id,
                 project_id=project_id,
             )
-    else:
-        # arq_pool 缺失时退化:原地同步抽取一次,保证向后兼容
+
+    if not enqueued:
+        # arq_pool 缺失 OR 入队失败 → 原地同步抽取兜底
         try:
             md_text = await asyncio.to_thread(extract_file, stored_path)
             md_path = uploads_dir / f"{name_prefix}_{doc.id}.md"
@@ -460,16 +509,17 @@ async def delete_document(
 ) -> dict[str, bool]:
     """删除单个上传文档(PR-M7-2 多文件模式)。
 
-    与上传同步:只在工作流未启动的几个状态下允许删除,避免抽取中 / 已下游
-    使用的文档被悄悄抽掉。磁盘上的 markdown 副本尽力删,失败仅 log;原始
-    上传文件目前未在 Document 行里持久化路径,留待项目删除时 ``rmtree``
-    统一清理。
+    与上传同步:只在 init 状态下允许删除,避免抽取中 / 已下游使用的文档被
+    悄悄抽掉。磁盘上的 markdown 副本 + 原始上传文件都尽力删,失败仅 log。
+    清理原始上传文件(stored_path)是为了防止"上传 → 删除 → 再上传"绕过
+    项目目录 500MB 上限 — byte_size 总和回落但磁盘累积。
     """
     project = await _get_project_or_404(db, project_id)
-    if project.status not in ("init", "extracting", "outlining", "outline_ready"):
+    # ⭐ 与 upload 同源:启动后材料冻结,只在 init 状态允许删除文档
+    if project.status != "init":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"project status '{project.status}' does not accept document edits",
+            f"project status '{project.status}' 已启动工作流,材料已冻结;如需更换请新建项目",
         )
 
     doc = (
@@ -483,15 +533,20 @@ async def delete_document(
     if doc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
 
-    if doc.markdown_path:
+    # 原始上传文件 + markdown 副本一起 unlink(best-effort,失败仅 log)
+    for path_attr, label in (("stored_path", "原始上传"), ("markdown_path", "markdown")):
+        p = getattr(doc, path_attr, None)
+        if not p:
+            continue
         try:
-            Path(doc.markdown_path).unlink(missing_ok=True)
+            Path(p).unlink(missing_ok=True)
         except Exception:
             log.exception(
-                "document_markdown_unlink_failed",
+                "document_file_unlink_failed",
                 project_id=project_id,
                 document_id=document_id,
-                path=doc.markdown_path,
+                kind=label,
+                path=p,
             )
 
     await db.delete(doc)
@@ -544,15 +599,11 @@ async def start_workflow(
 
     api_key = (
         await db.execute(
-            select(ApiKey).where(
-                ApiKey.user_id == user.id, ApiKey.provider == "dashscope"
-            )
+            select(ApiKey).where(ApiKey.user_id == user.id, ApiKey.provider == "dashscope")
         )
     ).scalar_one_or_none()
     if api_key is None:
-        raise HTTPException(
-            status.HTTP_412_PRECONDITION_FAILED, "请先配置 DashScope API Key"
-        )
+        raise HTTPException(status.HTTP_412_PRECONDITION_FAILED, "请先配置 DashScope API Key")
 
     # ⭐ D-C 真快照
     project.api_key_owner = user.id
@@ -562,15 +613,9 @@ async def start_workflow(
 
     # 模型选择在生成流程里提交。Project 只存提纲 / 配图 / 章节默认快照;
     # 每章正文模型会在确认提纲时写 chapters.model_snapshot。
-    project.outline_model_snapshot = _normalize_selected_model(
-        body.outline_model, user
-    )
-    project.chapter_model_snapshot = _normalize_selected_model(
-        body.chapter_model, user
-    )
-    project.visuals_model_snapshot = _normalize_selected_model(
-        body.visuals_model, user
-    )
+    project.outline_model_snapshot = _normalize_selected_model(body.outline_model, user)
+    project.chapter_model_snapshot = _normalize_selected_model(body.chapter_model, user)
+    project.visuals_model_snapshot = _normalize_selected_model(body.visuals_model, user)
 
     thread_id = f"run-{project_id}-{secrets.token_hex(8)}"
     run = Run(
@@ -585,52 +630,63 @@ async def start_workflow(
     result = await try_acquire_project_slot(project_id)
     if result.reason == "already_active":
         # 上面已校验 status==init,理论不会到这,兜底防 race
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "项目已有进行中的执行"
-        )
+        raise HTTPException(status.HTTP_409_CONFLICT, "项目已有进行中的执行")
 
-    if result.acquired:
-        project.status = "extracting"
-    else:  # "full"
-        project.status = "queued"
-    await db.commit()
+    # 拿到 token 后,任何路径(包含 db.commit 异常)都要负责释放,否则要等
+    # RESERVE_TTL 才回收。`need_release_on_error` 在正常入队成功 / 显式
+    # release 后翻 False,异常路径里看它决定要不要回滚 slot。
+    acquired_token = result.token if result.acquired else None
+    need_release_on_error = acquired_token is not None
+    try:
+        if result.acquired:
+            project.status = "extracting"
+        else:  # "full"
+            project.status = "queued"
+        await db.commit()
 
-    if result.acquired:
-        arq_pool = getattr(request.app.state, "arq_pool", None)
-        if arq_pool is None:
-            # arq_pool 还没初始化(M2 接 lifespan 挂),回滚 + 503
-            await release_project_slot(project_id, result.token)
-            project.status = "init"
-            run.status = "aborted"
-            run.finished_at = datetime.now(UTC)
-            run.error = "arq_pool not initialized"
-            await db.commit()
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "arq_pool 未初始化(等 lifespan 起完再试)",
-            )
-        try:
-            await arq_pool.enqueue_job(
-                "start_workflow_task",
-                project_id=project_id,
-                run_id=run.id,
-                thread_id=thread_id,
-                slot_token=result.token,
-            )
-        except Exception as e:
-            log.exception(
-                "start_enqueue_failed", project_id=project_id, run_id=run.id
-            )
-            project.status = "init"
-            run.status = "aborted"
-            run.finished_at = datetime.now(UTC)
-            run.error = f"enqueue failed: {e!r}"
-            await db.commit()
-            await release_project_slot(project_id, result.token)
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="无法入队工作流任务,请稍后重试 /start",
-            ) from e
+        if result.acquired:
+            arq_pool = getattr(request.app.state, "arq_pool", None)
+            if arq_pool is None:
+                # arq_pool 还没初始化(M2 接 lifespan 挂),回滚 + 503
+                await release_project_slot(project_id, result.token)
+                need_release_on_error = False
+                project.status = "init"
+                run.status = "aborted"
+                run.finished_at = datetime.now(UTC)
+                run.error = "arq_pool not initialized"
+                await db.commit()
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "arq_pool 未初始化(等 lifespan 起完再试)",
+                )
+            try:
+                await arq_pool.enqueue_job(
+                    "start_workflow_task",
+                    project_id=project_id,
+                    run_id=run.id,
+                    thread_id=thread_id,
+                    slot_token=result.token,
+                )
+            except Exception as e:
+                log.exception("start_enqueue_failed", project_id=project_id, run_id=run.id)
+                project.status = "init"
+                run.status = "aborted"
+                run.finished_at = datetime.now(UTC)
+                run.error = f"enqueue failed: {e!r}"
+                await db.commit()
+                await release_project_slot(project_id, result.token)
+                need_release_on_error = False
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="无法入队工作流任务,请稍后重试 /start",
+                ) from e
+            # 入队成功:worker 接管 slot,本路径不再持有释放责任
+            need_release_on_error = False
+    except BaseException:
+        if need_release_on_error and acquired_token is not None:
+            with contextlib.suppress(Exception):
+                await release_project_slot(project_id, acquired_token)
+        raise
 
     return StartResponse(run_id=run.id, queued=not result.acquired)
 
@@ -648,22 +704,21 @@ async def get_outline(
     project = await _get_project_or_404(db, project_id)
     run = (
         await db.execute(
-            select(Run)
-            .where(Run.project_id == project_id)
-            .order_by(Run.started_at.desc())
-            .limit(1)
+            select(Run).where(Run.project_id == project_id).order_by(Run.started_at.desc()).limit(1)
         )
     ).scalar_one_or_none()
 
     chapters: list[OutlineChapterDTO] = []
     if run is not None:
         rows = (
-            await db.execute(
-                select(Chapter)
-                .where(Chapter.run_id == run.id)
-                .order_by(Chapter.index.asc())
+            (
+                await db.execute(
+                    select(Chapter).where(Chapter.run_id == run.id).order_by(Chapter.index.asc())
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         chapters = [
             OutlineChapterDTO(
                 id=f"ch_{c.index + 1:02d}",
@@ -754,9 +809,7 @@ async def confirm_outline(
     arq_pool = getattr(request.app.state, "arq_pool", None)
     if arq_pool is None:
         await release_project_slot(project_id, result.token)
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
-        )
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化")
 
     resume_payload: dict[str, Any] = {
         "kind": "outline_confirm",
@@ -795,6 +848,7 @@ async def confirm_outline(
 @router.get("/{project_id}/material-understanding")
 async def get_material_understanding(
     project_id: int,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, Any]:
@@ -803,10 +857,14 @@ async def get_material_understanding(
     数据来源:LangGraph checkpoint 的 ``state.material_understanding``。
     本期 MVP 走 SSE 推送 + 前端缓存,不开 DB 查询;若 checkpoint 不可用
     则回 404 让用户重跑或刷新。
+
+    ⭐ checkpointer 从当前 request.app.state 取(显式注入),而不是 import
+    全局 ``main.app`` —— 后者在测试 app / 多实例 app / 拆 router 时会读到
+    错的 state。
     """
     project = await _get_project_or_404(db, project_id)
 
-    saver = getattr(_router_app_state(), "checkpointer", None)
+    saver = getattr(request.app.state, "checkpointer", None)
     if saver is None:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -882,8 +940,7 @@ async def decide_material_understanding(
     if project.status != "awaiting_material_understanding":
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"project status must be awaiting_material_understanding, "
-            f"got {project.status}",
+            f"project status must be awaiting_material_understanding, got {project.status}",
         )
 
     feedback = (body.feedback or "").strip()
@@ -908,9 +965,7 @@ async def decide_material_understanding(
     arq_pool = getattr(request.app.state, "arq_pool", None)
     if arq_pool is None:
         await release_project_slot(project_id, result.token)
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化"
-        )
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "arq_pool 未初始化")
 
     try:
         await arq_pool.enqueue_job(
@@ -936,19 +991,6 @@ async def decide_material_understanding(
     return {"ok": True}
 
 
-def _router_app_state() -> Any:
-    """读取当前 FastAPI app 的 state(用于拿 checkpointer)。
-
-    依赖在 main.py 把 ``checkpointer`` 挂到 ``app.state``;若没挂会回退到
-    None,调用方各自处理。
-    """
-    # 延迟 import 避免循环;每个 request 由 fastapi 注入 request 本身
-    # 也可以,但这里只读全局 app,够用了。
-    from ..main import app
-
-    return app.state
-
-
 # ========== /proposal(全文整合产物) ==========
 
 
@@ -964,8 +1006,7 @@ async def get_proposal_text(
     if not md_path.exists():
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            f"proposal.md not found; project status='{project.status}',"
-            "工作流是否已跑到 assemble?",
+            f"proposal.md not found; project status='{project.status}',工作流是否已跑到 assemble?",
         )
     text = md_path.read_text(encoding="utf-8")
     return {
@@ -990,12 +1031,8 @@ async def download_proposal_md(
     project = await _get_project_or_404(db, project_id)
     md_path = Path(project.dir_path) / "proposal.md"
     if not md_path.exists():
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "proposal.md not found"
-        )
-    safe_name = "".join(
-        "_" if ch in '<>:"/\\|?*' else ch for ch in project.name
-    )[:80] or "proposal"
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "proposal.md not found")
+    safe_name = "".join("_" if ch in '<>:"/\\|?*' else ch for ch in project.name)[:80] or "proposal"
     return FileResponse(
         md_path,
         media_type="text/markdown; charset=utf-8",

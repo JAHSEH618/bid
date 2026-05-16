@@ -20,6 +20,7 @@ API 调用方语义:
 - worker 启动:先 ``reconcile_active_projects()`` 扫一遍清僵尸;再 wake 一次
   处理漏唤醒的 queued
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -115,9 +116,7 @@ async def try_acquire_project_slot(project_id: int) -> AcquireResult:
     return await _try_acquire_inner(project_id, _allow_evict=True)
 
 
-async def _try_acquire_inner(
-    project_id: int, *, _allow_evict: bool
-) -> AcquireResult:
+async def _try_acquire_inner(project_id: int, *, _allow_evict: bool) -> AcquireResult:
     token = uuid.uuid4().hex
     r = _r()
     try:
@@ -194,9 +193,7 @@ async def heartbeat_project(project_id: int, token: str) -> bool:
     """
     r = _r()
     try:
-        ok = await r.eval(
-            _HEARTBEAT_LUA, 1, ALIVE_KEY.format(project_id), token, ALIVE_TTL
-        )
+        ok = await r.eval(_HEARTBEAT_LUA, 1, ALIVE_KEY.format(project_id), token, ALIVE_TTL)
         return ok == 1
     finally:
         await r.aclose()
@@ -213,9 +210,7 @@ return 0
 """
 
 
-async def release_project_slot(
-    project_id: int, token: str | None = None
-) -> None:
+async def release_project_slot(project_id: int, token: str | None = None) -> None:
     """SREM + DEL alive。允许重复调用。
 
     带 token 用 Lua CAS 仅当持有 token 才释放,防止误释放别人重 acquire 的 slot。
@@ -352,11 +347,7 @@ async def cleanup_stale_chapters(ctx: dict[str, Any]) -> None:
         # ⭐ D-BL + D-BS:被回滚到 failed 的章节(generating / pending),把 Project
         # 切 awaiting_review,让用户能从 P5 看到 failed 章节并 /retry
         gen_project_ids = sorted(
-            {
-                r.project_id
-                for r in rows
-                if r.old_status in ("generating", "pending")
-            }
+            {r.project_id for r in rows if r.old_status in ("generating", "pending")}
         )
         if gen_project_ids:
             await s.execute(
@@ -388,16 +379,24 @@ async def cleanup_stale_docx_jobs(ctx: dict[str, Any]) -> None:
     repair_done_count = 0
     async with session_factory() as s:
         finalizing = (
-            await s.execute(
-                sa.text(
-                    "SELECT dj.id, dj.project_id, p.dir_path "
-                    "FROM docx_jobs dj JOIN projects p ON p.id = dj.project_id "
-                    "WHERE dj.status='finalizing'"
+            (
+                await s.execute(
+                    sa.text(
+                        "SELECT dj.id, dj.project_id, dj.scope, dj.chapter_id, "
+                        "p.dir_path "
+                        "FROM docx_jobs dj JOIN projects p ON p.id = dj.project_id "
+                        "WHERE dj.status='finalizing'"
+                    )
                 )
             )
-        ).mappings().all()
+            .mappings()
+            .all()
+        )
         for row in finalizing:
-            file_path = Path(row["dir_path"]) / "proposal.docx"
+            if row["scope"] == "chapter" and row["chapter_id"] is not None:
+                file_path = Path(row["dir_path"]) / f"chapter_{row['chapter_id']}.docx"
+            else:
+                file_path = Path(row["dir_path"]) / "proposal.docx"
             if file_path.exists():
                 upd = await s.execute(
                     sa.text(
@@ -480,10 +479,7 @@ async def wake_queued_projects(arq_pool: Any) -> int:
                                 reason=result.reason,
                             )
                             await s.execute(
-                                sa.text(
-                                    "UPDATE projects SET status='failed' "
-                                    "WHERE id=:p"
-                                ),
+                                sa.text("UPDATE projects SET status='failed' WHERE id=:p"),
                                 {"p": next_pid},
                             )
                             continue
@@ -504,19 +500,13 @@ async def wake_queued_projects(arq_pool: Any) -> int:
                             )
                             await release_project_slot(next_pid, slot_token)
                             await s.execute(
-                                sa.text(
-                                    "UPDATE projects SET status='failed' "
-                                    "WHERE id=:p"
-                                ),
+                                sa.text("UPDATE projects SET status='failed' WHERE id=:p"),
                                 {"p": next_pid},
                             )
                             continue
                         run_id, thread_id = run
                         await s.execute(
-                            sa.text(
-                                "UPDATE projects SET status='extracting' "
-                                "WHERE id=:p"
-                            ),
+                            sa.text("UPDATE projects SET status='extracting' WHERE id=:p"),
                             {"p": next_pid},
                         )
                     try:
@@ -533,10 +523,7 @@ async def wake_queued_projects(arq_pool: Any) -> int:
                         await release_project_slot(next_pid, slot_token)
                         async with session_factory() as s2:
                             await s2.execute(
-                                sa.text(
-                                    "UPDATE projects SET status='queued' "
-                                    "WHERE id=:p"
-                                ),
+                                sa.text("UPDATE projects SET status='queued' WHERE id=:p"),
                                 {"p": next_pid},
                             )
                             await s2.commit()
@@ -552,9 +539,7 @@ class SlotLost(Exception):
 
 
 @contextlib.asynccontextmanager
-async def project_heartbeat(
-    project_id: int, token: str
-) -> AsyncIterator[asyncio.Event]:
+async def project_heartbeat(project_id: int, token: str) -> AsyncIterator[asyncio.Event]:
     """task 运行时上下文,每 ``HEARTBEAT_INTERVAL`` 秒续租 alive TTL(D-AM)。
 
     续租失败(token 不再匹配)→ 设 ``lost_event``,主循环用
@@ -577,9 +562,7 @@ async def project_heartbeat(
             except Exception:
                 log.exception("heartbeat_failed", project_id=project_id)
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    lost_event.wait(), timeout=HEARTBEAT_INTERVAL
-                )
+                await asyncio.wait_for(lost_event.wait(), timeout=HEARTBEAT_INTERVAL)
 
     hb_task = asyncio.create_task(_loop())
     try:
