@@ -9,6 +9,7 @@
 ⚠️ ``open_checkpointer`` 共享逻辑见 ``workflow/checkpointer.py``;web 进程
 也用同一个 helper,两侧各自持有独立的连接池(不共享)。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -19,6 +20,7 @@ import structlog
 from ..db import session_factory
 from ..services.concurrency import (
     reconcile_active_projects,
+    recover_pending_starts,
     wake_queued_projects,
 )
 from ..workflow.checkpointer import open_checkpointer
@@ -65,9 +67,7 @@ async def _reconcile_orphaned_chapters_on_startup() -> None:
             )
             rows = result.all()
             if rows:
-                log.warning(
-                    "worker_startup_reconciled_orphans", count=len(rows)
-                )
+                log.warning("worker_startup_reconciled_orphans", count=len(rows))
             # ⭐ 把对应 run + project 状态从 failed 改回 running:之前若被 cron
             # cleanup 抢标 failed,但实际 chapters 已被本函数回滚为
             # failed/awaiting_review,UI 上需 running 状态才让用户能 retry 续跑。
@@ -104,6 +104,16 @@ async def on_startup(ctx: dict[str, Any]) -> None:
     ctx["checkpointer"] = saver
     ctx["checkpointer_pool"] = pool  # on_shutdown 用
     ctx["arq_pool"] = ctx["redis"]  # arq 把 redis 连接放在 ctx['redis']
+
+    # ⭐ 先于 reconcile 兜底:把 "/start commit 后 enqueue 前崩溃" 的项目
+    # 重新入队,而不是直接标 failed。LangGraph checkpointer 会从最新
+    # checkpoint resume,extracting/outlining/running 都能续上。
+    try:
+        recovered = await recover_pending_starts(ctx["arq_pool"])
+        if recovered:
+            log.info("worker_startup_recovered_pending_starts", count=recovered)
+    except Exception:
+        log.exception("worker_startup_recover_pending_starts_failed")
 
     zombies = await reconcile_active_projects()
     if zombies:

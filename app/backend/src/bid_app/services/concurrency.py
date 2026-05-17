@@ -284,7 +284,20 @@ async def get_alive_project_ids() -> list[int]:
 
 
 async def reconcile_periodic(ctx: dict[str, Any]) -> None:
-    """arq cron(每分钟)。catch worker 不重启但 heartbeat 异常的情况(D-AG)。"""
+    """arq cron(每分钟)。catch worker 不重启但 heartbeat 异常的情况(D-AG)。
+
+    顺序:先 ``recover_pending_starts``(给 enqueue 窗口崩溃的项目一次重新
+    入队机会),再 ``reconcile_active_projects`` 把仍无 alive 的标 failed。
+    没有 recover 兜底时,/start commit 与 enqueue 之间的崩溃只能等到这里
+    被标 failed,用户得手动重建。
+    """
+    arq_pool = ctx.get("arq_pool")
+    if arq_pool is not None:
+        try:
+            await recover_pending_starts(arq_pool)
+        except Exception:
+            log.exception("reconcile_periodic_recover_failed")
+
     zombies = await reconcile_active_projects()
     if zombies:
         async with session_factory() as s:
@@ -661,3 +674,114 @@ async def chapter_heartbeat(chapter_id: int) -> AsyncIterator[None]:
             await hb_task
         with contextlib.suppress(Exception):
             await release_chapter_alive(chapter_id)
+
+
+# ============== pending-start 恢复 ==============
+
+
+async def recover_pending_starts(arq_pool: Any) -> int:
+    """重入队"DB 已 extracting/outlining/running 但 Redis slot 失效"的项目。
+
+    场景:``/start`` 在 ``db.commit(status='extracting')`` 与
+    ``arq_pool.enqueue_job(...)`` 之间崩溃,或 ``wake_queued_projects``
+    在同一窗口崩溃 → ALIVE_KEY 5 分钟 TTL 后过期,但 DB 里的 ``extracting``
+    永远停在那里。旧路径只有 ``reconcile_active_projects`` 兜底标
+    ``failed``,用户必须手动重建项目,在已落入用户期望的 starting state
+    丢失工作。本函数:
+
+    - 扫所有 ``status IN (extracting / outlining / running)`` 的项目;
+    - 对每个,如果 ALIVE_KEY 仍存在 → 真在跑,跳过;
+    - 否则 SREM 旧 ACTIVE_SET 残留,重新 try_acquire,成功就 enqueue
+      ``start_workflow_task``(LangGraph checkpointer 会从最新 checkpoint
+      resume);占满则改成 ``queued`` 让 wake 兜底接力;
+    - 没有有效 Run 的归类异常,留给 ``reconcile_active_projects`` 标 failed。
+
+    返回成功重新入队的数量。
+    """
+    recovered = 0
+    async with session_factory() as s:
+        rows = (
+            (
+                await s.execute(
+                    sa.text(
+                        """
+                        SELECT p.id AS pid,
+                               r.id AS rid,
+                               r.langgraph_thread_id AS thread_id,
+                               r.status AS rstatus
+                        FROM projects p
+                        LEFT JOIN LATERAL (
+                            SELECT id, langgraph_thread_id, status
+                            FROM runs WHERE project_id = p.id
+                            ORDER BY started_at DESC LIMIT 1
+                        ) r ON true
+                        WHERE p.status IN ('extracting','outlining','running')
+                        """
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    if not rows:
+        return 0
+
+    r = _r()
+    try:
+        for row in rows:
+            pid = int(row["pid"])
+            alive = await r.exists(ALIVE_KEY.format(pid))
+            if alive:
+                continue  # 真在跑(heartbeat 续租中),别动
+            run_id = row["rid"]
+            thread_id = row["thread_id"]
+            rstatus = row["rstatus"]
+            if run_id is None or not thread_id or rstatus != "running":
+                # 没有 Run / Run 已终态 → 不能恢复;留给 reconcile 标 failed
+                log.warning(
+                    "recover_pending_start_no_resumable_run",
+                    project_id=pid,
+                    run_status=rstatus,
+                )
+                continue
+            # SREM 旧 stale 成员,避免 reconcile 把它当 zombie
+            await r.srem(ACTIVE_SET, pid)
+            result = await try_acquire_project_slot(pid)
+            if not result.acquired:
+                # 满 → 切 queued 让 wake_queued_projects 接力;already_active
+                # 理论不可能(刚 SREM),保守也标 queued
+                async with session_factory() as s2:
+                    await s2.execute(
+                        sa.text("UPDATE projects SET status='queued' WHERE id=:p"),
+                        {"p": pid},
+                    )
+                    await s2.commit()
+                log.info(
+                    "recover_pending_start_queued_no_capacity",
+                    project_id=pid,
+                    reason=result.reason,
+                )
+                continue
+            try:
+                await arq_pool.enqueue_job(
+                    "start_workflow_task",
+                    project_id=pid,
+                    run_id=int(run_id),
+                    thread_id=thread_id,
+                    slot_token=result.token,
+                )
+                recovered += 1
+                log.info("recovered_pending_start", project_id=pid, run_id=run_id)
+            except Exception:
+                log.exception("recover_pending_start_enqueue_failed", project_id=pid)
+                await release_project_slot(pid, result.token)
+                async with session_factory() as s2:
+                    await s2.execute(
+                        sa.text("UPDATE projects SET status='queued' WHERE id=:p"),
+                        {"p": pid},
+                    )
+                    await s2.commit()
+    finally:
+        await r.aclose()
+    return recovered

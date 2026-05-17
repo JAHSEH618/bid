@@ -378,7 +378,7 @@ function UploadSlot({
     }
     const ext = file.name.split('.').pop()?.toLowerCase()
     if (!ALLOWED_EXTS.includes(ext ?? '')) {
-      return '仅支持 .docx / .doc / .pdf / .md / .txt'
+      return '仅支持 .docx / .doc / .md / .txt(暂不支持 PDF)'
     }
     return null
   }

@@ -71,8 +71,18 @@ _VALID_DOC_KINDS = {"tech_spec", "scoring", "template"}
 # ========== 工具 helper ==========
 
 
-async def _get_project_or_404(db: AsyncSession, project_id: int) -> Project:
-    project = await db.get(Project, project_id)
+async def _get_project_or_404(
+    db: AsyncSession, project_id: int, *, for_update: bool = False
+) -> Project:
+    """加 ``for_update=True`` 走 ``SELECT ... FOR UPDATE``,在事务里给 project
+    行加行级锁,序列化并发请求(/start、upload 等关心 status / 累计配额的
+    路径用)。事务结束自动释放锁,无需显式 unlock。
+    """
+    if for_update:
+        row = await db.execute(select(Project).where(Project.id == project_id).with_for_update())
+        project = row.scalar_one_or_none()
+    else:
+        project = await db.get(Project, project_id)
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found")
     return project
@@ -367,7 +377,9 @@ async def upload_document(
       抽取由 ``extract_document_task`` 后台处理,前端轮询 ``GET /documents``
       看 ``extract_status`` 翻 done / failed。
     """
-    project = await _get_project_or_404(db, project_id)
+    # ⭐ FOR UPDATE 锁住 project 行直到本次上传事务结束 — 否则并发上传读到
+    # 相同 project_total,各自都通过 500MB 校验,最终超额。
+    project = await _get_project_or_404(db, project_id, for_update=True)
     # ⭐ 启动后冻结材料:worker 在 build_initial_state 已把 tech_spec_md /
     # scoring_md / template_md 拷进 WorkflowState,后续 generate_outline /
     # write_chapter 都从 state 读不会重新拉 DB。允许在 extracting/outlining
@@ -477,7 +489,16 @@ async def upload_document(
         extract_error=None,
     )
     db.add(doc)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        # commit 失败(DB 错误 / 唯一索引冲突等) → 反向清理已落盘的原始文件,
+        # 否则文件孤儿 + Document 不存在,后续 byte_size 配额聚合也少这一份,
+        # 但磁盘累积。DB 是权威。
+        await db.rollback()
+        with contextlib.suppress(Exception):
+            stored_path.unlink(missing_ok=True)
+        raise
     await db.refresh(doc)
 
     # ⭐ PR-M7-2:把抽取异步化,不阻塞 HTTP 响应
@@ -583,11 +604,25 @@ async def delete_document(
     if doc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
 
-    # 原始上传文件 + markdown 副本一起 unlink(best-effort,失败仅 log)
+    # ⭐ 顺序:先 commit DB(权威),成功后再 unlink 物理文件。反过来做
+    # ("先 unlink 再 commit")时若 commit 失败,会留下指向已删除文件的
+    # Document 行,后续抽取 / 配额聚合都被串号。
+    paths_to_unlink: list[tuple[str, str]] = []
     for path_attr, label in (("stored_path", "原始上传"), ("markdown_path", "markdown")):
         p = getattr(doc, path_attr, None)
-        if not p:
-            continue
+        if p:
+            paths_to_unlink.append((label, p))
+
+    await db.delete(doc)
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    # commit 后 best-effort 清理磁盘;失败仅 log(DB 已是真相,磁盘留孤儿
+    # 比留指向不存在文件的 row 安全 — 项目目录最终 rmtree 时统一清)
+    for label, p in paths_to_unlink:
         try:
             Path(p).unlink(missing_ok=True)
         except Exception:
@@ -599,8 +634,6 @@ async def delete_document(
                 path=p,
             )
 
-    await db.delete(doc)
-    await db.commit()
     _ = user
     return {"ok": True}
 
@@ -617,7 +650,11 @@ async def start_workflow(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StartResponse:
     """启动工作流(D-AF / D-C 真快照 / D-T 名额)。"""
-    project = await _get_project_or_404(db, project_id)
+    # ⭐ FOR UPDATE 锁住 project 行直到事务结束 — 并发 /start 串行化:
+    # 第一个请求把 status='extracting' 提交后,第二个请求才看到新 status,
+    # 命中 status!=init 校验 409。否则两并发都过 status 校验 → 各建一条 Run
+    # / 各占一份 slot。
+    project = await _get_project_or_404(db, project_id, for_update=True)
 
     if project.status != "init":
         raise HTTPException(
