@@ -265,14 +265,6 @@ async def delete_project(
 
     dir_path = Path(project.dir_path) if project.dir_path else None
 
-    # ⭐ PR-M7-3:黑板级联删除(在 Project ORM 删除前调,顺序无关但语义更清晰)
-    from ..workflow.blackboard import delete_blackboard
-
-    try:
-        await delete_blackboard(project_id)
-    except Exception:
-        log.exception("blackboard_delete_failed_non_fatal", project_id=project_id)
-
     # ⭐ 先 rename 项目目录到 ``.deleted-<id>-<ts>``(原子操作),再 commit DB。
     # 这样:
     #   1. rename 失败 → 不 commit,用户能 retry,投标原文不会留孤儿
@@ -304,6 +296,17 @@ async def delete_project(
             with contextlib.suppress(Exception):
                 trash_path.rename(dir_path)
         raise
+
+    # ⭐ 黑板清理只在 DB commit 成功后做:rename / commit 失败时 Project 行
+    # 还在,但黑板已经被清掉的话,后续 retry 删除就遇到「黑板 NULL 但 Project
+    # 完好」的脏态。trash_path 已包含 blackboard.html,失败的 rmtree 留命名
+    # 标记,不会影响数据正确性。
+    from ..workflow.blackboard import delete_blackboard
+
+    try:
+        await delete_blackboard(project_id)
+    except Exception:
+        log.exception("blackboard_delete_failed_non_fatal", project_id=project_id)
 
     # commit 已成功;rmtree 失败仅 log,trash 命名留可识别痕迹
     if trash_path is not None:
@@ -921,6 +924,36 @@ async def confirm_outline(
                 )
 
     run = await _get_active_run(db, project_id)
+
+    # ⭐ 校验 selected_chapter_ids 必须是当前 chapters 的非空子集 — 否则
+    # pick_chapter 把所有不匹配章节标 skipped,outline 越界后直接 assemble
+    # 生成 0 章方案并把项目标 done(用户看到「完成」却下载到空稿)。
+    if decision == "confirm" and body.selected_chapter_ids is not None:
+        if not body.selected_chapter_ids:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "selected_chapter_ids 不能为空列表;留空 / null 等价于全选",
+            )
+        if edited:
+            valid_ids = {c.get("id") for c in edited if c.get("id")}
+        else:
+            ch_indices = (
+                (await db.execute(select(Chapter.index).where(Chapter.run_id == run.id)))
+                .scalars()
+                .all()
+            )
+            valid_ids = {f"ch_{i + 1:02d}" for i in ch_indices}
+        if not valid_ids:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "当前项目没有可勾选的章节;请等待提纲生成",
+            )
+        unknown = [s for s in body.selected_chapter_ids if s not in valid_ids]
+        if unknown:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"selected_chapter_ids 含未知项:{unknown}",
+            )
 
     result = await try_acquire_project_slot(project_id)
     if result.reason == "already_active":

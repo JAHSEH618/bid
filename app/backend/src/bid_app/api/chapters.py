@@ -211,6 +211,11 @@ async def update_chapter_model(
             {"c": chapter["id"]},
         )
     await db.commit()
+    # 切模型 + 清 prefetch → 旧 chapter_{id}.docx 与新 final_text 错位
+    if clear_prefetch:
+        from ..services.docx_invalidation import invalidate_chapter_docx
+
+        await invalidate_chapter_docx(int(chapter["id"]))
     return {"ok": True, "chapter_model": selected}
 
 
@@ -560,7 +565,9 @@ async def retry_chapter(
                 {"c": chapter_id},
             )
             await db.commit()
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "重试处理异常,请稍后重试") from e
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "重试处理异常,请稍后重试"
+            ) from e
 
         return {"ok": True}
 

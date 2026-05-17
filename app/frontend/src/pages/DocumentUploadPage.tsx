@@ -83,6 +83,9 @@ export function DocumentUploadPage() {
   const [visualsModel, setVisualsModel] = useState('')
 
   // PR-M7-2 多文件:每个 kind 保留全部文档(按上传时间从旧到新)。
+  // 与后端 extract_for_project 同口径:文档要么 ``kind == bucket``,要么
+  // ``tags`` 列表里命中 bucket 字符串。tag-only 文档(没填 kind 但 tags
+  // 含 "tech_spec")也算入对应槽,避免后端可见但前端不可见。
   const documentsByKind = useMemo<Record<DocumentKind, DocumentDTO[]>>(
     () => {
       const acc: Record<DocumentKind, DocumentDTO[]> = {
@@ -91,8 +94,10 @@ export function DocumentUploadPage() {
         template: [],
       }
       for (const d of documents.data ?? []) {
-        if (d.kind && d.kind in acc) {
-          acc[d.kind].push(d)
+        for (const k of Object.keys(acc) as DocumentKind[]) {
+          if (d.kind === k || (d.tags && d.tags.includes(k))) {
+            acc[k].push(d)
+          }
         }
       }
       return acc

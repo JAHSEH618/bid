@@ -284,7 +284,12 @@ async def _prepare_chapter_body_generation(run_id: int, chapter_index: int) -> i
             {"c": chapter_id},
         )
         await s.commit()
-        return chapter_id
+
+    # final_text 即将被新生成覆盖 → 旧 chapter_{id}.docx 缓存作废
+    from ..services.docx_invalidation import invalidate_chapter_docx
+
+    await invalidate_chapter_docx(chapter_id)
+    return chapter_id
 
 
 async def _slot_lost_compensation(
@@ -720,6 +725,11 @@ async def retry_failed_chapter_task(
                 {"c": chapter_id},
             )
             await s.commit()
+
+        # 重试会重新生成 final_text → 旧 chapter_{id}.docx 缓存作废
+        from ..services.docx_invalidation import invalidate_chapter_docx
+
+        await invalidate_chapter_docx(chapter_id)
 
         async with project_heartbeat(project_id, token) as lost_event:
             await graph.aupdate_state(config, {"retry_count": 0})

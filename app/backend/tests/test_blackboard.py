@@ -38,21 +38,18 @@ def _stub_session_factory(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def tmp_projects_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Path:
+def tmp_projects_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """把所有黑板 IO 重定向到 tmp_path,确保不污染 /var/lib/bid-app。"""
     from bid_app.workflow import blackboard as bb_module
+
+    async def _fake_dir_for(project_id: int) -> Path:
+        return tmp_path / str(project_id)
 
     def _fake_dir(project_id: int) -> Path:
         return tmp_path / str(project_id)
 
+    monkeypatch.setattr(bb_module, "_project_dir_for", _fake_dir_for)
     monkeypatch.setattr(bb_module, "_project_dir", _fake_dir)
-    monkeypatch.setattr(
-        bb_module,
-        "_final_path",
-        lambda pid: _fake_dir(pid) / bb_module._BLACKBOARD_FILENAME,
-    )
     return tmp_path
 
 
@@ -96,9 +93,7 @@ async def test_write_blackboard_disk_failure_raises(
     monkeypatch.setattr(os, "replace", _boom)
     with pytest.raises(BlackboardWriteFailed):
         await write_blackboard(99, "<p>x</p>")
-    assert not (
-        tmp_projects_dir / "99" / "blackboard.html.tmp"
-    ).exists()
+    assert not (tmp_projects_dir / "99" / "blackboard.html.tmp").exists()
 
 
 @pytest.mark.asyncio
