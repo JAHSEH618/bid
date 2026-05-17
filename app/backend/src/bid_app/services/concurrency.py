@@ -44,6 +44,13 @@ ACTIVE_SET = "bid_app:active_projects"
 ALIVE_KEY = "bid_app:project_alive:{}"
 WAKE_LOCK = "bid_app:wake_in_flight"
 
+# Chapter-级 heartbeat:供 generate_chapter_body_task / 其它不占 project slot
+# 的章节任务用。cleanup_stale_chapters 把 alive chapter id 从扫描里排除,
+# 避免"项目无 slot + LLM 首 token 慢 > 3 分钟"时把 generating 误杀。
+CHAPTER_ALIVE_KEY = "bid_app:chapter_alive:{}"
+CHAPTER_ALIVE_TTL = 60
+CHAPTER_HEARTBEAT_INTERVAL = 20
+
 # D-Y 双 TTL
 RESERVE_TTL = 300  # API try_acquire 设的 TTL,覆盖 enqueue→worker 启动延迟
 ALIVE_TTL = 60  # task heartbeat 续租用的较短 TTL,反映"现在真在跑"
@@ -296,6 +303,9 @@ async def cleanup_stale_chapters(ctx: dict[str, Any]) -> None:
     """arq cron(每分钟):回滚 API commit 后进程崩溃导致卡 reviewing/retrying/
     pending/generating 的章节(D-AR / D-AS / D-BF / D-BL / D-BS / D-BB)。"""
     active_ids = await get_alive_project_ids()
+    # ⭐ 章节级 heartbeat:预生成任务不占 project slot,这一组 id 给 SQL 在
+    # chapters 维度上排除,防 LLM 首 token 慢的预生成被误判 generating 卡死。
+    alive_chapter_ids = await get_alive_chapter_ids()
     rows: Sequence[Row[Any]] = []
     gen_project_ids: list[int] = []
 
@@ -307,6 +317,7 @@ async def cleanup_stale_chapters(ctx: dict[str, Any]) -> None:
                     SELECT c.id, c.status, c.run_id, r.project_id FROM chapters c
                     JOIN runs r ON r.id = c.run_id
                     WHERE r.project_id <> ALL(CAST(:active_ids AS int[]))
+                      AND c.id <> ALL(CAST(:alive_chapter_ids AS int[]))
                       AND (
                         (c.status IN ('reviewing','retrying')
                          AND c.processing_started_at IS NOT NULL
@@ -340,7 +351,10 @@ async def cleanup_stale_chapters(ctx: dict[str, Any]) -> None:
                           s.project_id AS project_id
                 """
             ),
-            {"active_ids": active_ids},
+            {
+                "active_ids": active_ids,
+                "alive_chapter_ids": alive_chapter_ids,
+            },
         )
         rows = result.fetchall()
 
@@ -572,3 +586,78 @@ async def project_heartbeat(project_id: int, token: str) -> AsyncIterator[asynci
             lost_event.set()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await hb_task
+
+
+# ============== Chapter-级 heartbeat(prefetch 任务用) ==============
+
+
+async def heartbeat_chapter(chapter_id: int) -> None:
+    """刷新 ``CHAPTER_ALIVE_KEY`` 的 TTL,标记"此 chapter 还在被某个 task
+    跑";``cleanup_stale_chapters`` 会读这组 key 把这些章节排除。"""
+    r = _r()
+    try:
+        await r.set(
+            CHAPTER_ALIVE_KEY.format(chapter_id),
+            "1",
+            ex=CHAPTER_ALIVE_TTL,
+        )
+    finally:
+        await r.aclose()
+
+
+async def release_chapter_alive(chapter_id: int) -> None:
+    r = _r()
+    try:
+        await r.delete(CHAPTER_ALIVE_KEY.format(chapter_id))
+    finally:
+        await r.aclose()
+
+
+async def get_alive_chapter_ids() -> list[int]:
+    """SCAN ``bid_app:chapter_alive:*``,返回当前活跃 chapter id 列表。
+    cleanup 用来在 SQL 里 ``NOT IN`` 这些 id。"""
+    r = _r()
+    try:
+        ids: list[int] = []
+        async for key in r.scan_iter(match="bid_app:chapter_alive:*", count=200):
+            try:
+                ids.append(int(key.rsplit(":", 1)[-1]))
+            except (ValueError, IndexError):
+                continue
+        return ids
+    finally:
+        await r.aclose()
+
+
+@contextlib.asynccontextmanager
+async def chapter_heartbeat(chapter_id: int) -> AsyncIterator[None]:
+    """供不占 project slot 的章节任务用(``generate_chapter_body_task`` 等)。
+
+    项目级 ``ACTIVE_SET`` 不会覆盖"用户在已 done / awaiting_review 项目里
+    单独点某章预生成"的场景;``cleanup_stale_chapters`` 按 3 分钟超时清
+    generating,会把首 token 慢的 LLM 调用误判 failed。本上下文每 20s 续
+    60s TTL,cleanup 在 SQL 侧 ``NOT IN`` 这些 chapter id 即可避免误杀。
+    """
+    await heartbeat_chapter(chapter_id)
+    stop_event = asyncio.Event()
+
+    async def _loop() -> None:
+        while not stop_event.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=CHAPTER_HEARTBEAT_INTERVAL)
+            if stop_event.is_set():
+                break
+            try:
+                await heartbeat_chapter(chapter_id)
+            except Exception:
+                log.exception("chapter_heartbeat_failed", chapter_id=chapter_id)
+
+    hb_task = asyncio.create_task(_loop())
+    try:
+        yield
+    finally:
+        stop_event.set()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await hb_task
+        with contextlib.suppress(Exception):
+            await release_chapter_alive(chapter_id)

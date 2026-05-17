@@ -1,4 +1,5 @@
 """Auth + me 相关 schemas。"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -107,6 +108,11 @@ class SetModelConfigRequest(BaseModel):
     @field_validator("custom_models")
     @classmethod
     def _normalize_custom_models(cls, v: list[str]) -> list[str]:
+        # FR-3.3 / FR-7:本期 LLM 一律走 DashScope(项目快照的是 DashScope
+        # API Key)。允许任意 LiteLLM provider 字符串会让用户把模型设为
+        # 比如 ``openai/gpt-4o``,litellm.acompletion 拿着 DashScope key
+        # 去打 OpenAI 失败,或更糟 — 配上对应 provider 的 key 后绕过 LLM
+        # 边界声明。统一在此拦截。
         out: list[str] = []
         seen: set[str] = set()
         for item in v:
@@ -115,6 +121,11 @@ class SetModelConfigRequest(BaseModel):
                 continue
             if len(model) > 128:
                 raise ValueError("model name must be <= 128 chars")
+            if not model.startswith("dashscope/"):
+                raise ValueError(
+                    f"only DashScope models are allowed (got '{model}'); "
+                    "model must start with 'dashscope/'"
+                )
             out.append(model)
             seen.add(model)
         return out

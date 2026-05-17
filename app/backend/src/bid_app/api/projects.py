@@ -263,18 +263,48 @@ async def delete_project(
     except Exception:
         log.exception("blackboard_delete_failed_non_fatal", project_id=project_id)
 
+    # ⭐ 先 rename 项目目录到 ``.deleted-<id>-<ts>``(原子操作),再 commit DB。
+    # 这样:
+    #   1. rename 失败 → 不 commit,用户能 retry,投标原文不会留孤儿
+    #      (旧实现 commit 在 rmtree 前,如果 rmtree 失败磁盘文件永远孤儿)。
+    #   2. commit 失败 → 把目录 rename 回去,恢复一致状态。
+    #   3. 成功提交后失败的 rmtree 留下命名一致的 ``.deleted-*`` 目录,运维
+    #      脚本 / cron 能识别并清理(命名约定 = 显式可恢复入口)。
+    trash_path: Path | None = None
+    if dir_path is not None and dir_path.exists():
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        trash_path = dir_path.parent / f"{dir_path.name}.deleted-{ts}"
+        try:
+            dir_path.rename(trash_path)
+        except OSError as e:
+            log.exception("project_dir_rename_to_trash_failed", path=str(dir_path))
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                f"项目目录无法清理,删除已中止,请重试或联系运维:{e}",
+            ) from e
+
     await db.delete(project)
     try:
         await db.commit()
     except Exception:
         await db.rollback()
+        # commit 失败 → 复位目录名,不让磁盘和 DB 出现"目录已 trash 但
+        # Project 行还在"的不一致状态
+        if trash_path is not None and dir_path is not None and not dir_path.exists():
+            with contextlib.suppress(Exception):
+                trash_path.rename(dir_path)
         raise
 
-    if dir_path is not None and dir_path.exists():
+    # commit 已成功;rmtree 失败仅 log,trash 命名留可识别痕迹
+    if trash_path is not None:
         try:
-            shutil.rmtree(dir_path)
+            shutil.rmtree(trash_path)
         except Exception:
-            log.exception("project_dir_rm_failed", path=str(dir_path))
+            log.exception(
+                "project_dir_trash_rm_failed",
+                path=str(trash_path),
+                hint="DB 已删除;命名为 .deleted-* 的孤儿目录留待运维清理",
+            )
 
     return {"ok": True}
 

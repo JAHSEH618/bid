@@ -207,6 +207,13 @@ async def delete_api_key(
 
 
 def _normalize_model_list(raw: Any) -> list[str]:
+    """统一规范化 + 过滤模型字符串。
+
+    ⭐ 只放行 ``dashscope/...`` 前缀(对齐 SetModelConfigRequest 校验)。
+    历史 DB 行可能含其它 provider(早期 schema 不校验),读时静默过滤掉,
+    避免下游 litellm.acompletion 拿到非 DashScope 字符串 + DashScope key
+    跑挂。
+    """
     if not isinstance(raw, list):
         return []
     out: list[str] = []
@@ -215,9 +222,12 @@ def _normalize_model_list(raw: Any) -> list[str]:
         if not isinstance(item, str):
             continue
         model = item.strip()
-        if model and model not in seen:
-            out.append(model)
-            seen.add(model)
+        if not model or model in seen:
+            continue
+        if not model.startswith("dashscope/"):
+            continue
+        out.append(model)
+        seen.add(model)
     return out
 
 

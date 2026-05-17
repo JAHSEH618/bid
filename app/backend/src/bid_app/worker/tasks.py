@@ -619,6 +619,7 @@ async def generate_chapter_body_task(
                 )
                 await s.commit()
 
+        from ..services.concurrency import chapter_heartbeat
         from ..workflow.nodes.write_chapter import _prefetch_chapter_body
         from ..workflow.resolve import resolve_api_key, resolve_user_id
 
@@ -628,13 +629,17 @@ async def generate_chapter_body_task(
 
         api_key = await resolve_api_key(project_id, run_id=run_id)
         user_id = await resolve_user_id(project_id)
-        await _prefetch_chapter_body(
-            state,
-            chapter_index,
-            api_key=api_key,
-            user_id=user_id,
-            failure_status="failed",
-        )
+        # ⭐ Redis chapter heartbeat:本任务不占 project slot,而 cleanup_stale_chapters
+        # 默认 3 分钟把 generating 标 failed —— LLM 首 token 慢就误杀。心跳 key
+        # 让 cleanup 在 SQL 维度排除这个 chapter id。
+        async with chapter_heartbeat(prepared_chapter_id):
+            await _prefetch_chapter_body(
+                state,
+                chapter_index,
+                api_key=api_key,
+                user_id=user_id,
+                failure_status="failed",
+            )
     except Exception as e:
         log.exception(
             "generate_chapter_body_task_failed",

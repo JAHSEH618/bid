@@ -203,8 +203,8 @@
 ### FR-6 认证与用户管理
 
 - FR-6.1 自建账号认证,密码用 **bcrypt** 哈希存储,**不**支持注册开放(账号由 admin 创建)。
-- FR-6.2 登录返回 **JWT access token**(短期,2h)+ **refresh token**(长期,7d)双 token,**HttpOnly Cookie** 落地。
-- FR-6.3 后端所有 `/api/*` 端点(除 `/api/auth/login` `/api/auth/refresh`)需要有效 access token,否则返回 401。
+- FR-6.2 登录返回 **JWT access token**(2h,HttpOnly Cookie 落地)。**不实现 refresh token**(REVIEW-2 已记录):内部 10 人工具 + 共享池模式,审核+生成单次会话很少跨 2h;过期重登成本低于维护 refresh 流(轮转 / 撤销 / 重放风险)的复杂度。客户端拿到 401 直接回登录页,不做无感续期。
+- FR-6.3 后端所有 `/api/*` 端点(除 `/api/auth/login`)需要有效 access token,否则返回 401。
 - FR-6.4 admin 端点(`/api/admin/*`)额外校验 admin 角色,否则返回 403。
 - FR-6.5 admin 可创建账号(用户名 + 初始密码 + 角色)、重置密码、禁用账号;不删账号(保留历史归属)。
 - FR-6.6 **首次登录强制改密**(必做):
@@ -400,8 +400,9 @@ LangGraph 自身的 checkpoint 表(`checkpoints` / `writes`)由 `langgraph-check
 |---|---|---|---|
 | `POST` | `/api/auth/login` | body: `{username, password}` → 设 HttpOnly cookie + 返回 user 信息 | 公开 |
 | `POST` | `/api/auth/logout` | 清 cookie | 已登录 |
-| `POST` | `/api/auth/refresh` | refresh token → 新 access token | 公开(带 refresh cookie) |
 | `GET` | `/api/auth/me` | 当前用户信息(含角色、API Key 是否已配) | 已登录 |
+
+> 不提供 `/api/auth/refresh`(FR-6.2 决策):session 过期 → 客户端回登录页。
 
 ### 个人设置
 
