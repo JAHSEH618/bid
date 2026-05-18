@@ -19,11 +19,18 @@ SUDO_PREFIX=""
 if [[ $EUID -ne 0 ]]; then SUDO_PREFIX="sudo"; fi
 
 docker_cmd=(docker)
-if ! docker compose version >/dev/null 2>&1; then
-  if sudo docker compose version >/dev/null 2>&1; then
+# 用 ``docker version`` 而不是 ``docker compose version`` 探测:后者只查
+# 插件二进制不连 daemon,非 docker 组用户能通过这条但实际所有 docker 调用
+# 都会被 socket 权限拒。
+if ! docker version >/dev/null 2>&1; then
+  if sudo -n docker version >/dev/null 2>&1; then
+    docker_cmd=(sudo docker)
+  elif sudo docker version >/dev/null 2>&1; then
+    # 上一行可能弹密码,弹完进 sudo 缓存,后续都走 sudo
     docker_cmd=(sudo docker)
   else
-    echo "❌ docker compose v2 不可用" >&2
+    echo "❌ docker daemon 不可访问且 sudo 也用不了" >&2
+    echo "   把当前用户加 docker 组,或用 sudo 重跑本脚本" >&2
     exit 1
   fi
 fi
