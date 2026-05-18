@@ -453,7 +453,13 @@ async def start_workflow_task(
 
     try:
         async with project_heartbeat(project_id, token) as lost_event:
-            await _set_project_status(project_id, "running")
+            # 早期阶段(extract_documents → material_understanding)用 ``extracting``
+            # 而不是 ``running``,前端 statusHref 才能把用户停在 /outline 等待页,
+            # 不会被 ``running`` 路由提前甩到 /review(那时还没目录,看到的就是
+            # 「提纲未生成 / 第 1 章 / 0」的空壳)。material_understanding_review /
+            # outline_review interrupt 接管之后会自然演进到 awaiting_material_understanding
+            # → outlining → running 等正式状态。
+            await _set_project_status(project_id, "extracting")
             initial = await build_initial_state(project_id, run_id)
             async for state in graph.astream(initial, config, stream_mode="values"):
                 # ⭐ PR-M7-1:每个 state snapshot 校验 schema_version
