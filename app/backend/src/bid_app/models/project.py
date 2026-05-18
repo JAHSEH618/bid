@@ -55,3 +55,9 @@ class Project(Base, TimestampMixin):
     # 用 PG JSONB(迁移 0008 也是 JSONB)对齐 schema 类型,避免
     # Alembic autogenerate 把通用 JSON ↔ JSONB 看成 diff 制造噪音。
     blackboard_entities: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    # ⭐ D-EF (2026-05-18):模版骨架包 id(如 ``gov_consumer_platform_v1``)。
+    # generate_outline 节点根据 material_understanding.project_category 选定后
+    # 写回这里,后续 revise / resume 沿用同一份骨架。NULL = 项目跑在 stage 1
+    # 之前 / 关闭了骨架开关 → 工作流退到旧自由模式。
+    template_pack: Mapped[str | None] = mapped_column(String(64), nullable=True)

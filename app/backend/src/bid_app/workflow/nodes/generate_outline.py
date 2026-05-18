@@ -3,9 +3,15 @@
 读取 ``state.tech_spec_md`` / ``scoring_md`` / ``template_md``,调
 ``call_llm_json`` 拿到 outline JSON 字符串,落到 ``state._outline_json``
 临时载体,下游 ``parse_outline`` 解析成结构化 chapters。
+
+D-EF (2026-05-18):本节点根据 ``material_understanding.project_category``
+选模版骨架包(``template_pack``),把骨架注入 LLM-1 prompt 作为强约束;
+确定的 ``template_pack`` 写回 ``Project.template_pack`` 让 revise / resume
+沿用同一份骨架。
 """
 from __future__ import annotations
 
+import sqlalchemy as sa
 import structlog
 from sqlalchemy import select
 
@@ -93,7 +99,7 @@ async def _resolve_user_id(project_id: int) -> int:
         return 0
 
 
-async def run(state: WorkflowState) -> dict[str, str]:
+async def run(state: WorkflowState) -> dict[str, str | None]:
     project_id = state["project_id"]
     run_id = state.get("run_id")
 
@@ -115,6 +121,38 @@ async def run(state: WorkflowState) -> dict[str, str]:
         and any(blackboard_entities.values())  # type: ignore[union-attr]
     )
 
+    # D-EF:挑模版骨架包 — material_understanding.project_category → pack id。
+    # 已经选定过(revise 路径上一轮写入)则沿用,否则按 LLM-0 分类挑;
+    # 都没有时回落到 DEFAULT_PACK_ID。
+    from ..templates import DEFAULT_PACK_ID, pick_pack
+
+    template_pack = state.get("template_pack")
+    skeleton: list[dict[str, str]] | None = None
+    pack_id: str | None = template_pack
+    try:
+        mu = state.get("material_understanding") or {}
+        category = None
+        if isinstance(mu, dict):
+            cat_val = mu.get("project_category")
+            if isinstance(cat_val, str) and cat_val:
+                category = cat_val
+        pack = pick_pack(category) if not template_pack else None
+        if pack is None:
+            # template_pack 已存在 → 直接 load
+            from ..templates import load_pack
+
+            assert template_pack is not None
+            try:
+                pack = load_pack(template_pack)
+            except FileNotFoundError:
+                pack = pick_pack(None)  # 回落
+        skeleton = pack.get("skeleton") if isinstance(pack, dict) else None
+        pack_id = pack.get("id") if isinstance(pack, dict) else DEFAULT_PACK_ID
+    except Exception:
+        log.exception("generate_outline_pick_pack_failed", project_id=project_id)
+        skeleton = None
+        pack_id = pack_id or DEFAULT_PACK_ID
+
     messages = build_messages(
         tech_spec_md=state.get("tech_spec_md", ""),
         scoring_md=state.get("scoring_md", ""),
@@ -122,6 +160,7 @@ async def run(state: WorkflowState) -> dict[str, str]:
         revision_feedback=revision_feedback,
         blackboard_entities=blackboard_entities,
         tool_calling_enabled=use_tool_calling,
+        skeleton=skeleton,
     )
 
     await publish_event(project_id, "outline_started")
@@ -133,6 +172,7 @@ async def run(state: WorkflowState) -> dict[str, str]:
             project_id=project_id,
             model=models.outline_model,
             max_rounds=settings.llm_tool_max_rounds,
+            template_pack=pack_id,
         )
         tool_handler = make_blackboard_tool_handler(blackboard_entities)
         _parsed, sr = await call_llm_with_tools_json(
@@ -166,4 +206,38 @@ async def run(state: WorkflowState) -> dict[str, str]:
             max_tokens=16384,
         )
 
-    return {"_outline_json": sr.text, "_outline_revision_feedback": ""}
+    # D-EF:持久化 pack_id(只在生产路径写,CLI run_id<=0 跳过)
+    if isinstance(run_id, int) and run_id > 0:
+        await _persist_template_pack(project_id, pack_id)
+
+    return {
+        "_outline_json": sr.text,
+        "_outline_revision_feedback": "",
+        "template_pack": pack_id,
+    }
+
+
+async def _persist_template_pack(project_id: int, pack_id: str | None) -> None:
+    """把选定的 ``template_pack`` 写回 ``Project`` 表(D-EF)。
+
+    幂等:已存在相同值则跳过。失败不抛(state 已存,DB 一致性可在下次 resume
+    时再对齐),只记一行 warning。
+    """
+    if not pack_id:
+        return
+    try:
+        async with session_factory() as s:
+            await s.execute(
+                sa.text(
+                    "UPDATE projects SET template_pack=:pk "
+                    "WHERE id=:p AND (template_pack IS NULL OR template_pack <> :pk)"
+                ),
+                {"pk": pack_id, "p": project_id},
+            )
+            await s.commit()
+    except Exception:
+        log.exception(
+            "generate_outline_persist_pack_failed",
+            project_id=project_id,
+            pack=pack_id,
+        )

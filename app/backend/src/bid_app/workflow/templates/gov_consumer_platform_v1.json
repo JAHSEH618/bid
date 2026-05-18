@@ -1,0 +1,211 @@
+{
+  "id": "gov_consumer_platform_v1",
+  "title": "政企信息化-票务消费类标书",
+  "description": "面向政府消费券 / 票务营销 / 城市消费服务平台类技术应答文件的标准骨架，基于《长沙城市消费服务平台》模版规则提取。",
+  "principles": ["开放性", "灵活性与扩展性", "稳定性", "易维护性", "安全性"],
+  "architecture_layers": [
+    "接入层", "网关层", "业务服务层", "能力中心层",
+    "集成接口层", "数据服务层", "基础设施层"
+  ],
+  "performance_case_h3_slots": [
+    "合同服务内容页",
+    "合同附件1-技术规范书",
+    "合同金额页",
+    "合同签订时间页、合同签页"
+  ],
+  "qualification_certs": [
+    "信息安全管理体系认证证书",
+    "信息技术服务管理体系认证证书",
+    "质量管理体系认证证书",
+    "CMMI5证书"
+  ],
+  "skeleton": [
+    {
+      "title": "评审索引表",
+      "chapter_type": "table_only",
+      "template_slot": "review_index",
+      "fixed": true,
+      "target_pages": 1
+    },
+    {
+      "title": "技术商务符合性评审细项",
+      "chapter_type": "table_only",
+      "template_slot": "compliance_index",
+      "fixed": true,
+      "target_pages": 1
+    },
+    {
+      "title": "项目建设及技术事项方案",
+      "fixed": true,
+      "children": [
+        {
+          "title": "项目概述",
+          "fixed": true,
+          "children": [
+            {
+              "title": "项目背景",
+              "chapter_type": "normal",
+              "template_slot": "project_background",
+              "fixed": true,
+              "target_pages": 1
+            },
+            {
+              "title": "项目目标",
+              "chapter_type": "normal",
+              "template_slot": "project_goals",
+              "fixed": true,
+              "target_pages": 1
+            }
+          ]
+        },
+        {
+          "title": "系统整体架构",
+          "fixed": true,
+          "children": [
+            {
+              "title": "总体设计原则",
+              "chapter_type": "principle",
+              "template_slot": "design_principles",
+              "fixed": true,
+              "target_pages": 2,
+              "required_anchors": ["开放性", "灵活性与扩展性", "稳定性", "易维护性", "安全性"]
+            },
+            {
+              "title": "应用架构方案",
+              "chapter_type": "architecture",
+              "template_slot": "application_architecture",
+              "fixed": true,
+              "target_pages": 2,
+              "required_anchors": [
+                "接入层", "网关层", "业务服务层", "能力中心层",
+                "集成接口层", "数据服务层", "基础设施层"
+              ]
+            },
+            {
+              "title": "应用解决方案",
+              "expandable": true,
+              "child_chapter_type": "module",
+              "expand_min": 3,
+              "expand_max": 8,
+              "target_pages_per_child": 3
+            }
+          ]
+        },
+        {
+          "title": "技术实施方案",
+          "fixed": true,
+          "children": [
+            {"title": "核心技术栈选型", "chapter_type": "normal", "fixed": true, "target_pages": 2},
+            {"title": "系统部署方案", "chapter_type": "normal", "fixed": true, "target_pages": 2},
+            {"title": "数据迁移与业务切换方案", "chapter_type": "normal", "fixed": true, "target_pages": 2},
+            {"title": "应用数据安全方案", "chapter_type": "normal", "fixed": true, "target_pages": 2},
+            {"title": "监控与运维方案", "chapter_type": "normal", "fixed": true, "target_pages": 2}
+          ]
+        }
+      ]
+    },
+    {
+      "title": "服务保障方案",
+      "fixed": true,
+      "children": [
+        {
+          "title": "项目管理方案",
+          "fixed": true,
+          "children": [
+            {"title": "项目开发与过程管理", "chapter_type": "normal", "fixed": true, "target_pages": 2},
+            {
+              "title": "项目沟通管理",
+              "chapter_type": "meeting",
+              "template_slot": "communication_meetings",
+              "fixed": true,
+              "target_pages": 2,
+              "required_anchors": ["会议目标", "日期与时间", "参加人员", "主要议程及责任"]
+            },
+            {"title": "项目风险管理", "chapter_type": "normal", "fixed": true, "target_pages": 2},
+            {"title": "系统验收与移交", "chapter_type": "normal", "fixed": true, "target_pages": 1}
+          ]
+        },
+        {
+          "title": "售后服务方案",
+          "fixed": true,
+          "children": [
+            {"title": "日常支撑维护服务", "chapter_type": "normal", "fixed": true, "target_pages": 2},
+            {"title": "应用保障措施", "chapter_type": "normal", "fixed": true, "target_pages": 1}
+          ]
+        }
+      ]
+    },
+    {
+      "title": "系统安全保障措施",
+      "fixed": true,
+      "children": [
+        {
+          "title": "重点场景系统安全与保障措施",
+          "fixed": true,
+          "children": [
+            {"title": "营销场景系统安全保障", "chapter_type": "normal", "fixed": true, "target_pages": 1},
+            {"title": "票务场景系统安全保障", "chapter_type": "normal", "fixed": true, "target_pages": 1},
+            {"title": "卡券场景系统安全保障", "chapter_type": "normal", "fixed": true, "target_pages": 1}
+          ]
+        },
+        {
+          "title": "系统维护服务",
+          "fixed": true,
+          "children": [
+            {"title": "系统维护服务", "chapter_type": "normal", "fixed": true, "target_pages": 1},
+            {"title": "系统故障处理", "chapter_type": "normal", "fixed": true, "target_pages": 1}
+          ]
+        }
+      ]
+    },
+    {
+      "title": "类似业绩",
+      "chapter_type": "image_only",
+      "template_slot": "performance_cases",
+      "fixed": true,
+      "expandable": true,
+      "child_chapter_type": "image_only",
+      "expand_min": 3,
+      "expand_max": 3,
+      "target_pages_per_child": 2
+    },
+    {
+      "title": "企业综合实力",
+      "fixed": true,
+      "children": [
+        {
+          "title": "信息安全管理体系认证证书",
+          "chapter_type": "image_only", "template_slot": "qualification_cert", "fixed": true, "target_pages": 1
+        },
+        {
+          "title": "信息技术服务管理体系认证证书",
+          "chapter_type": "image_only", "template_slot": "qualification_cert", "fixed": true, "target_pages": 1
+        },
+        {
+          "title": "质量管理体系认证证书",
+          "chapter_type": "image_only", "template_slot": "qualification_cert", "fixed": true, "target_pages": 1
+        },
+        {
+          "title": "CMMI5证书",
+          "chapter_type": "image_only", "template_slot": "qualification_cert", "fixed": true, "target_pages": 1
+        }
+      ]
+    },
+    {
+      "title": "人员要求",
+      "fixed": true,
+      "children": [
+        {"title": "项目经理", "chapter_type": "image_only", "template_slot": "pm_resume", "fixed": true, "target_pages": 2},
+        {"title": "核心团队人员", "chapter_type": "table_only", "template_slot": "core_team_table", "fixed": true, "target_pages": 1},
+        {"title": "核心成员证书信息", "chapter_type": "image_only", "template_slot": "core_member_certs", "fixed": true, "expandable": true, "child_chapter_type": "image_only", "expand_min": 2, "expand_max": 8, "target_pages_per_child": 1}
+      ]
+    },
+    {
+      "title": "技术/商务响应与偏离表",
+      "chapter_type": "table_only",
+      "template_slot": "deviation_table",
+      "fixed": true,
+      "target_pages": 1
+    }
+  ]
+}

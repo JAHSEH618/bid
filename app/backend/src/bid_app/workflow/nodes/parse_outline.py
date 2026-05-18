@@ -20,6 +20,11 @@ LLM-1 输出格式(新):
 - 兜底:抽取第一个 ``{`` 到最后一个 ``}``
 - 字段缺失逐项 setdefault,target_pages 强制 int
 - key_points / matched_scoring_items 强制 list
+
+D-EF (2026-05-18):若 ``state.template_pack`` 非空,加载骨架并反查 leaf
+节点的 ``chapter_type / template_slot / required_anchors`` 兜底填充
+(LLM-1 漏写字段时也能恢复)。展平后比对骨架 ``fixed`` 叶子是否齐全,
+缺失时记录 warning(不抛异常,保留给 outline_review 让用户决定)。
 """
 from __future__ import annotations
 
@@ -30,6 +35,11 @@ from typing import Any
 import structlog
 
 from ..state import WorkflowState
+from ..templates import (
+    build_title_path_index,
+    fixed_leaf_paths,
+    load_pack,
+)
 
 log = structlog.get_logger()
 
@@ -45,6 +55,10 @@ def _normalize_chapter(
     ``section`` 是层级编号 "1.1" / "2.3.1";``idx`` 是展平后的 0-based 位置,
     用作 fallback id;``parent_titles`` 是从根到父节点的祖先标题列表
     (chaptersToTocText 重建分组行时用)。
+
+    D-EF:``chapter_type`` / ``template_slot`` / ``required_anchors`` 三字段
+    默认值为 ``normal`` / ``""`` / ``[]``,由骨架 overlay 阶段(``_apply_skeleton_overlay``)
+    覆盖。
     """
     ch.setdefault("id", f"ch_{idx + 1:02d}")
     ch["section"] = section
@@ -54,6 +68,10 @@ def _normalize_chapter(
     ch.setdefault("key_points", [])
     ch.setdefault("target_pages", 3)
     ch.setdefault("matched_scoring_items", [])
+    # D-EF:章节类型默认值
+    ch.setdefault("chapter_type", "normal")
+    ch.setdefault("template_slot", "")
+    ch.setdefault("required_anchors", [])
 
     if not isinstance(ch["target_pages"], (int, float)):
         try:
@@ -64,7 +82,94 @@ def _normalize_chapter(
         ch["key_points"] = [str(ch["key_points"])]
     if not isinstance(ch["matched_scoring_items"], list):
         ch["matched_scoring_items"] = []
+    if not isinstance(ch["required_anchors"], list):
+        ch["required_anchors"] = []
+    if not isinstance(ch["chapter_type"], str) or not ch["chapter_type"]:
+        ch["chapter_type"] = "normal"
+    if not isinstance(ch["template_slot"], str):
+        ch["template_slot"] = ""
     return ch
+
+
+_ALLOWED_CHAPTER_TYPES = {
+    "normal", "module", "principle", "architecture",
+    "meeting", "image_only", "table_only",
+}
+
+
+def _apply_skeleton_overlay(
+    chapters: list[dict[str, Any]],
+    template_pack: str | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """根据骨架反查每个叶子的 chapter_type / template_slot / required_anchors。
+
+    匹配规则:按 ``(parent_titles..., title)`` 完整路径在骨架索引里查;
+    精确命中 → 用骨架值覆盖 LLM-1 输出(LLM 偶尔会漏写或写错);未命中
+    → 保留 LLM-1 已有字段或 _normalize_chapter 的默认值。
+
+    校验:遍历骨架里所有 ``fixed`` 叶子,若任何一条没在 chapters 里找到
+    匹配(按标题路径),记入 ``warnings`` 返回。
+    """
+    warnings: list[str] = []
+    if not template_pack:
+        return chapters, warnings
+
+    try:
+        pack = load_pack(template_pack)
+    except FileNotFoundError:
+        log.warning("parse_outline_skeleton_missing", pack=template_pack)
+        return chapters, [f"骨架包不存在: {template_pack}"]
+
+    skeleton = pack.get("skeleton") or []
+    if not isinstance(skeleton, list):
+        return chapters, []
+
+    path_index = build_title_path_index(skeleton)
+    # 同时建一份「叶子标题 → leaf」的兜底索引(对 LLM 偶尔挪动祖先标题的容错)
+    by_title: dict[str, dict[str, Any]] = {}
+    for full_path, leaf in path_index.items():
+        title = full_path[-1] if full_path else ""
+        if title:
+            by_title.setdefault(title, leaf)
+
+    for ch in chapters:
+        title = str(ch.get("title") or "")
+        parents = tuple(ch.get("parent_titles") or [])
+        key = (*parents, title)
+        leaf_match: dict[str, Any] | None = path_index.get(key) or by_title.get(title)
+        if not leaf_match:
+            continue
+        # 骨架值覆盖 LLM(LLM 偶尔写错 chapter_type 名,不能信任)
+        ct = leaf_match.get("chapter_type")
+        if isinstance(ct, str) and ct in _ALLOWED_CHAPTER_TYPES:
+            ch["chapter_type"] = ct
+        slot = leaf_match.get("template_slot")
+        if isinstance(slot, str) and slot:
+            ch["template_slot"] = slot
+        req = leaf_match.get("required_anchors")
+        if isinstance(req, list):
+            ch["required_anchors"] = [str(x) for x in req]
+        # target_pages 骨架有就用骨架的(LLM 的 target_pages 容易飘)
+        tp = leaf_match.get("target_pages")
+        if isinstance(tp, (int, float)) and tp > 0:
+            ch["target_pages"] = int(tp)
+
+    # 校验:骨架里所有 fixed 叶子是否齐全
+    have_paths: set[tuple[str, ...]] = {
+        (*tuple(ch.get("parent_titles") or []), str(ch.get("title") or ""))
+        for ch in chapters
+    }
+    have_titles = {str(ch.get("title") or "") for ch in chapters}
+    for path in fixed_leaf_paths(skeleton):
+        # 精确路径未命中、连标题都没出现 → 报缺失
+        if path in have_paths:
+            continue
+        leaf_title = path[-1] if path else ""
+        if leaf_title in have_titles:
+            continue
+        warnings.append(f"骨架 fixed 叶子缺失: {' / '.join(path)}")
+
+    return chapters, warnings
 
 
 def _flatten_toc(toc: list[Any]) -> list[dict[str, Any]]:
@@ -141,11 +246,26 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     outline_json = state.get("_outline_json", "")
     chapters = _normalize(outline_json)
 
+    # D-EF:骨架 overlay — 反查模版骨架填充 chapter_type 等;校验 fixed 叶子完整性
+    template_pack = state.get("template_pack")
+    skeleton_warnings: list[str] = []
+    if chapters and template_pack:
+        chapters, skeleton_warnings = _apply_skeleton_overlay(chapters, template_pack)
+
     if not chapters:
         log.warning(
             "parse_outline_empty",
             project_id=state.get("project_id"),
             run_id=state.get("run_id"),
+        )
+
+    if skeleton_warnings:
+        log.warning(
+            "parse_outline_skeleton_violations",
+            project_id=state.get("project_id"),
+            run_id=state.get("run_id"),
+            pack=template_pack,
+            missing=skeleton_warnings,
         )
 
     return {

@@ -163,7 +163,10 @@ async def build_initial_state(project_id: int, run_id: int) -> WorkflowState:
     """从 DB 读项目 + 文档,构造 WorkflowState 给 graph.astream 起点用。"""
     async with session_factory() as s:
         row = await s.execute(
-            sa.text("SELECT pages_per_chapter, max_retry_per_chapter FROM projects WHERE id=:p"),
+            sa.text(
+                "SELECT pages_per_chapter, max_retry_per_chapter, template_pack "
+                "FROM projects WHERE id=:p"
+            ),
             {"p": project_id},
         )
         prj = row.one()
@@ -186,6 +189,9 @@ async def build_initial_state(project_id: int, run_id: int) -> WorkflowState:
         # Phase 1A:实体桶字段在 schema v3 起算 state 必填,初始为 None,
         # 由 categorize_blackboard 节点填充。
         "blackboard_entities": None,
+        # D-EF:骨架包 id 在 generate_outline 节点确定后回写;DB 端预读
+        # 用于 revise / resume 沿用同一份骨架。
+        "template_pack": prj.template_pack,
     }
 
 

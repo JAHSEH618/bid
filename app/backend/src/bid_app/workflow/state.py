@@ -14,14 +14,20 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-CURRENT_WORKFLOW_SCHEMA_VERSION = 3
+CURRENT_WORKFLOW_SCHEMA_VERSION = 4
 """每次 WorkflowState 不向后兼容地变更字段时,**必须**bump 本常量并实现
 对应迁移 / flush 流程(D1)。
 
 v2 → v3 (2026-05-16, Phase 1A):新增 ``blackboard_entities`` 字段,
 ``categorize_blackboard`` 节点写入,LLM-1 / LLM-2 prompt 从结构化桶取
 上下文(取代字符截断)。老 v2 checkpoint 没有此字段,resume 会被拒。
-上线前必须跑 ``flush_running_workflows`` CLI 清退在跑项目。"""
+上线前必须跑 ``flush_running_workflows`` CLI 清退在跑项目。
+
+v3 → v4 (2026-05-18, D-EF):新增 ``template_pack`` 字段 + ``chapters[i]``
+新增 ``chapter_type / template_slot / required_anchors`` 字段;
+``generate_outline`` 注入骨架,``parse_outline`` 反查骨架填充类型,
+``write_chapter`` / ``gen_visuals`` / 校验器据 chapter_type 分流。
+老 v3 checkpoint 没有 ``template_pack``,resume 时被拒。"""
 
 
 class WorkflowSchemaMismatch(Exception):
@@ -113,6 +119,20 @@ class WorkflowState(TypedDict, total=False):
     # LLM-1 outline / LLM-2 chapter prompt 从这里取结构化上下文。
     # None 表示尚未跑 categorize_blackboard(老 v2 项目 / 节点失败兜底)。
     blackboard_entities: dict[str, Any] | None
+
+    # D-EF (2026-05-18):本次工作流使用的模版骨架包 id(``gov_consumer_platform_v1``
+    # 等),由 ``generate_outline`` 节点根据 ``material_understanding.project_category``
+    # 决定。``parse_outline`` 反查同名骨架填充 ``chapters[i].chapter_type``,
+    # 下游 ``write_chapter`` / ``gen_visuals`` / 模版校验器据此分流。
+    template_pack: str | None
+
+    # D-EI (2026-05-18):merge_chapter 跑结构化校验后落的临时载体。
+    # ``_validation_issues`` 是 ``ValidationIssue.to_dict()`` 的列表;
+    # ``_should_auto_revise=True`` 时 graph 条件边把流程引到
+    # ``apply_auto_revise`` 节点,把 hint 拼成 revision_feedback 再回
+    # ``write_chapter``。``human_review`` 也会读 issues 给前端展示。
+    _validation_issues: list[dict[str, Any]]
+    _should_auto_revise: bool
 
     # === 输出 ===
     final_proposal: str | None

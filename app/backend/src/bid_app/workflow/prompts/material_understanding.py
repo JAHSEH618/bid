@@ -29,12 +29,20 @@ ReAct 风格(纯文本,不调外部工具):
 JSON Schema(严格,字段缺失则用空数组兜底):
 
 {
+  "project_category": "gov_consumer_platform | smart_city | ticketing | financial_system | generic",
   "core_requirements": ["简短表述,每条不超 60 字", ...],
   "scoring_focus": ["权重描述 + 评分项命名", ...],
   "template_style": ["模板观察到的章节结构 / 排版风格特征", ...],
   "key_constraints": ["时间 / 法规 / 资质 / 强制项", ...],
   "risk_notes": ["可能漏读 / 模糊不清 / 需要二次确认的点", ...]
 }
+
+``project_category`` 取值说明(D-EF):
+- ``gov_consumer_platform``:政府消费券 / 城市消费服务 / 商户活动 / 票务营销一体化
+- ``smart_city``:智慧城市 / 城市大脑 / 公共服务平台
+- ``ticketing``:景区 / 演出 / 票务专项系统
+- ``financial_system``:金融 / 支付 / 卡券核销
+- ``generic``:无法明确分类(下游回退到通用骨架)
 
 ⭐ 占位符规则 (D3):文中形如 ``__ORG_xxxxxx__`` / ``__PROJ_xxxxxx__`` 等是
 脱敏占位符,请保留原样,不必复述,也不要替换为具体公司名 / 项目号。
