@@ -1,12 +1,18 @@
-"""LLM-3 提示词 — 章节可视化建议生成(移植 v10 §4.5.3)。
+"""LLM-3 提示词 — 章节可视化建议生成(移植 v10 §4.5.3 + D-EH 锚点驱动)。
 
-⚠️ 命名说明:任务清单把本文件标作 "review_chapter_prompt"(章节审核),
-但 v10 §4.5.3 的实际职责是**可视化建议**——LLM-3 阅读 LLM-2 输出的章节正文,
-识别哪些位置适合插图/插表/插流程图,输出 JSON 建议清单供下游 ``merge_chapter``
-模板转换合并。文件名保留与任务清单一致,内容严格对齐 §4.5.3。
+提供 3 个 builder:
+
+- ``build_messages``(向后兼容):自由发现 0–4 处可视化建议(原始 v10 行为),
+  现仅作为 ``module`` / ``architecture`` 之外章节的兜底入口。
+- ``build_sequence_messages``(D-EH):给定一个**流程名**+ 章节正文,输出
+  单张 Mermaid ``sequenceDiagram`` 建议;由 ``gen_visuals`` 扫描
+  ``对应时序图:<flow>`` 锚点后批量并发调用。
+- ``build_architecture_messages``(D-EH):给定一组**层名**+ 章节正文,
+  输出单张 Mermaid ``flowchart TD`` 七层架构图。
 
 模型:``settings.llm3_visuals_model``(默认 dashscope/qwen3.6-flash)。
-温度:0.4(略低保证 JSON 稳定);Response Format:JSON Object;Max Tokens 4096。
+温度:0.4(略低保证 JSON 稳定);Response Format:JSON Object;Max Tokens 4096
+(锚点驱动的单图调用降到 1024,见 ``gen_visuals``)。
 """
 
 from __future__ import annotations
@@ -75,7 +81,7 @@ def build_messages(
     chapter_title: str,
     chapter_body_md: str,
 ) -> list[dict[str, Any]]:
-    """构造 LLM-3 messages 数组。"""
+    """构造 LLM-3 messages 数组(向后兼容的自由发现入口)。"""
     return [
         {"role": "system", "content": LLM3_SYSTEM},
         {
@@ -85,4 +91,88 @@ def build_messages(
                 chapter_body_md=chapter_body_md,
             ),
         },
+    ]
+
+
+# ============== D-EH 锚点驱动:单图建议生成 ==============
+
+_SEQ_SYSTEM = """你是一位技术时序图设计师。给定一段章节正文与本流程名,\
+输出**且仅输出一张** Mermaid ``sequenceDiagram``,描述该流程在系统内的\
+关键参与方与消息流转。
+
+输出规则:
+1. 严格 JSON,形如 ``{"items": [{"title": "...", "type": "mermaid",
+   "anchor": "对应时序图:<flow>", "position": "after",
+   "content": "sequenceDiagram\\n  ..." }]}``
+2. ``items`` 数组**恰好 1 个元素**(不允许 0,不允许 2+)
+3. ``anchor`` 必须**完整复制**用户给的锚点字符串,**包括** ``对应时序图:`` 前缀
+4. ``position`` 固定为 ``after``
+5. ``content`` 是单张 sequenceDiagram 的合法语法,不带 ```mermaid 围栏
+6. 参与方 5-8 个为宜;中文标签用 ``["中文"]`` 双引号包,长度 ≤ 8 字
+7. 不要 ``style`` / ``classDef`` / ``class`` 等装饰
+8. 占位符 ``__XXX_xxxxxx__`` 照抄
+"""
+
+
+def build_sequence_messages(
+    *,
+    flow_name: str,
+    chapter_title: str,
+    chapter_body_md: str,
+) -> list[dict[str, Any]]:
+    """D-EH:给定单个流程名 + 章节正文,生成一张 sequenceDiagram 的 JSON 建议。"""
+    user = (
+        f"章节标题:{chapter_title}\n\n"
+        f"目标流程名(锚点):**对应时序图:{flow_name}**\n\n"
+        f"章节正文(供你理解该流程的上下文):\n"
+        f"================================\n"
+        f"{chapter_body_md}\n"
+        f"================================\n\n"
+        f"请输出 JSON,内含且仅含 1 张 ``sequenceDiagram`` 建议,\n"
+        f"``anchor`` 字段必须**完整复制**为 ``对应时序图:{flow_name}``。"
+    )
+    return [
+        {"role": "system", "content": _SEQ_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+_ARCH_SYSTEM = """你是一位系统架构图设计师。给定一组分层名与章节正文,\
+输出**且仅输出一张** Mermaid ``flowchart TD``,自顶向下展示这些层之间\
+的从属或调用关系。
+
+输出规则:
+1. 严格 JSON,形如 ``{"items": [{"title": "总体架构", "type": "mermaid",
+   "anchor": "对应架构图:总体架构", "position": "after",
+   "content": "flowchart TD\\n  ..." }]}``
+2. ``items`` 数组**恰好 1 个元素**
+3. ``anchor`` 必须固定为 ``对应架构图:总体架构``,``position`` 固定 ``after``
+4. ``content`` 是单张 flowchart TD 的合法语法,**每一层各成一个节点**,
+   顺序与给定层名一致,自顶向下用 ``-->`` 连接
+5. 节点 label 用中文 + 双引号:``L1["接入层"]``
+6. 不要 ``style`` / ``classDef`` / ``class``
+"""
+
+
+def build_architecture_messages(
+    *,
+    layers: list[str],
+    chapter_title: str,
+    chapter_body_md: str,
+) -> list[dict[str, Any]]:
+    """D-EH:给定一组层名,生成一张 flowchart TD 七层(或 N 层)架构图。"""
+    layer_list = "、".join(layers)
+    user = (
+        f"章节标题:{chapter_title}\n\n"
+        f"系统分层(自顶向下,固定顺序):{layer_list}\n\n"
+        f"章节正文(供你理解层间关系的上下文):\n"
+        f"================================\n"
+        f"{chapter_body_md}\n"
+        f"================================\n\n"
+        f"请输出 JSON,内含且仅含 1 张 ``flowchart TD``,\n"
+        f"``anchor`` 固定为 ``对应架构图:总体架构``。"
+    )
+    return [
+        {"role": "system", "content": _ARCH_SYSTEM},
+        {"role": "user", "content": user},
     ]
