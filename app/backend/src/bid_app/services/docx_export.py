@@ -282,11 +282,15 @@ async def _render_mermaid(markdown: str, work: Path) -> str:
             rendered.append(None)
 
     # 反向替换(从最后一个 match 起,改原文不影响前面 match.start/end)
+    # ⭐ pandoc image 属性 `{width=60% fig-align=center}`:
+    #   - width=60%:不要全宽(mmdc 出图原生像素较大,默认会撑满版心)
+    #   - fig-align=center:DOCX writer 支持的居中(pandoc ≥ 2.13,Debian Bookworm 2.17 OK)
+    #   image 单独成段(围栏前后本就有空行)→ pandoc 视为隐式 Figure,`fig-align` 生效
     out = markdown
     for m, png_or_none in zip(reversed(matches), reversed(rendered), strict=True):
         if png_or_none is None:
             continue  # 保留原 fence 块,降级容错
-        replacement = f"![]({png_or_none.name})"
+        replacement = f"![]({png_or_none.name}){{ width=60% fig-align=center }}"
         out = out[: m.start()] + replacement + out[m.end() :]
 
     return out
