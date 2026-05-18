@@ -35,7 +35,17 @@ _INFLIGHT_STATUSES: tuple[str, ...] = (
 )
 
 
-async def _count_inflight() -> int:
+async def _count_and_maybe_flush(*, confirm: bool) -> tuple[int, int]:
+    """合并 count + flush 到同一个 event loop。
+
+    旧实现把 ``_count_inflight`` 与 ``_flush`` 分两次 ``asyncio.run`` 调,
+    asyncpg engine 绑死在第一个 loop 上,第二次 ``asyncio.run`` 创建新 loop
+    时引擎里的 Future 还指着旧 loop,触发 ``Task got Future attached to a
+    different loop``。这里合并到单个 async 函数 + 单次 ``asyncio.run``。
+
+    返回 ``(inflight_count, flushed_count)``。``confirm=False`` 时只数,
+    ``flushed_count=0``。
+    """
     async with session_factory() as s:
         row = await s.execute(
             sa.text(
@@ -43,11 +53,10 @@ async def _count_inflight() -> int:
             ),
             {"s": list(_INFLIGHT_STATUSES)},
         )
-        return int(row.scalar_one())
+        inflight = int(row.scalar_one())
+        if inflight == 0 or not confirm:
+            return inflight, 0
 
-
-async def _flush() -> int:
-    async with session_factory() as s:
         result = await s.execute(
             sa.text(
                 "UPDATE projects SET status='aborted_v1' "
@@ -56,7 +65,7 @@ async def _flush() -> int:
             ),
             {"s": list(_INFLIGHT_STATUSES)},
         )
-        ids = [row[0] for row in result.fetchall()]
+        ids = [r[0] for r in result.fetchall()]
         # 同步把这些项目的 active run 标 aborted,清理 worker 视角
         if ids:
             await s.execute(
@@ -68,7 +77,7 @@ async def _flush() -> int:
                 {"ids": ids},
             )
         await s.commit()
-        return len(ids)
+        return inflight, len(ids)
 
 
 @click.command()
@@ -78,7 +87,8 @@ async def _flush() -> int:
     help="不加这个 flag 只会 dry-run 报数,不写库。",
 )
 def main(confirm: bool) -> None:
-    inflight = asyncio.run(_count_inflight())
+    inflight, flushed = asyncio.run(_count_and_maybe_flush(confirm=confirm))
+
     if inflight == 0:
         click.echo("No in-flight v1 projects to flush.")
         return
@@ -90,7 +100,6 @@ def main(confirm: bool) -> None:
         )
         return
 
-    flushed = asyncio.run(_flush())
     click.echo(
         f"Marked {flushed} project(s) as 'aborted_v1'. "
         "Users will be prompted to recreate them."
