@@ -41,9 +41,15 @@ COMPOSE=("${docker_cmd[@]}" compose)
 # APP_DIR 整轮跑;git 操作用 ``git -C "$REPO_DIR"`` 在 REPO_DIR 上操作。
 cd "$APP_DIR"
 
-running="$("${COMPOSE[@]}" ps -q app 2>/dev/null || true)"
-if [[ -z "$running" ]]; then
-  echo "❌ bid-app 容器未运行,先 ./restart.sh 起服务再升级" >&2
+# 容器运行检测:用 ``docker inspect`` 按容器名直查(对齐
+# restart-after-update.sh 的 healthcheck 逻辑),绕开 compose project name
+# 解析的歧义(否则不同 cwd / COMPOSE_PROJECT_NAME / override.yml 都可能让
+# ``compose ps -q`` 返空)。
+status="$("${docker_cmd[@]}" inspect --format '{{.State.Status}}' bid-app 2>&1 || true)"
+if [[ "$status" != "running" ]]; then
+  echo "❌ bid-app 容器未运行" >&2
+  echo "   docker inspect 输出: $status" >&2
+  echo "   建议先跑 ./restart.sh" >&2
   exit 1
 fi
 
