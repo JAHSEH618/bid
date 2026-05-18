@@ -60,9 +60,20 @@ if [[ "$status" != "running" ]]; then
 fi
 
 echo "=== [1/5] 拉取新代码 ==="
-git -C "$REPO_DIR" fetch origin main
-echo "本地: $(git -C "$REPO_DIR" rev-parse --short HEAD) / 远端: $(git -C "$REPO_DIR" rev-parse --short origin/main)"
-git -C "$REPO_DIR" pull --ff-only origin main
+# 选 git remote:优先 ``$UPGRADE_REMOTE``;否则有 ``gitee`` 用 gitee
+# (国内服务器走 GitHub 会超时);没 gitee 回落 ``origin``。
+remote="${UPGRADE_REMOTE:-}"
+if [[ -z "$remote" ]]; then
+  if git -C "$REPO_DIR" remote get-url gitee >/dev/null 2>&1; then
+    remote=gitee
+  else
+    remote=origin
+  fi
+fi
+echo "git remote: $remote"
+git -C "$REPO_DIR" fetch "$remote" main
+echo "本地: $(git -C "$REPO_DIR" rev-parse --short HEAD) / 远端: $(git -C "$REPO_DIR" rev-parse --short "$remote/main")"
+git -C "$REPO_DIR" pull --ff-only "$remote" main
 
 echo
 echo "=== [2/5] 预扫:有多少在跑项目会被清退 ==="
