@@ -104,6 +104,50 @@ def _route_after_outline_review(state: WorkflowState) -> str:
     return "pick_chapter"
 
 
+def _route_after_merge(state: WorkflowState) -> str:
+    """D-EI Stage 4:merge_chapter 之后的分支。
+
+    - ``_should_auto_revise=True`` → 自动 revise:把 issues hint 作为
+      ``revision_feedback`` 喂回 ``write_chapter`` 重写一次(retry_count
+      未 ++ 在 update_state 里处理,这里走捷径直接回 write_chapter,
+      在 ``_apply_auto_revise_hint`` 节点里 ++)
+    - 否则(无 error / retry 额度用完) → 进 ``human_review``
+    """
+    return "apply_auto_revise" if state.get("_should_auto_revise") else "human_review"
+
+
+async def _apply_auto_revise_hint(state: WorkflowState) -> dict[str, Any]:
+    """D-EI Stage 4:把校验 issues hint 拼成 revision_feedback,bump retry_count。
+
+    一个轻量级"伪节点":不调 LLM,只做 state 转换:
+    - ``retry_count += 1``
+    - ``revision_feedback = issues_to_hint(issues)``
+    - 清空 ``_should_auto_revise`` 避免下一轮重复触发
+    然后下游条件边回到 ``write_chapter``,LLM-2 据 revision_feedback 重写。
+    """
+    from ..services.template_validator import ValidationIssue, issues_to_hint
+
+    raw_issues = state.get("_validation_issues") or []
+    issues: list[ValidationIssue] = []
+    if isinstance(raw_issues, list):
+        for r in raw_issues:
+            if isinstance(r, dict):
+                issues.append(
+                    ValidationIssue(
+                        code=str(r.get("code", "")),
+                        severity=str(r.get("severity", "warn")),
+                        message=str(r.get("message", "")),
+                        hint=str(r.get("hint", "")),
+                    )
+                )
+    hint = issues_to_hint(issues) or "请按模版规范重写本章。"
+    return {
+        "retry_count": int(state.get("retry_count", 0) or 0) + 1,
+        "revision_feedback": hint,
+        "_should_auto_revise": False,
+    }
+
+
 def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     """编译 LangGraph workflow。``checkpointer`` 由 worker lifecycle 注入。
 
@@ -131,6 +175,7 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     g.add_node("write_chapter", write_chapter.run)
     g.add_node("gen_visuals", gen_visuals.run)
     g.add_node("merge_chapter", merge_chapter.run)
+    g.add_node("apply_auto_revise", _apply_auto_revise_hint)  # D-EI Stage 4
     g.add_node("human_review", human_review.run)  # ⭐ P5 interrupt(§10.6b)
     g.add_node("update_state", update_state.run)
     g.add_node("assemble", assemble.run)
@@ -174,7 +219,17 @@ def build_graph(checkpointer: AsyncPostgresSaver | None = None) -> Any:
     g.add_edge("chapter_generate_gate", "write_chapter")
     g.add_edge("write_chapter", "gen_visuals")
     g.add_edge("gen_visuals", "merge_chapter")
-    g.add_edge("merge_chapter", "human_review")
+    # D-EI Stage 4:merge_chapter 之后跑校验,有 error 且 retry 额度未满
+    # → apply_auto_revise → write_chapter 重试一次;否则进 human_review
+    g.add_conditional_edges(
+        "merge_chapter",
+        _route_after_merge,
+        {
+            "apply_auto_revise": "apply_auto_revise",
+            "human_review": "human_review",
+        },
+    )
+    g.add_edge("apply_auto_revise", "write_chapter")
     g.add_edge("human_review", "update_state")
     g.add_conditional_edges(
         "update_state",

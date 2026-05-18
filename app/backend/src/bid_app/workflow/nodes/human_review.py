@@ -72,11 +72,14 @@ async def run(state: WorkflowState) -> dict[str, Any]:
 
     # 项目切 awaiting_review,SSE 通知前端拉章节
     await sync_project_status(pid, "awaiting_review")
+    # D-EI Stage 4:把校验 issues 一并推给前端展示(成功 / 警告 / 错误 chip)
+    validation_issues = state.get("_validation_issues") or []
     await publish_event(
         pid,
         "awaiting_review",
         chapter_index=idx,
         chapter_text=full_chapter,
+        validation_issues=validation_issues,
     )
 
     # interrupt 暂停;后续由 /review → resume_review_task 注入
@@ -85,6 +88,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             "kind": "chapter_review",
             "chapter_index": idx,
             "chapter_text": full_chapter,
+            "validation_issues": validation_issues,
         }
     )
 

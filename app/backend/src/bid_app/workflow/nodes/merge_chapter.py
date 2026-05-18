@@ -6,6 +6,11 @@ markdown 推给前端预览。
 
 ⚠️ 本节点**仅**做模板转换,**不**调 interrupt;P5 人工审核走单独的
 ``human_review`` 节点(D-EE 拆分,§10.2 / §10.6b)。
+
+D-EI (2026-05-18) Stage 4 校验器:模板转换完成后跑
+``template_validator.validate_chapter``,把 issues 落到 state 临时载体
+``_validation_issues``;同时算 ``_should_auto_revise`` 标志(命中 error +
+``retry_count`` 还有额度)给路由器用。
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from typing import Any
 
 import structlog
 
+from ...services.template_validator import validate_chapter
 from ..postprocess import postprocess_chapter_markdown
 from ..state import WorkflowState
 
@@ -202,4 +208,31 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         chapter_text=state.get("_pending_chapter_text", ""),
         visuals_json_str=state.get("_pending_visuals_json", '{"items": []}'),
     )
-    return {"_pending_chapter_text": full_chapter}
+
+    # D-EI Stage 4:跑结构化校验器,把 issues 落 state;命中 error 且 retry 额度
+    # 未用完 → _should_auto_revise=True,graph 条件边据此决定回 write_chapter
+    # 重试 or 进 human_review。
+    issues = validate_chapter(full_chapter, chapter)
+    error_count = sum(1 for i in issues if i.severity == "error")
+    retry_count = int(state.get("retry_count", 0) or 0)
+    max_retry = int(state.get("max_retry_per_chapter", 3) or 3)
+    # 自动重试硬上限 1 次:超过用户给的 max_retry 也强制停,避免死循环。
+    auto_revise_cap = max(1, min(1, max_retry))
+    should_auto_revise = error_count > 0 and retry_count < auto_revise_cap
+
+    if issues:
+        log.info(
+            "merge_chapter_validation_issues",
+            project_id=state.get("project_id"),
+            chapter_index=idx,
+            chapter_type=chapter.get("chapter_type"),
+            errors=error_count,
+            warnings=len(issues) - error_count,
+            auto_revise=should_auto_revise,
+        )
+
+    return {
+        "_pending_chapter_text": full_chapter,
+        "_validation_issues": [i.to_dict() for i in issues],
+        "_should_auto_revise": should_auto_revise,
+    }
