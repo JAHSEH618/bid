@@ -87,7 +87,10 @@ read -r -p "上面这些项目将被标 aborted_v1,用户需要重建。继续?[
 
 echo
 echo "=== [3/5] 重启容器(自动跑 alembic 0010 加 template_pack 列)==="
-"$REPO_DIR/restart.sh"
+# 本次升级必须 rebuild 镜像 — flush_running_workflows.py / template_validator
+# / 新 prompts 等都需要烤进镜像。即使外层 shell 设了 ``SKIP_BUILD=1``,
+# 也必须强制 build。用 ``env -u SKIP_BUILD`` 清掉环境变量。
+env -u SKIP_BUILD "$REPO_DIR/restart.sh"
 
 echo
 echo "=== [4/5] 清退 v3 checkpoint 项目 ==="
