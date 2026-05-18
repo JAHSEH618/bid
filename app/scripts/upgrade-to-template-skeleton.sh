@@ -21,19 +21,36 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 APP_DIR="$REPO_DIR/app"
-COMPOSE=(docker compose -f "$APP_DIR/docker-compose.yml")
-
-cd "$REPO_DIR"
 
 # ── 0) 预检 ──────────────────────────────────────────────────────────
 [[ -f "$APP_DIR/.env" ]] || { echo "❌ $APP_DIR/.env 不存在,先恢复"; exit 1; }
-"${COMPOSE[@]}" ps app >/dev/null 2>&1 \
-  || { echo "❌ bid-app 容器未运行,先 ./restart.sh 起服务再升级"; exit 1; }
+
+# docker compose 可能需要 sudo(对齐 restart-after-update.sh 的检测逻辑)
+docker_cmd=(docker)
+if ! docker compose version >/dev/null 2>&1; then
+  if sudo docker compose version >/dev/null 2>&1; then
+    docker_cmd=(sudo docker)
+  else
+    echo "❌ docker compose v2 不可用" >&2
+    exit 1
+  fi
+fi
+COMPOSE=("${docker_cmd[@]}" compose)
+
+# docker compose 从 docker-compose.yml 所在目录推断 project,直接 cd 到
+# APP_DIR 整轮跑;git 操作用 ``git -C "$REPO_DIR"`` 在 REPO_DIR 上操作。
+cd "$APP_DIR"
+
+running="$("${COMPOSE[@]}" ps -q app 2>/dev/null || true)"
+if [[ -z "$running" ]]; then
+  echo "❌ bid-app 容器未运行,先 ./restart.sh 起服务再升级" >&2
+  exit 1
+fi
 
 echo "=== [1/5] 拉取新代码 ==="
-git fetch origin main
-echo "本地: $(git rev-parse --short HEAD) / 远端: $(git rev-parse --short origin/main)"
-git pull --ff-only origin main
+git -C "$REPO_DIR" fetch origin main
+echo "本地: $(git -C "$REPO_DIR" rev-parse --short HEAD) / 远端: $(git -C "$REPO_DIR" rev-parse --short origin/main)"
+git -C "$REPO_DIR" pull --ff-only origin main
 
 echo
 echo "=== [2/5] 预扫:有多少在跑项目会被清退 ==="
