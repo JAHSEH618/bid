@@ -286,6 +286,8 @@ def build_messages(
     retry_count: int = 0,
     previous_text: str = "",
     blackboard_entities: dict[str, Any] | None = None,
+    system_override: str | None = None,
+    extra_user_directives: str = "",
 ) -> list[dict[str, Any]]:
     """构造 LLM-2 messages 数组。
 
@@ -304,6 +306,11 @@ def build_messages(
     旧 Phase 1B 的「章标题关键词命中桶」静态规则被替代——BM25 召回率更高,
     不会因为标题没命中关键字就漏掉真正相关的条款。
     无 entities 时回退 markdown 截断。
+
+    ⭐ D-EG (2026-05-18):``system_override`` 让上层(write_chapter)按
+    ``chapter.chapter_type`` 选定的 system prompt 覆盖默认 ``LLM2_SYSTEM``;
+    ``extra_user_directives`` 是 chapter-type 相关的"必须遵守"指令,拼在
+    user content 末尾。两者都为空时表现等同于改造前的旧行为。
     """
     from .categorize_blackboard import has_any_entries
 
@@ -366,12 +373,17 @@ def build_messages(
             f"## 上下文(打分规则摘要)\n{_excerpt(scoring_md, 2000)}"
         )
 
+    directive_block = (
+        f"\n{extra_user_directives.strip()}\n" if extra_user_directives.strip() else ""
+    )
+
     user_content = (
         f"请撰写以下章节的完整 Markdown 正文。\n\n"
         f"## 章节信息\n"
         f"- **章节编号(section)**: {chapter.get('section') or '1'}  ← 标题首行必须用 ``## {chapter.get('section') or '1'} {chapter.get('title', '(未命名章节)')}``\n"
         f"- **章节标题**: {chapter.get('title', '(未命名章节)')}\n"
         f"- **章节 ID**: {chapter.get('id', 'ch_unknown')}\n"
+        f"- **章节类型**: {chapter.get('chapter_type', 'normal')}\n"
         f"- **要点摘要**: {chapter.get('summary', '')}\n"
         f"- **目标页数**: {target_pages} 页\n"
         f"- **目标字数**: {target_pages * 800} 字以上\n\n"
@@ -380,11 +392,11 @@ def build_messages(
         f"### 对应的打分项\n\n"
         f"{_bullet_list(chapter.get('matched_scoring_items') or [])}\n\n"
         f"{context_block}\n\n"
-        f"{revision_section}\n\n"
+        f"{revision_section}{directive_block}\n\n"
         f"请直接输出本章 Markdown 正文,不要前后缀说明。\n"
     )
 
     return [
-        {"role": "system", "content": LLM2_SYSTEM},
+        {"role": "system", "content": system_override or LLM2_SYSTEM},
         {"role": "user", "content": user_content},
     ]

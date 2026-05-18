@@ -6,6 +6,13 @@
 ⭐ D-AU:LLMRetryFailed / Timeout 后包成 ``ChapterGenerationFailed`` 抛出,
 worker task 据此把 project 切 ``awaiting_review`` 而不是 ``failed``——只是
 当前章节失败,工作流暂停等用户 ``/retry``。
+
+⭐ D-EG (2026-05-18):按 ``chapter.chapter_type`` 分流:
+- ``image_only`` / ``table_only`` → 调 ``renderers.render`` 直接生成
+  Markdown 骨架,**不调 LLM-2**
+- ``module`` / ``principle`` / ``architecture`` / ``meeting`` → 选对应
+  ``write_*_prompt.SYSTEM`` 作为 system_override 调 LLM-2
+- ``normal`` / 未知 → 走默认 ``write_chapter_prompt.LLM2_SYSTEM`` 兜底
 """
 
 from __future__ import annotations
@@ -24,10 +31,55 @@ from ...services.llm import (
     LLMTimeoutExceeded,
     call_llm_stream,
 )
+from ..prompts import (
+    write_architecture_prompt,
+    write_meeting_prompt,
+    write_module_prompt,
+    write_principle_prompt,
+)
 from ..prompts.write_chapter_prompt import build_messages
+from ..renderers import render as render_template_md
 from ..resolve import resolve_chapter_model
 from ..state import WorkflowState
 from ..sync import publish_event, sync_chapter_to_db
+
+# D-EG:chapter_type → 对应的 system prompt 常量(覆盖默认 LLM2_SYSTEM)
+_SYSTEM_BY_TYPE: dict[str, str] = {
+    "module": write_module_prompt.SYSTEM,
+    "principle": write_principle_prompt.SYSTEM,
+    "architecture": write_architecture_prompt.SYSTEM,
+    "meeting": write_meeting_prompt.SYSTEM,
+}
+
+
+# 每种 chapter_type 在 user content 末尾追加的"必须遵守"短指令(防止 system
+# 内长 prompt 被 LLM 中段稀释)。
+_USER_DIRECTIVE_BY_TYPE: dict[str, str] = {
+    "module": (
+        "## 本章硬约束(再次提醒)\n"
+        "- 三段式锚点 `### 技术实现` / `### 关键适配` / `### 典型业务流程` 必须依次出现\n"
+        "- 每个流程必含 `流程目标` / `处理步骤` / `关键控制点` 三关键词\n"
+        "- 每个流程末尾**单独一行**写 `对应时序图:<流程名>`(完整与流程名一致)"
+    ),
+    "principle": (
+        "## 本章硬约束(再次提醒)\n"
+        "- 原则条数与名称严格对齐 ``required_anchors``,不增不减不改名\n"
+        "- 每条编号用 `1、` `2、` 等(全角顿号)"
+    ),
+    "architecture": (
+        "## 本章硬约束(再次提醒)\n"
+        "- 所有 ``required_anchors`` 层名 100% 必须在正文中出现\n"
+        "- 章末**单独一行**写 `对应架构图:总体架构`(完全照抄,触发图表生成)"
+    ),
+    "meeting": (
+        "## 本章硬约束(再次提醒)\n"
+        "- 每个会议描述必须含 `会议目标` / `日期与时间` / `参加人员` / `主要议程及责任` 四要素\n"
+        "- 四要素各占一行,使用全角冒号"
+    ),
+}
+
+
+_TEMPLATE_TYPES = {"image_only", "table_only"}
 
 
 async def _resolve_api_key(project_id: int, run_id: int | None = None) -> str:
@@ -212,6 +264,37 @@ async def _prefetch_chapter_body(
         )
 
         chapter = state["chapters"][index]
+        # D-EG:template 章节直接渲染,不调 LLM-2
+        chapter_type = str(chapter.get("chapter_type") or "normal")
+        if chapter_type in _TEMPLATE_TYPES:
+            from ..templates import load_pack
+
+            pack: dict[str, Any] | None = None
+            template_pack = state.get("template_pack")
+            if template_pack:
+                try:
+                    pack = load_pack(template_pack)
+                except FileNotFoundError:
+                    pack = None
+            final_text = render_template_md(chapter, pack)
+            from ..sync import flush_chapter_partial
+
+            await flush_chapter_partial(
+                run_id,  # type: ignore[arg-type]
+                index,
+                version_id,
+                final_text,
+            )
+            await _safe_sync_chapter(
+                run_id,
+                index,
+                status="pending",
+                processing_started_at=None,
+                last_error=None,
+            )
+            await publish_event(project_id, "chapter_prefetched", chapter_index=index)
+            return
+
         messages = build_messages(
             chapter=chapter,
             tech_spec_md=state.get("tech_spec_md", ""),
@@ -220,6 +303,8 @@ async def _prefetch_chapter_body(
             retry_count=0,
             previous_text="",
             blackboard_entities=state.get("blackboard_entities"),
+            system_override=_SYSTEM_BY_TYPE.get(chapter_type),
+            extra_user_directives=_USER_DIRECTIVE_BY_TYPE.get(chapter_type, ""),
         )
         chapter_model = await resolve_chapter_model(project_id, run_id, index, chapter)
         from ..sync import flush_chapter_partial
@@ -292,11 +377,85 @@ async def _prefetch_chapter_body(
             await publish_event(project_id, "chapter_failed", chapter_index=index, reason=str(e))
 
 
+async def _render_template_chapter(
+    state: WorkflowState,
+    current: int,
+    chapter: dict[str, Any],
+    run_id: int | None,
+    project_id: int,
+) -> dict[str, Any]:
+    """D-EG:``image_only`` / ``table_only`` 章节短路渲染。
+
+    不调 LLM,直接用 ``renderers.render`` 输出固定骨架。仍走完整 DB 落
+    state 机:status=generating → save_chapter_version → status=pending,
+    保证下游 ``gen_visuals`` / ``human_review`` 拿到一致的输入。
+    """
+    from ..templates import load_pack
+
+    pack: dict[str, Any] | None = None
+    template_pack = state.get("template_pack")
+    if template_pack:
+        try:
+            pack = load_pack(template_pack)
+        except FileNotFoundError:
+            pack = None
+
+    final_text = render_template_md(chapter, pack)
+
+    await _safe_sync_chapter(
+        run_id,
+        current,
+        status="generating",
+        processing_started_at=datetime.now(UTC),
+    )
+    await publish_event(project_id, "chapter_started", chapter_index=current)
+
+    if _real_run(run_id):
+        try:
+            from ..sync import flush_chapter_partial, save_chapter_version
+
+            version_id = await save_chapter_version(
+                run_id,  # type: ignore[arg-type]
+                current,
+                final_text,
+                feedback_in=None,
+            )
+            await flush_chapter_partial(
+                run_id,  # type: ignore[arg-type]
+                current,
+                version_id,
+                final_text,
+            )
+        except Exception:
+            import structlog
+
+            structlog.get_logger().exception(
+                "write_chapter_template_render_db_failed",
+                run_id=run_id,
+                chapter_index=current,
+            )
+
+    await _safe_sync_chapter(
+        run_id,
+        current,
+        status="pending",
+        processing_started_at=None,
+        last_error=None,
+    )
+    return {"_pending_chapter_text": final_text}
+
+
 async def run(state: WorkflowState) -> dict[str, Any]:
     current = state["current_index"]
     chapter = state["chapters"][current]
     run_id = state["run_id"]
     project_id = state["project_id"]
+    chapter_type = str(chapter.get("chapter_type") or "normal")
+
+    # D-EG:image_only / table_only 章节绕过 LLM-2,直接用 renderer 生成
+    # 模板骨架(slot 化的图位 / 表头骨架)。落 DB + 发完成事件后立即返回。
+    if chapter_type in _TEMPLATE_TYPES:
+        return await _render_template_chapter(state, current, chapter, run_id, project_id)
 
     api_key = await _resolve_api_key(project_id, run_id=run_id)
     user_id = await _resolve_user_id(project_id)
@@ -378,6 +537,9 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         retry_count=retry_count,
         previous_text=previous_text,  # ⭐ R-18
         blackboard_entities=state.get("blackboard_entities"),
+        # D-EG:按 chapter_type 选 system 与 user 末尾指令;normal/未知用默认
+        system_override=_SYSTEM_BY_TYPE.get(chapter_type),
+        extra_user_directives=_USER_DIRECTIVE_BY_TYPE.get(chapter_type, ""),
     )
 
     # ⭐ R-14:periodic flush 回调 —— call_llm_stream 内部每 100 chunks /
