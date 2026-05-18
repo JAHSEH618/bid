@@ -25,13 +25,19 @@ APP_DIR="$REPO_DIR/app"
 # ── 0) 预检 ──────────────────────────────────────────────────────────
 [[ -f "$APP_DIR/.env" ]] || { echo "❌ $APP_DIR/.env 不存在,先恢复"; exit 1; }
 
-# docker compose 可能需要 sudo(对齐 restart-after-update.sh 的检测逻辑)
+# docker daemon 可能需要 sudo。**关键**:用 ``docker version`` 而不是
+# ``docker compose version`` 检测 —— 后者只验插件二进制存在,不连 daemon;
+# 用户(非 docker 组)能跑通这条,但所有真 docker 命令都会被 socket 权限拒。
 docker_cmd=(docker)
-if ! docker compose version >/dev/null 2>&1; then
-  if sudo docker compose version >/dev/null 2>&1; then
+if ! docker version >/dev/null 2>&1; then
+  if sudo -n docker version >/dev/null 2>&1; then
+    docker_cmd=(sudo docker)
+  elif sudo docker version >/dev/null 2>&1; then
+    # 上一行可能弹了密码,弹完进缓存,后续都走 sudo
     docker_cmd=(sudo docker)
   else
-    echo "❌ docker compose v2 不可用" >&2
+    echo "❌ docker daemon 不可访问且 sudo 也用不了" >&2
+    echo "   把当前用户加 docker 组,或用 ``sudo ./app/scripts/upgrade-to-template-skeleton.sh`` 重试" >&2
     exit 1
   fi
 fi
