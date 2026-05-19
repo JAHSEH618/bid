@@ -25,9 +25,10 @@ APP_DIR="$REPO_DIR/app"
 # ── 0) 预检 ──────────────────────────────────────────────────────────
 [[ -f "$APP_DIR/.env" ]] || { echo "❌ $APP_DIR/.env 不存在,先恢复"; exit 1; }
 
-# docker daemon 可能需要 sudo。**关键**:用 ``docker version`` 而不是
-# ``docker compose version`` 检测 —— 后者只验插件二进制存在,不连 daemon;
-# 用户(非 docker 组)能跑通这条,但所有真 docker 命令都会被 socket 权限拒。
+# docker daemon 可能需要 sudo。注意:用 ``docker version`` 而不是
+# ``docker compose version`` 检测,后者只验插件二进制存在,不连 daemon。
+# 非 docker 组用户能跑通 compose version 这条,但所有真 docker 命令都会
+# 被 socket 权限拒。
 docker_cmd=(docker)
 if ! docker version >/dev/null 2>&1; then
   if sudo -n docker version >/dev/null 2>&1; then
@@ -87,9 +88,9 @@ read -r -p "上面这些项目将被标 aborted_v1,用户需要重建。继续?[
 
 echo
 echo "=== [3/5] 重启容器(自动跑 alembic 0010 加 template_pack 列)==="
-# 本次升级必须 rebuild 镜像 — flush_running_workflows.py / template_validator
-# / 新 prompts 等都需要烤进镜像。即使外层 shell 设了 ``SKIP_BUILD=1``,
-# 也必须强制 build。用 ``env -u SKIP_BUILD`` 清掉环境变量。
+# 本次升级必须 rebuild 镜像。flush_running_workflows.py / template_validator
+# / 新 prompts 等都要烤进镜像。即使外层 shell 设了 ``SKIP_BUILD=1``,也要
+# 强制 build。用 ``env -u SKIP_BUILD`` 清掉环境变量。
 env -u SKIP_BUILD "$REPO_DIR/restart.sh"
 
 echo
@@ -136,7 +137,7 @@ assert len(errs) == 1
 "
 
 echo
-echo "🎉 升级完成!"
-echo "  • template_pack 列已加,alembic 0010"
-echo "  • 在跑项目已标 aborted_v1,用户需重建"
-echo "  • 默认骨架 gov_consumer_platform_v1 已加载"
+echo "升级完成。"
+echo "  - template_pack 列已加,alembic 0010"
+echo "  - 在跑项目已标 aborted_v1,用户需重建"
+echo "  - 默认骨架 gov_consumer_platform_v1 已加载"
