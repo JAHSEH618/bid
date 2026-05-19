@@ -24,12 +24,18 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy import select
 
+from ...config import settings
 from ...db import session_factory
+from ...services.blackboard_retrieval import (
+    SEARCH_BLACKBOARD_TOOL,
+    make_blackboard_tool_handler,
+)
 from ...services.llm import (
     ChapterGenerationFailed,
     LLMRetryFailed,
     LLMTimeoutExceeded,
     call_llm_stream,
+    call_llm_stream_with_tools,
 )
 from ..prompts import (
     write_architecture_prompt,
@@ -529,6 +535,15 @@ async def run(state: WorkflowState) -> dict[str, Any]:
                 index=current,
             )
 
+    blackboard_entities = state.get("blackboard_entities")
+    # Phase 2C:LLM-2 也走 tool calling。条件:全局开关开 + 实体桶非空 +
+    # 非 template 章(image_only/table_only 已在前面短路返回,这里不会到)。
+    use_chapter_tools = (
+        settings.llm_tool_calling_enabled
+        and bool(blackboard_entities)
+        and any(blackboard_entities.values())  # type: ignore[union-attr]
+    )
+
     messages = build_messages(
         chapter=chapter,
         tech_spec_md=state.get("tech_spec_md", ""),
@@ -536,10 +551,13 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         revision_feedback=revision_feedback,
         retry_count=retry_count,
         previous_text=previous_text,  # ⭐ R-18
-        blackboard_entities=state.get("blackboard_entities"),
+        blackboard_entities=blackboard_entities,
         # D-EG:按 chapter_type 选 system 与 user 末尾指令;normal/未知用默认
         system_override=_SYSTEM_BY_TYPE.get(chapter_type),
         extra_user_directives=_USER_DIRECTIVE_BY_TYPE.get(chapter_type, ""),
+        # Phase 2C:tool calling 模式下,user prompt 末尾追加 search_blackboard
+        # 工具说明
+        tool_calling_enabled=use_chapter_tools,
     )
 
     # ⭐ R-14:periodic flush 回调 —— call_llm_stream 内部每 100 chunks /
@@ -570,17 +588,39 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     chapter_model = await resolve_chapter_model(project_id, run_id, current, chapter)
 
     try:
-        result = await call_llm_stream(
-            model=chapter_model,
-            messages=messages,
-            api_key=api_key,
-            user_id=user_id,
-            project_id=project_id,
-            run_id=run_id,
-            chapter_index=current,
-            temperature=0.6,
-            on_partial=_on_partial,  # ⭐ R-14
-        )
+        if use_chapter_tools:
+            # Phase 2C:LLM-2 + tool calling 流式
+            # BM25 召回作为首轮上下文,LLM 起步就有材料;过程中可主动调
+            # search_blackboard 取更多原文。on_partial 在最终答案产出后一次性
+            # 触发(典型 1-2 轮工具调用约 60-90s,期间前端没有 token 流入,
+            # 算可接受的 UX 退化)。
+            tool_handler = make_blackboard_tool_handler(blackboard_entities)
+            result = await call_llm_stream_with_tools(
+                model=chapter_model,
+                messages=messages,
+                api_key=api_key,
+                user_id=user_id,
+                project_id=project_id,
+                run_id=run_id,
+                chapter_index=current,
+                tools=[SEARCH_BLACKBOARD_TOOL],
+                tool_handler=tool_handler,
+                max_tool_rounds=settings.llm_chapter_tool_max_rounds,
+                temperature=0.6,
+                on_partial=_on_partial,
+            )
+        else:
+            result = await call_llm_stream(
+                model=chapter_model,
+                messages=messages,
+                api_key=api_key,
+                user_id=user_id,
+                project_id=project_id,
+                run_id=run_id,
+                chapter_index=current,
+                temperature=0.6,
+                on_partial=_on_partial,  # ⭐ R-14
+            )
     except (TimeoutError, LLMRetryFailed, LLMTimeoutExceeded) as e:
         # D-BG:call_llm_stream 总超时已包成 LLMTimeoutExceeded,这里同时
         # catch asyncio.TimeoutError 是兜底。

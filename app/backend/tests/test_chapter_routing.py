@@ -177,3 +177,43 @@ def test_build_messages_default_system_when_no_override() -> None:
         scoring_md="",
     )
     assert messages[0]["content"] == write_chapter_prompt.LLM2_SYSTEM
+
+
+# ============== Phase 2C tool calling 提示注入 ==============
+
+
+def test_build_messages_includes_search_blackboard_hint_when_tool_enabled() -> None:
+    """tool_calling_enabled=True 时,user content 必须包含 search_blackboard 指引。"""
+    messages = write_chapter_prompt.build_messages(
+        chapter={
+            "section": "3.2.2.1",
+            "title": "用户认证模块",
+            "chapter_type": "module",
+            "key_points": ["x"],
+            "target_pages": 3,
+        },
+        tech_spec_md="",
+        scoring_md="",
+        tool_calling_enabled=True,
+    )
+    user = messages[1]["content"]
+    assert "search_blackboard" in user
+    # 提示里说明应该 0-2 次,告诉模型别循环
+    assert "0-2 次" in user or "0-2次" in user
+    # 调用后下一条 message 应当是完整 Markdown,无 tool_call
+    assert "完整的本章" in user or "完整 Markdown" in user or "完整的本章 Markdown" in user
+
+
+def test_build_messages_no_tool_hint_when_disabled() -> None:
+    messages = write_chapter_prompt.build_messages(
+        chapter={
+            "section": "1",
+            "title": "T",
+            "chapter_type": "normal",
+            "target_pages": 1,
+        },
+        tech_spec_md="",
+        scoring_md="",
+        tool_calling_enabled=False,
+    )
+    assert "search_blackboard" not in messages[1]["content"]

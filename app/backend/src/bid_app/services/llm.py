@@ -712,6 +712,261 @@ async def call_llm_with_tools_json(
     raise LLMRetryFailed("tool loop exhausted without final answer")
 
 
+# ============================================================================
+# LLM-2 章节正文专用:tool calling + 最终答案 burst 回推
+# ============================================================================
+
+
+async def call_llm_stream_with_tools(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    api_key: str,
+    user_id: int | str,
+    project_id: int,
+    tools: list[dict[str, Any]],
+    tool_handler: ToolHandler,
+    max_tool_rounds: int = 3,
+    run_id: int | None = None,
+    chapter_index: int | None = None,
+    timeout_seconds: int | None = None,
+    on_partial: Any = None,
+    redaction_ctx: RedactionContext | None = None,
+    **kw: Any,
+) -> StreamResult:
+    """LLM-2 章节正文:tool calling 多轮 + 最终 markdown 一次性回推。
+
+    设计:
+    - tool 轮用 ``stream=False`` 跑(每轮 LLM 选调工具 / 给最终答案)
+    - LLM 返无 tool_calls 时,把 ``msg.content`` 作为完整 markdown 触发
+      ``on_partial`` 一次,落 DB + SSE 推前端
+    - round 超 ``max_tool_rounds`` 仍 tool_call → 系统提示"已达上限,直接出
+      最终答案",再跑 1-2 轮兜底
+    - 总超时 ``settings.llm_chapter_tool_timeout_seconds``(默认 1800s)
+
+    与 ``call_llm_with_tools_json`` 的差别:
+    - 不做 JSON 解析(章节正文是 markdown 自由格式)
+    - 通过 ``on_partial`` 把最终 markdown 推到前端 SSE 通路
+    - 流式 UX 退化为"前段空白,最终一次性出现"(典型 tool 轮 30-60s);若
+      要保留 typewriter,后续可改 ``stream=True + tools`` 联合解码
+      (LiteLLM 支持但状态机复杂,留 stage 6)
+    """
+    if _FAKE:
+        return await _fake_stream(
+            model, messages, project_id, chapter_index, on_partial
+        )
+
+    if redaction_ctx is None:
+        redaction_ctx = RedactionContext()
+    conversation = list(redact_messages(messages, redaction_ctx))
+    total_prompt = 0
+    total_completion = 0
+    timeout = timeout_seconds or settings.llm_chapter_tool_timeout_seconds
+
+    async def _one_round() -> Any:
+        backoffs = [int(s) for s in settings.llm_retry_backoff_s.split(",")]
+        last: Exception | None = None
+        for attempt in range(settings.llm_retry_max + 1):
+            try:
+                return await litellm.acompletion(
+                    model=model,
+                    messages=conversation,
+                    api_key=api_key,
+                    tools=tools,
+                    tool_choice="auto",
+                    stream=False,
+                    **kw,
+                )
+            except (
+                RateLimitError,
+                ServiceUnavailableError,
+                APIConnectionError,
+                Timeout,
+            ) as e:
+                last = e
+                log.warning(
+                    "llm_chapter_tool_round_retry",
+                    model=model,
+                    chapter_index=chapter_index,
+                    attempt=attempt,
+                    error=str(e),
+                )
+                if attempt < settings.llm_retry_max:
+                    await asyncio.sleep(backoffs[attempt])
+                    continue
+                await _write_llm_error(
+                    project_id,
+                    "LLM chapter tool round exhausted",
+                    model=model,
+                    mode="chapter_tools",
+                    chapter_index=chapter_index,
+                    total_attempts=attempt + 1,
+                    last_error=str(e),
+                )
+                raise LLMRetryFailed(str(e)) from e
+        raise LLMRetryFailed(str(last) if last else "unknown")
+
+    try:
+        async with asyncio.timeout(timeout):
+            for round_idx in range(max_tool_rounds + 2):
+                response = await _one_round()
+                msg = response.choices[0].message
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    total_prompt += int(getattr(usage, "prompt_tokens", 0) or 0)
+                    total_completion += int(
+                        getattr(usage, "completion_tokens", 0) or 0
+                    )
+                tool_calls = getattr(msg, "tool_calls", None) or []
+
+                if not tool_calls:
+                    # 最终 markdown
+                    final_text = msg.content or ""
+                    await record_token_usage(
+                        user_id=user_id,
+                        project_id=project_id,
+                        run_id=run_id,
+                        model=model,
+                        prompt_tokens=total_prompt,
+                        completion_tokens=total_completion,
+                    )
+                    if on_partial is not None and final_text:
+                        try:
+                            await on_partial(final_text)
+                        except Exception:
+                            log.exception(
+                                "llm_chapter_tool_on_partial_failed",
+                                project_id=project_id,
+                                chapter_index=chapter_index,
+                            )
+                    return StreamResult(
+                        text=final_text,
+                        prompt_tokens=total_prompt,
+                        completion_tokens=total_completion,
+                    )
+
+                # 仍在 tool 阶段;到 cap 强制催最终答案
+                if round_idx >= max_tool_rounds:
+                    log.warning(
+                        "llm_chapter_tool_loop_force_terminate",
+                        model=model,
+                        chapter_index=chapter_index,
+                        max_rounds=max_tool_rounds,
+                    )
+                    conversation.append(
+                        {
+                            "role": "assistant",
+                            "content": msg.content or "",
+                            "tool_calls": [
+                                {
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function.name,
+                                        "arguments": tc.function.arguments,
+                                    },
+                                }
+                                for tc in tool_calls
+                            ],
+                        }
+                    )
+                    for tc in tool_calls:
+                        conversation.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": json.dumps(
+                                    {
+                                        "error": (
+                                            "max tool rounds reached, "
+                                            "no more tool calls allowed"
+                                        )
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        )
+                    conversation.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "已达到工具调用上限,请直接输出本章完整 "
+                                "Markdown 正文,不要再调用任何工具。"
+                            ),
+                        }
+                    )
+                    continue
+
+                # 正常路径:tool result 入 conversation,准备下一轮
+                conversation.append(
+                    {
+                        "role": "assistant",
+                        "content": msg.content or "",
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                            for tc in tool_calls
+                        ],
+                    }
+                )
+                for tc in tool_calls:
+                    fn_name = tc.function.name
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    try:
+                        result_str = await tool_handler(fn_name, args)
+                    except Exception as e:
+                        log.exception(
+                            "llm_chapter_tool_handler_failed",
+                            tool=fn_name,
+                            args=args,
+                            chapter_index=chapter_index,
+                        )
+                        result_str = json.dumps(
+                            {"error": f"tool handler crashed: {e}"},
+                            ensure_ascii=False,
+                        )
+                    if not isinstance(result_str, str):
+                        result_str = json.dumps(result_str, ensure_ascii=False)
+                    log.info(
+                        "llm_chapter_tool_called",
+                        chapter_index=chapter_index,
+                        round=round_idx,
+                        tool=fn_name,
+                        args=args,
+                        result_chars=len(result_str),
+                    )
+                    conversation.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result_str,
+                        }
+                    )
+    except TimeoutError as te:
+        await _write_llm_error(
+            project_id,
+            "LLM chapter tool loop total timeout",
+            model=model,
+            mode="chapter_tools",
+            chapter_index=chapter_index,
+            timeout_seconds=timeout,
+        )
+        raise LLMTimeoutExceeded(
+            f"LLM chapter tool loop exceeded {timeout}s total timeout"
+        ) from te
+
+    raise LLMRetryFailed("chapter tool loop exhausted without final answer")
+
+
 async def _fake_stream(
     model: str,
     messages: list[dict[str, Any]],

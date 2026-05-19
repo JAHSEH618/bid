@@ -288,6 +288,7 @@ def build_messages(
     blackboard_entities: dict[str, Any] | None = None,
     system_override: str | None = None,
     extra_user_directives: str = "",
+    tool_calling_enabled: bool = False,
 ) -> list[dict[str, Any]]:
     """构造 LLM-2 messages 数组。
 
@@ -311,6 +312,12 @@ def build_messages(
     ``chapter.chapter_type`` 选定的 system prompt 覆盖默认 ``LLM2_SYSTEM``;
     ``extra_user_directives`` 是 chapter-type 相关的"必须遵守"指令,拼在
     user content 末尾。两者都为空时表现等同于改造前的旧行为。
+
+    ⭐ Phase 2C (2026-05-19):``tool_calling_enabled=True`` 时在 user
+    content 追加 ``search_blackboard`` 工具说明 — write_chapter 会把
+    LLM-2 调用切到 ``call_llm_stream_with_tools``;BM25 召回仍作为首轮
+    上下文,LLM 起步就有材料,需要更多细节时主动调工具。建议 1-2 次,
+    避免无意义循环。
     """
     from .categorize_blackboard import has_any_entries
 
@@ -377,6 +384,24 @@ def build_messages(
         f"\n{extra_user_directives.strip()}\n" if extra_user_directives.strip() else ""
     )
 
+    # Phase 2C:tool calling 开关。BM25 召回作为首轮上下文,够用就直接写;
+    # 不够时调 search_blackboard 取更多原文。建议 1-2 次,避免循环。
+    tool_block = ""
+    if tool_calling_enabled:
+        tool_block = (
+            "\n## 可选工具:`search_blackboard`\n\n"
+            "如果上文给的 BM25 召回片段不足以支撑本章细节(如某条评分项原文、"
+            "某段技术要求、某个时间约束),你可以**主动调用** ``search_blackboard``"
+            "工具按需取材:\n\n"
+            "- 参数:``entity_types=[bucket1, bucket2, ...]``(可选,10 个桶之一)、"
+            "``query`` 关键词、``top_k=5-10``\n"
+            "- 建议每章 **0-2 次** 调用,不要为了凑数反复调\n"
+            "- 拿到结果后直接撰写本章正文 Markdown,**不要**输出"
+            "「我调了工具」之类的元信息\n"
+            "- 调用结束后给出的下一条 message 必须是完整的本章 Markdown 正文,"
+            "不再包含 tool_call\n"
+        )
+
     user_content = (
         f"请撰写以下章节的完整 Markdown 正文。\n\n"
         f"## 章节信息\n"
@@ -392,6 +417,7 @@ def build_messages(
         f"### 对应的打分项\n\n"
         f"{_bullet_list(chapter.get('matched_scoring_items') or [])}\n\n"
         f"{context_block}\n\n"
+        f"{tool_block}"
         f"{revision_section}{directive_block}\n\n"
         f"请直接输出本章 Markdown 正文,不要前后缀说明。\n"
     )

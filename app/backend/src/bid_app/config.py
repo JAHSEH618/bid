@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     max_project_upload_bytes: int = 500 * 1024 * 1024
     single_chapter_timeout_seconds: int = 600
     llm_outline_timeout_seconds: int = 600
+    # LLM-2 章节正文走 tool calling 时的总 wall-clock 上限。比单章纯流式
+    # 长得多,因为要留出 0-N 轮 tool round + 最终长 markdown 生成。
+    # 默认 1800s = 30 min,够 6 轮工具(每轮 ~30s)+ 1 万字正文(~10 min)。
+    llm_chapter_tool_timeout_seconds: int = 1800
     llm_retry_max: int = 2
     llm_retry_backoff_s: str = "2,5"
     # Phase 2B (2026-05-16):tool calling 自主检索黑板。默认开;
@@ -65,6 +69,9 @@ class Settings(BaseSettings):
     llm_tool_calling_enabled: bool = True
     # tool 调用最大轮数(防死循环 / 模型疯狂调工具);超出后强制 LLM 给最终答
     llm_tool_max_rounds: int = 6
+    # LLM-2 章节正文的 tool 轮数上限。比 LLM-1 outline 少一些,因为单章
+    # 范围窄,不该需要很多次检索。1-2 次通常够。
+    llm_chapter_tool_max_rounds: int = 3
     global_rate_limit: str = "100/minute"
     login_fail_max_per_minute: int = 5
     login_lock_seconds: int = 300
