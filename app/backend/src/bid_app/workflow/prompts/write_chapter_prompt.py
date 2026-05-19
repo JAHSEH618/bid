@@ -286,9 +286,12 @@ def build_messages(
     retry_count: int = 0,
     previous_text: str = "",
     blackboard_entities: dict[str, Any] | None = None,
+    blackboard_embeddings: dict[str, list[list[float]]] | None = None,
+    query_embedding: list[float] | None = None,
     system_override: str | None = None,
     extra_user_directives: str = "",
     tool_calling_enabled: bool = False,
+    references_out: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """构造 LLM-2 messages 数组。
 
@@ -338,14 +341,19 @@ def build_messages(
         )
 
     if has_any_entries(blackboard_entities):
-        # BM25 路径:章节查询 → 跨桶检索 top_k
+        # BM25 / 混合召回路径:章节查询 → 跨桶检索 top_k
         from ...services.blackboard_retrieval import BlackboardIndex
 
-        index = BlackboardIndex(blackboard_entities)
+        index = BlackboardIndex(blackboard_entities, embeddings=blackboard_embeddings)
         query = _build_chapter_query(chapter)
         # top_k=12 在大多数项目里能给到 LLM-2 足够信息又不过长;实测每条 entry
         # 50-300 字符,12 条 ~2-4k 字符,远低于 prompt 长度上限
-        hits = index.search(entity_types=None, query=query, top_k=12)
+        hits = index.search(
+            entity_types=None,
+            query=query,
+            top_k=12,
+            query_embedding=query_embedding,
+        )
         # BM25 严格按 token 重叠召回,章节标题没明确命中黑板原文时可能为空。
         # 补一份「评分规则 + 技术要求」的前几条作为通用上下文(每个投标章节
         # 都该看到这两类核心信息),与 hits 去重后合并。
@@ -363,9 +371,22 @@ def build_messages(
         if hits:
             bb_section = _render_entries_grouped(hits, char_limit=8000)
             context_block = (
-                f"## 上下文(BM25 从实体黑板按本章主题挑出的 {len(hits)} 条 + "
+                f"## 上下文(混合召回从实体黑板按本章主题挑出的 {len(hits)} 条 + "
                 f"评分/技术基线条目)\n\n{bb_section}"
             )
+            if references_out is not None:
+                for h in hits:
+                    rec: dict[str, Any] = {
+                        "bucket": h.get("bucket"),
+                        "content": h.get("content", ""),
+                        "retrieval_method": h.get("retrieval_method", "bm25"),
+                        "score": h.get("score", 0.0),
+                    }
+                    if h.get("source_doc"):
+                        rec["source_doc"] = h["source_doc"]
+                    if h.get("section"):
+                        rec["section"] = h["section"]
+                    references_out.append(rec)
         else:
             # entities 有内容但 BM25 + baseline 全返空(理论不该发生),
             # 退到 markdown 截断兜底

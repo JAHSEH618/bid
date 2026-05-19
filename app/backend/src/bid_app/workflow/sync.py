@@ -42,6 +42,7 @@ _CHAPTER_SYNC_ALLOWED = frozenset(
         "last_error",
         "retry_count",
         "processing_started_at",  # D-AR / D-BF
+        "references",  # D-EL:LLM 看过的参考资料(JSONB)
     }
 )
 
@@ -51,11 +52,19 @@ def _build_update_sql(fields: dict[str, Any]) -> str:
     ``UPDATE chapters SET k=:k, ... WHERE run_id=:r AND index=:i``。
 
     白名单限制 + 字典 key 必须是 Python 标识符(防异常字符)。
+    JSONB 列(如 references)用 ``CAST(:k AS JSONB)`` 兜底类型推断。
     """
     bad = [k for k in fields if k not in _CHAPTER_SYNC_ALLOWED or not k.isidentifier()]
     if bad:
         raise ValueError(f"sync_chapter_to_db: disallowed fields: {bad}")
-    set_clause = ", ".join(f"{k}=:{k}" for k in fields)
+    jsonb_fields = {"references"}
+    parts: list[str] = []
+    for k in fields:
+        if k in jsonb_fields:
+            parts.append(f"{k}=CAST(:{k} AS JSONB)")
+        else:
+            parts.append(f"{k}=:{k}")
+    set_clause = ", ".join(parts)
     return f"UPDATE chapters SET {set_clause} WHERE run_id=:r AND index=:i"
 
 
@@ -64,8 +73,17 @@ async def sync_chapter_to_db(run_id: int, index: int, **fields: Any) -> None:
     if not fields:
         return
     sql = _build_update_sql(fields)
+    # JSONB 列序列化为 JSON 字符串,asyncpg 不直接绑定 dict/list 到 jsonb
+    import json as _json
+
+    params: dict[str, Any] = {"r": run_id, "i": index}
+    for k, v in fields.items():
+        if k == "references":
+            params[k] = _json.dumps(v, ensure_ascii=False)
+        else:
+            params[k] = v
     async with session_factory() as s:
-        await s.execute(sa.text(sql), {"r": run_id, "i": index, **fields})
+        await s.execute(sa.text(sql), params)
         await s.commit()
 
 

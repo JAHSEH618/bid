@@ -28,6 +28,9 @@ from typing import Any
 import jieba
 from rank_bm25 import BM25Okapi
 
+from .embeddings import EMBEDDING_DIM, cosine_similarity
+from .hybrid_retrieval import rrf_fuse
+
 # 中文 stop words(常见无信息词);英文走小写化 + 简单切。
 # 没必要做大词典,Phase 2A 检索的是关键字命中,精度可接受。
 _ZH_STOP = {
@@ -69,16 +72,31 @@ class BlackboardIndex:
     线程安全:只读;jieba 分词器全局共享,内部线程安全。
     """
 
-    def __init__(self, entities: dict[str, Any] | None) -> None:
+    def __init__(
+        self,
+        entities: dict[str, Any] | None,
+        embeddings: dict[str, list[list[float]]] | None = None,
+    ) -> None:
+        """构造索引。
+
+        ``embeddings`` 形状与 ``entities`` 对齐:同桶下第 i 条 entry 对应
+        ``embeddings[bucket][i]``。条目数不匹配时该桶向量忽略,降级纯 BM25。
+        D-EK 混合召回时由 categorize_blackboard 节点预先算好传入。
+        """
         self._entries: list[dict[str, Any]] = []
         self._tokens: list[list[str]] = []
+        self._embeddings: list[list[float]] = []
         self._bm25: BM25Okapi | None = None
         if not entities:
             return
         for bucket, items in entities.items():
             if not isinstance(items, list):
                 continue
-            for entry in items:
+            bucket_embs = (embeddings or {}).get(bucket) if embeddings else None
+            # 桶级向量数与 entries 数对不上 → 该桶丢弃向量,后续 search 退化纯 BM25
+            if bucket_embs is not None and len(bucket_embs) != len(items):
+                bucket_embs = None
+            for i, entry in enumerate(items):
                 if not isinstance(entry, dict):
                     continue
                 content = entry.get("content")
@@ -105,6 +123,14 @@ class BlackboardIndex:
                     stored["section"] = section.strip()
                 self._entries.append(stored)
                 self._tokens.append(_tokenize(content))
+                if bucket_embs is not None:
+                    emb = bucket_embs[i]
+                    if isinstance(emb, list) and len(emb) == EMBEDDING_DIM:
+                        self._embeddings.append([float(x) for x in emb])
+                    else:
+                        self._embeddings.append([])
+                else:
+                    self._embeddings.append([])
         if self._tokens:
             # rank_bm25 不接受空文档语料;空时 _bm25 留 None,search 直接返 []
             self._bm25 = BM25Okapi(self._tokens)
@@ -112,21 +138,57 @@ class BlackboardIndex:
     def __len__(self) -> int:
         return len(self._entries)
 
+    def has_embeddings(self) -> bool:
+        """是否至少有一条 entry 带非空 embedding(用于决定是否走混合召回)。"""
+        return any(len(e) == EMBEDDING_DIM for e in self._embeddings)
+
     def search(
         self,
         *,
         entity_types: list[str] | None = None,
         query: str = "",
         top_k: int = 5,
+        query_embedding: list[float] | None = None,
     ) -> list[dict[str, Any]]:
-        """按桶过滤 + BM25 排序。
+        """按桶过滤 + BM25 / 混合排序。
 
         - ``entity_types`` 空 / None → 全 10 桶都候选
         - ``query`` 空 → 不算 BM25,只按 entity_types 过滤后取前 top_k
           (按 entry 原顺序,通常 LLM-0 已按重要性排好了)
+        - ``query_embedding`` 非空且索引带 embeddings → 走 RRF 混合召回;
+          其他情况退化纯 BM25
         - 返回 list 每项含 ``bucket`` / ``tags`` / ``content`` / ``score`` /
-          可选 ``source_doc`` / ``section``
+          可选 ``source_doc`` / ``section`` / ``retrieval_method``
         """
+        bm25_hits = self._bm25_search(
+            entity_types=entity_types, query=query, top_k=max(top_k * 3, top_k + 5)
+        )
+
+        use_hybrid = (
+            query_embedding is not None
+            and len(query_embedding) == EMBEDDING_DIM
+            and any(x != 0.0 for x in query_embedding)
+            and self.has_embeddings()
+        )
+        if not use_hybrid:
+            return bm25_hits[:top_k]
+
+        vec_hits = self._vec_search(
+            entity_types=entity_types,
+            query_embedding=query_embedding or [],
+            top_k=max(top_k * 3, top_k + 5),
+        )
+        fused = rrf_fuse(bm25_hits, vec_hits, top_k=top_k)
+        return fused
+
+    def _bm25_search(
+        self,
+        *,
+        entity_types: list[str] | None,
+        query: str,
+        top_k: int,
+    ) -> list[dict[str, Any]]:
+        """原 BM25 路径,提取为私有方法以便复用。"""
         if not self._entries:
             return []
 
@@ -152,6 +214,7 @@ class BlackboardIndex:
             for idx in candidate_indices[:top_k]:
                 hit = dict(self._entries[idx])
                 hit["score"] = 0.0
+                hit["retrieval_method"] = "bm25"
                 results.append(hit)
             return results
 
@@ -165,6 +228,7 @@ class BlackboardIndex:
             for idx in candidate_indices[:top_k]:
                 hit = dict(self._entries[idx])
                 hit["score"] = 0.0
+                hit["retrieval_method"] = "bm25"
                 results.append(hit)
             return results
 
@@ -191,13 +255,54 @@ class BlackboardIndex:
             score = float(all_scores[idx])
             hit = dict(self._entries[idx])
             hit["score"] = round(score, 4)
+            hit["retrieval_method"] = "bm25"
+            out.append(hit)
+        return out
+
+    def _vec_search(
+        self,
+        *,
+        entity_types: list[str] | None,
+        query_embedding: list[float],
+        top_k: int,
+    ) -> list[dict[str, Any]]:
+        """向量 cosine 路径。entity_types / 空 query_embedding 检查由 caller 负责。"""
+        if not self._entries or not query_embedding:
+            return []
+        allowed = set(entity_types or [])
+        if allowed:
+            candidate_indices = [
+                i
+                for i, e in enumerate(self._entries)
+                if any(t in allowed for t in e["tags"])
+            ]
+        else:
+            candidate_indices = list(range(len(self._entries)))
+        if not candidate_indices:
+            return []
+        # 没向量的位置算 0 分,自然排到尾部
+        scored = [
+            (cosine_similarity(query_embedding, self._embeddings[i]), i)
+            for i in candidate_indices
+        ]
+        # 过滤 score <= 0(纯零向量 / 反相关)
+        scored = [(s, i) for s, i in scored if s > 0.0]
+        scored.sort(key=lambda t: t[0], reverse=True)
+        out: list[dict[str, Any]] = []
+        for score, idx in scored[:top_k]:
+            hit = dict(self._entries[idx])
+            hit["score"] = round(float(score), 4)
+            hit["retrieval_method"] = "vec"
             out.append(hit)
         return out
 
 
-def build_index(entities: dict[str, Any] | None) -> BlackboardIndex:
+def build_index(
+    entities: dict[str, Any] | None,
+    embeddings: dict[str, list[list[float]]] | None = None,
+) -> BlackboardIndex:
     """便捷构造函数。"""
-    return BlackboardIndex(entities)
+    return BlackboardIndex(entities, embeddings=embeddings)
 
 
 # Phase 2B (2026-05-16):LiteLLM tool 定义 + handler 工厂。LLM-1 outline
@@ -261,16 +366,27 @@ SEARCH_BLACKBOARD_TOOL: dict[str, Any] = {
 
 def make_blackboard_tool_handler(
     entities: dict[str, Any] | None,
+    *,
+    embeddings: dict[str, list[list[float]]] | None = None,
+    query_embedder: Any = None,
+    collector: list[dict[str, Any]] | None = None,
 ) -> Any:
     """生成 ``search_blackboard`` tool 的异步 handler,绑定一份 BlackboardIndex。
 
     返回 ``async (name, args) -> str``,内部 dispatch tool name 后调
     ``BlackboardIndex.search`` 返 JSON 字符串(LiteLLM tool result 期望 str)。
     未知 tool 名 / 错参数 / index 空都返结构化 error JSON,LLM 据此判断改 query。
+
+    可选参数(D-EK / D-EL):
+    - ``embeddings``:与 entities 同形状的桶级向量,启用混合召回
+    - ``query_embedder``:``async (text) -> list[float]``,每次 tool 调用前算 query 向量;
+      为 None 时退化纯 BM25(即使 entities 带 embeddings)
+    - ``collector``:可变 list,handler 把每次命中追加进去(标 ``retrieval_method="tool"``),
+      供 write_chapter 节点采集"LLM 看过的资料"落 Chapter.references
     """
     import json as _json
 
-    index = BlackboardIndex(entities)
+    index = BlackboardIndex(entities, embeddings=embeddings)
 
     async def handler(name: str, args: dict[str, Any]) -> str:
         if name != "search_blackboard":
@@ -292,11 +408,36 @@ def make_blackboard_tool_handler(
             top_k = max(1, min(20, int(top_k_raw)))
         except (TypeError, ValueError):
             top_k = 5
+
+        query_embedding: list[float] | None = None
+        if query_embedder is not None and query.strip():
+            try:
+                query_embedding = await query_embedder(query)
+            except Exception:
+                # embedder 失败回退纯 BM25,不阻塞 tool
+                query_embedding = None
+
         hits = index.search(
             entity_types=[str(t) for t in entity_types],
             query=query,
             top_k=top_k,
+            query_embedding=query_embedding,
         )
+
+        if collector is not None:
+            for h in hits:
+                rec = {
+                    "bucket": h.get("bucket"),
+                    "content": h.get("content", ""),
+                    "retrieval_method": "tool",
+                    "score": h.get("score", 0.0),
+                }
+                if h.get("source_doc"):
+                    rec["source_doc"] = h["source_doc"]
+                if h.get("section"):
+                    rec["section"] = h["section"]
+                collector.append(rec)
+
         # 返最小信息给 LLM,省 token;score 不传(对生成无帮助)
         slim = [
             {

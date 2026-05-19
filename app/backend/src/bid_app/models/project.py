@@ -61,3 +61,9 @@ class Project(Base, TimestampMixin):
     # 写回这里,后续 revise / resume 沿用同一份骨架。NULL = 项目跑在 stage 1
     # 之前 / 关闭了骨架开关 → 工作流退到旧自由模式。
     template_pack: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # ⭐ D-EK (2026-05-19):混合召回的桶级向量(text-embedding-v3,1024 维)。
+    # 形状 ``{bucket: [vec_for_entry_0, ...]}``,与 ``blackboard_entities`` 对齐。
+    # categorize_blackboard 节点尾部统一 embed 并写入,resume 时跳过重 embed。
+    # NULL = embedding 服务关闭 / 失败回退,BlackboardIndex 自动降级纯 BM25。
+    blackboard_embeddings: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

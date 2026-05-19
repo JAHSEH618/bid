@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     llm2_chapter_model: str = "dashscope/qwen3.6-max-preview"
     llm3_visuals_model: str = "dashscope/qwen3.6-flash"
 
+    # D-EK (2026-05-19):向量召回模型 + 混合召回开关。
+    # text-embedding-v3 1024 维,跟现有 DashScope LLM 复用一把 API key。
+    # 关掉时 BlackboardIndex 退化纯 BM25,工作流不阻塞。
+    embedding_model: str = "dashscope/text-embedding-v3"
+    hybrid_retrieval_enabled: bool = True
+    hybrid_rrf_k: int = 60
+
     # 业务参数
     max_concurrent_projects: int = 10
     max_concurrent_chapter_generations: int = 3

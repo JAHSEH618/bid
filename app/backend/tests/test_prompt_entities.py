@@ -130,8 +130,8 @@ def test_pick_buckets_consistent_regardless_of_title() -> None:
 
 
 def test_chapter_prompt_uses_entities_when_given() -> None:
-    """Phase 2A:有 entities → BM25 + baseline 路径,prompt 含上下文标题
-    「BM25 从实体黑板...」且查询命中条目 / baseline 条目都出现。"""
+    """Phase 2A / D-EK:有 entities → BM25(或混合)+ baseline 路径,prompt 含
+    上下文标题「混合召回从实体黑板...」且查询命中条目 / baseline 条目都出现。"""
     entities = {
         # 这条与章节 query("风险管控" / "PDCA")有 token 重叠,BM25 应该命中
         "risk_signals": [
@@ -155,7 +155,7 @@ def test_chapter_prompt_uses_entities_when_given() -> None:
         blackboard_entities=entities,
     )
     user = msgs[1]["content"]
-    assert "BM25 从实体黑板" in user
+    assert "混合召回从实体黑板" in user
     # 命中的 risk_signals 条目应出现
     assert "PDCA 闭环必须体现" in user or "缺失直接扣 8 分" in user
     # baseline 兜底的 scoring/technical 条目也该出现

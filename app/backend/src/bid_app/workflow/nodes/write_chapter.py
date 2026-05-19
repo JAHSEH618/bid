@@ -30,6 +30,7 @@ from ...services.blackboard_retrieval import (
     SEARCH_BLACKBOARD_TOOL,
     make_blackboard_tool_handler,
 )
+from ...services.embeddings import embed_one
 from ...services.llm import (
     ChapterGenerationFailed,
     LLMRetryFailed,
@@ -536,6 +537,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             )
 
     blackboard_entities = state.get("blackboard_entities")
+    blackboard_embeddings = state.get("blackboard_embeddings")
     # Phase 2C:LLM-2 也走 tool calling。条件:全局开关开 + 实体桶非空 +
     # 非 template 章(image_only/table_only 已在前面短路返回,这里不会到)。
     use_chapter_tools = (
@@ -543,6 +545,37 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         and bool(blackboard_entities)
         and any(blackboard_entities.values())  # type: ignore[union-attr]
     )
+
+    # D-EK:为本章查询算一次 query embedding,与 BM25 一起做 RRF 融合
+    query_embedding: list[float] | None = None
+    if (
+        settings.hybrid_retrieval_enabled
+        and blackboard_embeddings
+        and bool(blackboard_entities)
+    ):
+        from ..prompts.write_chapter_prompt import _build_chapter_query
+
+        try:
+            chapter_query = _build_chapter_query(chapter)
+            if chapter_query.strip():
+                query_embedding = await embed_one(
+                    chapter_query,
+                    api_key=api_key,
+                    user_id=user_id,
+                    project_id=project_id,
+                )
+        except Exception:
+            import structlog
+
+            structlog.get_logger().exception(
+                "write_chapter_query_embed_failed",
+                run_id=run_id,
+                index=current,
+            )
+            query_embedding = None
+
+    # D-EL:首轮召回写入 references_collector;tool 调用阶段由 handler 追加
+    references_collector: list[dict[str, Any]] = []
 
     messages = build_messages(
         chapter=chapter,
@@ -552,12 +585,15 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         retry_count=retry_count,
         previous_text=previous_text,  # ⭐ R-18
         blackboard_entities=blackboard_entities,
+        blackboard_embeddings=blackboard_embeddings,
+        query_embedding=query_embedding,
         # D-EG:按 chapter_type 选 system 与 user 末尾指令;normal/未知用默认
         system_override=_SYSTEM_BY_TYPE.get(chapter_type),
         extra_user_directives=_USER_DIRECTIVE_BY_TYPE.get(chapter_type, ""),
         # Phase 2C:tool calling 模式下,user prompt 末尾追加 search_blackboard
         # 工具说明
         tool_calling_enabled=use_chapter_tools,
+        references_out=references_collector,
     )
 
     # ⭐ R-14:periodic flush 回调 —— call_llm_stream 内部每 100 chunks /
@@ -594,7 +630,22 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             # search_blackboard 取更多原文。on_partial 在最终答案产出后一次性
             # 触发(典型 1-2 轮工具调用约 60-90s,期间前端没有 token 流入,
             # 算可接受的 UX 退化)。
-            tool_handler = make_blackboard_tool_handler(blackboard_entities)
+
+            async def _embed_for_tool(text: str) -> list[float]:
+                # D-EK:tool 调用时的 query 同样走混合召回;失败回退 None,handler 内部转纯 BM25
+                return await embed_one(
+                    text,
+                    api_key=api_key,
+                    user_id=user_id,
+                    project_id=project_id,
+                )
+
+            tool_handler = make_blackboard_tool_handler(
+                blackboard_entities,
+                embeddings=blackboard_embeddings,
+                query_embedder=_embed_for_tool if blackboard_embeddings else None,
+                collector=references_collector,
+            )
             result = await call_llm_stream_with_tools(
                 model=chapter_model,
                 messages=messages,
@@ -668,4 +719,43 @@ async def run(state: WorkflowState) -> dict[str, Any]:
                 index=current,
             )
 
+    # D-EL:把 LLM 看过的参考资料落 chapter.references。按 content 去重,
+    # 优先保留 bm25+vec / tool 命中(信息更完整)。
+    final_refs = _dedupe_references(references_collector)
+    if _real_run(run_id) and final_refs:
+        await _safe_sync_chapter(
+            run_id,
+            current,
+            references=final_refs,
+        )
+
     return {"_pending_chapter_text": final_text}
+
+
+def _dedupe_references(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按 content 去重,合并 retrieval_method(同条目两路命中标 bm25+vec)。
+
+    保持首次出现顺序;tool 标记优先级最高(LLM 主动查的更说明问题)。
+    """
+    if not items:
+        return []
+    by_content: dict[str, dict[str, Any]] = {}
+    for raw in items:
+        content = raw.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        key = content.strip()
+        existing = by_content.get(key)
+        if existing is None:
+            by_content[key] = dict(raw)
+            continue
+        prev_method = existing.get("retrieval_method") or ""
+        new_method = raw.get("retrieval_method") or ""
+        # tool 标记单独保留,其它两路合并成 bm25+vec
+        if "tool" in (prev_method, new_method):
+            existing["retrieval_method"] = "tool"
+        else:
+            methods = set(prev_method.split("+")) | set(new_method.split("+"))
+            methods.discard("")
+            existing["retrieval_method"] = "+".join(sorted(methods))
+    return list(by_content.values())

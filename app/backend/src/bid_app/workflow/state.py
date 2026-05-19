@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-CURRENT_WORKFLOW_SCHEMA_VERSION = 4
+CURRENT_WORKFLOW_SCHEMA_VERSION = 5
 """每次 WorkflowState 不向后兼容地变更字段时,**必须**bump 本常量并实现
 对应迁移 / flush 流程(D1)。
 
@@ -27,7 +27,11 @@ v3 → v4 (2026-05-18, D-EF):新增 ``template_pack`` 字段 + ``chapters[i]``
 新增 ``chapter_type / template_slot / required_anchors`` 字段;
 ``generate_outline`` 注入骨架,``parse_outline`` 反查骨架填充类型,
 ``write_chapter`` / ``gen_visuals`` / 校验器据 chapter_type 分流。
-老 v3 checkpoint 没有 ``template_pack``,resume 时被拒。"""
+老 v3 checkpoint 没有 ``template_pack``,resume 时被拒。
+
+v4 → v5 (2026-05-19, D-EK / D-EM):新增 ``blackboard_embeddings`` 字段
+(混合召回的桶级向量)+ ``_finalize_early`` 标记(提前合并)。
+老 v4 checkpoint 缺这两字段会被拒。"""
 
 
 class WorkflowSchemaMismatch(Exception):
@@ -133,6 +137,17 @@ class WorkflowState(TypedDict, total=False):
     # ``write_chapter``。``human_review`` 也会读 issues 给前端展示。
     _validation_issues: list[dict[str, Any]]
     _should_auto_revise: bool
+
+    # D-EK (2026-05-19):混合召回向量,shape 与 blackboard_entities 对齐:
+    # ``{bucket: [vec_for_entry_0, vec_for_entry_1, ...]}``。1024 维 float list,
+    # categorize_blackboard 节点尾部统一 embed。None 表示节点未跑 / 失败回退。
+    blackboard_embeddings: dict[str, list[list[float]]] | None
+
+    # D-EM (2026-05-19):用户在 chapter_review 阶段点"完成评审,提前合并"。
+    # update_state 节点把 decision 里的 finalize_early 透传到这里,
+    # pick_chapter 见 True 时把所有 pending / awaiting_review 章节标
+    # ``not_generated`` 并跳到 assemble,assemble 在文档里插占位文字。
+    _finalize_early: bool
 
     # === 输出 ===
     final_proposal: str | None

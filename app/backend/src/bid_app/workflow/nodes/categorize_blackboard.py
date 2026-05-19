@@ -22,6 +22,7 @@ import structlog
 
 from ...config import settings
 from ...db import session_factory
+from ...services.embeddings import embed_texts
 from ...services.llm import LLMRetryFailed, LLMTimeoutExceeded, call_llm_json
 from ..prompts import categorize_blackboard as prompt
 from ..resolve import resolve_api_key, resolve_models, resolve_user_id
@@ -36,16 +37,35 @@ def _empty_buckets() -> dict[str, list[dict[str, Any]]]:
 
 
 async def _save_entities_to_project(
-    project_id: int, entities: dict[str, list[dict[str, Any]]]
+    project_id: int,
+    entities: dict[str, list[dict[str, Any]]],
+    embeddings: dict[str, list[list[float]]] | None = None,
 ) -> None:
     """把桶 JSON 写到 ``Project.blackboard_entities`` 列。失败仅 log,不
-    阻塞工作流(state 里仍带,下游 prompt 优先从 state 拿)。"""
+    阻塞工作流(state 里仍带,下游 prompt 优先从 state 拿)。
+
+    D-EK:同时把混合召回的向量写到 ``Project.blackboard_embeddings``,resume
+    时跳过重 embed。embeddings 为 None 时仅写 entities,不动向量列。
+    """
     try:
         async with session_factory() as s:
-            await s.execute(
-                sa.text("UPDATE projects SET blackboard_entities=CAST(:e AS JSONB) WHERE id=:i"),
-                {"e": _to_jsonb_text(entities), "i": project_id},
-            )
+            if embeddings is not None:
+                await s.execute(
+                    sa.text(
+                        "UPDATE projects SET blackboard_entities=CAST(:e AS JSONB), "
+                        "blackboard_embeddings=CAST(:v AS JSONB) WHERE id=:i"
+                    ),
+                    {
+                        "e": _to_jsonb_text(entities),
+                        "v": _to_jsonb_text(embeddings),
+                        "i": project_id,
+                    },
+                )
+            else:
+                await s.execute(
+                    sa.text("UPDATE projects SET blackboard_entities=CAST(:e AS JSONB) WHERE id=:i"),
+                    {"e": _to_jsonb_text(entities), "i": project_id},
+                )
             await s.commit()
     except Exception:
         log.exception(
@@ -54,12 +74,12 @@ async def _save_entities_to_project(
         )
 
 
-def _to_jsonb_text(entities: dict[str, list[dict[str, Any]]]) -> str:
+def _to_jsonb_text(value: Any) -> str:
     """psycopg 无法直接绑定 dict 给 JSONB 列时的兜底:序列化为 JSON
     字符串,SQL 里 ``CAST(:e AS JSONB)``。比走 ORM 简单稳。"""
     import json as _json
 
-    return _json.dumps(entities, ensure_ascii=False)
+    return _json.dumps(value, ensure_ascii=False)
 
 
 async def run(state: WorkflowState) -> dict[str, Any]:
@@ -129,11 +149,82 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         total_entries=total,
     )
 
-    await _save_entities_to_project(project_id, entities)
+    # D-EK:对所有 entry content 一次性 embed,落 state + projects 列。
+    embeddings: dict[str, list[list[float]]] | None = None
+    if settings.hybrid_retrieval_enabled and total > 0:
+        embeddings = await _embed_entities(
+            entities=entities,
+            api_key=api_key,
+            user_id=user_id,
+            project_id=project_id,
+        )
+
+    await _save_entities_to_project(project_id, entities, embeddings=embeddings)
     await publish_event(
         project_id,
         "blackboard_entities_ready",
         bucket_counts={k: len(v) for k, v in entities.items()},
     )
 
-    return {"blackboard_entities": entities}
+    out: dict[str, Any] = {"blackboard_entities": entities}
+    if embeddings is not None:
+        out["blackboard_embeddings"] = embeddings
+    return out
+
+
+async def _embed_entities(
+    *,
+    entities: dict[str, list[dict[str, Any]]],
+    api_key: str,
+    user_id: int | str,
+    project_id: int,
+) -> dict[str, list[list[float]]]:
+    """对全部桶 entries 的 content 批量 embed,返回与 entities 同形状的向量 dict。
+
+    失败回退空 dict,下游 BlackboardIndex 检测到 None / 空向量自动退化纯 BM25。
+    """
+    # 把全部 (bucket, index, content) 拍平,一次 embed 完毕再回填,省 LLM 轮次
+    flat_buckets: list[str] = []
+    flat_texts: list[str] = []
+    for bucket, items in entities.items():
+        for entry in items:
+            content = entry.get("content") if isinstance(entry, dict) else None
+            if isinstance(content, str) and content.strip():
+                flat_buckets.append(bucket)
+                flat_texts.append(content)
+            else:
+                flat_buckets.append(bucket)
+                flat_texts.append("")  # 占位,保持顺序对齐
+
+    if not flat_texts:
+        return {}
+
+    try:
+        vecs = await embed_texts(
+            flat_texts,
+            api_key=api_key,
+            user_id=user_id,
+            project_id=project_id,
+        )
+    except Exception:
+        log.exception(
+            "embed_entities_failed_fallback_pure_bm25",
+            project_id=project_id,
+        )
+        return {}
+
+    result: dict[str, list[list[float]]] = {b: [] for b in entities}
+    for bucket, vec in zip(flat_buckets, vecs, strict=False):
+        result.setdefault(bucket, []).append(vec)
+
+    # 校验:每桶向量数应该等于 entries 数;不等就丢
+    cleaned: dict[str, list[list[float]]] = {}
+    for bucket, items in entities.items():
+        if len(result.get(bucket, [])) == len(items):
+            cleaned[bucket] = result[bucket]
+    log.info(
+        "embed_entities_done",
+        project_id=project_id,
+        bucket_counts={k: len(v) for k, v in cleaned.items()},
+    )
+    return cleaned
