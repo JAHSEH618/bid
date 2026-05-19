@@ -120,10 +120,24 @@ def fixed_leaf_paths(skeleton: list[dict[str, Any]]) -> list[tuple[str, ...]]:
     ]
 
 
+def fixed_leaves_with_nodes(
+    skeleton: list[dict[str, Any]],
+) -> list[tuple[tuple[str, ...], dict[str, Any]]]:
+    """同 ``fixed_leaf_paths``,但返回完整 ``(path, leaf_node)`` 对,供
+    parse_outline 区分 expandable / 非 expandable 叶子做不同处理。
+    """
+    return [
+        ((*parent_titles, str(leaf.get("title") or "")), leaf)
+        for parent_titles, leaf in iter_skeleton_leaves(skeleton)
+        if leaf.get("fixed") is True
+    ]
+
+
 __all__ = [
     "DEFAULT_PACK_ID",
     "build_title_path_index",
     "fixed_leaf_paths",
+    "fixed_leaves_with_nodes",
     "iter_skeleton_leaves",
     "load_pack",
     "pick_pack",

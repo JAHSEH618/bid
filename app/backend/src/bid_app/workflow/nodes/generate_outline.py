@@ -163,6 +163,13 @@ async def run(state: WorkflowState) -> dict[str, str | None]:
         skeleton=skeleton,
     )
 
+    # D-EF hotfix:有骨架时强制关掉 tool calling。骨架已经把结构约束写满,
+    # LLM 不需要再调 search_blackboard 反复采集;tool 循环只会让 LLM 重复
+    # 查同一桶不收口(上次用户碰到 480s+ 才出)。build_messages 内同名
+    # 变量影响 prompt 文案,这里影响实际 LLM 调用走向,两处必须一致。
+    if skeleton:
+        use_tool_calling = False
+
     await publish_event(project_id, "outline_started")
     models = await resolve_models(project_id)
 

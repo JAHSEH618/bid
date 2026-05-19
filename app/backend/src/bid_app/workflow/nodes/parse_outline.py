@@ -37,7 +37,7 @@ import structlog
 from ..state import WorkflowState
 from ..templates import (
     build_title_path_index,
-    fixed_leaf_paths,
+    fixed_leaves_with_nodes,
     load_pack,
 )
 
@@ -154,20 +154,63 @@ def _apply_skeleton_overlay(
         if isinstance(tp, (int, float)) and tp > 0:
             ch["target_pages"] = int(tp)
 
-    # 校验:骨架里所有 fixed 叶子是否齐全
+    # 校验 + 自动补齐:骨架里所有 fixed 叶子是否齐全
+    # - expandable 叶子(``类似业绩`` 等):LLM 把它展开成多个子叶,
+    #   chapters[i].parent_titles 里会出现这个标题,视为已展开
+    # - 非 expandable 叶子:LLM 必须照抄,否则自动补一条到末尾
     have_paths: set[tuple[str, ...]] = {
         (*tuple(ch.get("parent_titles") or []), str(ch.get("title") or ""))
         for ch in chapters
     }
     have_titles = {str(ch.get("title") or "") for ch in chapters}
-    for path in fixed_leaf_paths(skeleton):
-        # 精确路径未命中、连标题都没出现 → 报缺失
-        if path in have_paths:
-            continue
+    have_parent_titles: set[str] = set()
+    for ch in chapters:
+        for p in ch.get("parent_titles") or []:
+            if isinstance(p, str):
+                have_parent_titles.add(p)
+
+    injected = 0
+    for path, leaf_node in fixed_leaves_with_nodes(skeleton):
         leaf_title = path[-1] if path else ""
-        if leaf_title in have_titles:
+        # 已存在(精确路径 / 同标题兜底)→ 跳过
+        if path in have_paths or leaf_title in have_titles:
             continue
-        warnings.append(f"骨架 fixed 叶子缺失: {' / '.join(path)}")
+        # expandable 叶子:LLM 展开后,此 title 应出现在某些 chapter 的
+        # parent_titles 里(作为它们的祖先),也视为已处理
+        if leaf_node.get("expandable") and leaf_title in have_parent_titles:
+            continue
+
+        # 真缺失:把骨架定义补一条到末尾,parent_titles 复用骨架的祖先链
+        parent_titles_list = list(path[:-1])
+        target_pages = leaf_node.get("target_pages", 1)
+        if not isinstance(target_pages, (int, float)) or target_pages <= 0:
+            target_pages = 1
+        required = leaf_node.get("required_anchors") or []
+        if not isinstance(required, list):
+            required = []
+
+        new_chapter: dict[str, Any] = {
+            "title": leaf_title,
+            "summary": "",
+            "key_points": [],
+            "matched_scoring_items": [],
+            "target_pages": int(target_pages),
+            "chapter_type": leaf_node.get("chapter_type") or "normal",
+            "template_slot": leaf_node.get("template_slot") or "",
+            "required_anchors": [str(x) for x in required],
+        }
+        next_idx = len(chapters)
+        # section 号给个不太冲突的尾标 ``99.{n}``,避免与 LLM 已用的 1.x/2.x
+        # 冲突;outline_review 用户可以在 textarea 里改成想要的层级
+        new_chapter = _normalize_chapter(
+            new_chapter,
+            section=f"99.{injected + 1}",
+            idx=next_idx,
+            parent_titles=parent_titles_list,
+        )
+        chapters.append(new_chapter)
+        warnings.append(f"自动补齐 fixed 叶子: {' / '.join(path)}")
+        injected += 1
 
     return chapters, warnings
 

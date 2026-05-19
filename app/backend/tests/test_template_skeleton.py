@@ -95,8 +95,11 @@ def test_parse_outline_overlays_chapter_type_from_skeleton() -> None:
     }
     result = asyncio.run(parse_outline.run(state))
     chapters = result["chapters"]
-    assert len(chapters) == 1
-    leaf = chapters[0]
+    # LLM 只给了"总体设计原则"一节,parse_outline 自动补齐了骨架其它 fixed 叶子
+    assert len(chapters) > 1
+    matching = [c for c in chapters if c["title"] == "总体设计原则"]
+    assert len(matching) == 1
+    leaf = matching[0]
     assert leaf["chapter_type"] == "principle"
     assert "开放性" in leaf["required_anchors"]
     assert leaf["template_slot"] == "design_principles"
@@ -134,9 +137,58 @@ def test_parse_outline_skeleton_fallback_by_title_only() -> None:
         "template_pack": DEFAULT_PACK_ID,
     }
     result = asyncio.run(parse_outline.run(state))
-    leaf = result["chapters"][0]
+    # 自动补齐其余 fixed 叶子,但目标"应用架构方案"应被反查命中并填字段
+    arch = [c for c in result["chapters"] if c["title"] == "应用架构方案"]
+    assert len(arch) == 1
+    leaf = arch[0]
     assert leaf["chapter_type"] == "architecture"
     assert "接入层" in leaf["required_anchors"]
+
+
+def test_parse_outline_expandable_leaf_not_double_injected() -> None:
+    """``类似业绩`` 是 expandable 叶子,LLM 展开成 3 个 case 后,parse_outline
+    不应再把"类似业绩"本身当 missing 叶子补一遍。"""
+    payload = {
+        "toc": [
+            {
+                "title": "类似业绩",
+                "children": [
+                    {"title": "案例1:2023年X客户运营", "key_points": ["x"], "target_pages": 2},
+                    {"title": "案例2:2024年Y项目", "key_points": ["y"], "target_pages": 2},
+                    {"title": "案例3:2024年Z合同", "key_points": ["z"], "target_pages": 2},
+                ],
+            },
+        ]
+    }
+    state: dict = {
+        "_outline_json": json.dumps(payload),
+        "template_pack": DEFAULT_PACK_ID,
+    }
+    result = asyncio.run(parse_outline.run(state))
+    # 应该没有标题正好是"类似业绩"的叶子(它被展开了);3 个案例必须保留
+    titles = [c["title"] for c in result["chapters"]]
+    assert "类似业绩" not in titles
+    assert "案例1:2023年X客户运营" in titles
+    assert "案例3:2024年Z合同" in titles
+
+
+def test_parse_outline_auto_injects_truly_missing_fixed_leaf() -> None:
+    """非 expandable 的 fixed 叶子(如"项目背景")若 LLM 漏写,parse_outline
+    应自动补齐,不再仅记 warning。"""
+    payload = {
+        "toc": [{"title": "X", "children": [{"title": "Y", "target_pages": 1}]}]
+    }
+    state: dict = {
+        "_outline_json": json.dumps(payload),
+        "template_pack": DEFAULT_PACK_ID,
+    }
+    result = asyncio.run(parse_outline.run(state))
+    titles = {c["title"] for c in result["chapters"]}
+    # 骨架要求"项目背景"(fixed,非 expandable),应被自动补齐
+    assert "项目背景" in titles
+    bg = next(c for c in result["chapters"] if c["title"] == "项目背景")
+    assert bg["chapter_type"] == "normal"
+    assert bg["template_slot"] == "project_background"
 
 
 def test_iter_skeleton_leaves_traverses_image_only_chains() -> None:
