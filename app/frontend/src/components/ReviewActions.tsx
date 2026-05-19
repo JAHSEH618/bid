@@ -2,6 +2,7 @@ import { useState } from 'react'
 import {
   AlertCircle,
   Check,
+  CheckCircle2,
   Loader2,
   RefreshCw,
   RotateCcw,
@@ -14,21 +15,29 @@ import type { ChapterStatus, ReviewDecision } from '@/lib/types'
 
 export interface ReviewActionsProps {
   status: ChapterStatus | undefined
-  onReview?: (decision: ReviewDecision, feedback?: string) => Promise<void>
+  onReview?: (
+    decision: ReviewDecision,
+    feedback?: string,
+    finalizeEarly?: boolean,
+  ) => Promise<void>
   onRetry?: () => Promise<void>
+  // D-EM:剩余未生成章节数,用于"提前合并"按钮文案与 confirm
+  remainingNotGenerated?: number
   className?: string
 }
 
 // REQUIREMENTS P5 + FR-4.7:
 // awaiting_review → 三按钮启用;writing/reviewing/retrying → 禁用;failed → retry 按钮单独显示。
+// D-EM:awaiting_review 时多一个「完成评审,提前合并」按钮。
 export function ReviewActions({
   status,
   onReview,
   onRetry,
+  remainingNotGenerated,
   className,
 }: ReviewActionsProps) {
   const [feedback, setFeedback] = useState('')
-  const [busy, setBusy] = useState<ReviewDecision | 'retry' | null>(null)
+  const [busy, setBusy] = useState<ReviewDecision | 'retry' | 'finalize' | null>(null)
 
   const canReview = status === 'awaiting_review'
   const canRetry = status === 'failed'
@@ -47,6 +56,23 @@ export function ReviewActions({
     try {
       await onReview(decision, decision === 'revise' ? feedback.trim() : undefined)
       if (decision === 'revise') setFeedback('')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const handleFinalizeEarly = async () => {
+    if (!onReview || !canReview || busy) return
+    const remaining = remainingNotGenerated ?? 0
+    const ok = window.confirm(
+      remaining > 0
+        ? `通过本章并立即合并？剩余 ${remaining} 章尚未生成,文档里会以「（本章未生成）」占位。`
+        : '通过本章并立即合并？',
+    )
+    if (!ok) return
+    setBusy('finalize')
+    try {
+      await onReview('approve', undefined, true)
     } finally {
       setBusy(null)
     }
@@ -165,6 +191,26 @@ export function ReviewActions({
           </Button>
         </div>
       </div>
+
+      {/* D-EM:提前合并入口。仅在 awaiting_review 时显示,默认隐藏在次级行 */}
+      {canReview && (
+        <div className="flex items-center justify-between border-t border-dashed pt-2 text-xs text-muted-foreground">
+          <span>
+            {remainingNotGenerated && remainingNotGenerated > 0
+              ? `不想继续生成剩余 ${remainingNotGenerated} 章?`
+              : '已到末尾,可直接合并'}
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleFinalizeEarly}
+            disabled={!canReview || busy !== null}
+          >
+            <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+            {busy === 'finalize' ? '合并中…' : '通过本章并立即合并'}
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

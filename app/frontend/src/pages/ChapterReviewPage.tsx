@@ -269,17 +269,23 @@ export function ChapterReviewPage() {
   const submitReview = async (
     decision: ReviewDecision,
     feedback?: string,
+    finalizeEarly?: boolean,
   ) => {
     if (!projectId || !activeChapter) return
     try {
       await review.mutateAsync({
         projectId,
         index: activeChapter.index,
-        body: { decision, feedback },
+        body: {
+          decision,
+          feedback,
+          finalize_early: finalizeEarly,
+        },
       })
       toast({
-        title:
-          decision === 'approve'
+        title: finalizeEarly
+          ? '已通过本章,开始合并文档'
+          : decision === 'approve'
             ? '已通过,继续下一章'
             : decision === 'skip'
               ? '已跳过'
@@ -474,6 +480,13 @@ export function ChapterReviewPage() {
           status={activeChapter?.status}
           onReview={submitReview}
           onRetry={submitRetry}
+          remainingNotGenerated={chapters.filter(
+            (c) =>
+              c.index > (activeChapter?.index ?? -1) &&
+              (c.status === 'pending' ||
+                c.status === 'generating' ||
+                c.status === 'awaiting_review'),
+          ).length}
         />
       </main>
     </div>

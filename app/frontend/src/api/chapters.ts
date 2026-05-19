@@ -72,6 +72,9 @@ export function useChapterVersions(
 export interface ReviewChapterPayload {
   decision: ReviewDecision
   feedback?: string
+  // D-EM:勾选「同时合并已生成内容」时为 true,后端 pick_chapter 见标记把
+  // 剩余未生成章节标 not_generated 并跳到 assemble。
+  finalize_early?: boolean
 }
 
 export interface SetChapterModelPayload {
