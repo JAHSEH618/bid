@@ -302,6 +302,45 @@ async def _prefetch_chapter_body(
             await publish_event(project_id, "chapter_prefetched", chapter_index=index)
             return
 
+        blackboard_entities = state.get("blackboard_entities")
+        blackboard_embeddings = state.get("blackboard_embeddings")
+
+        # D-EK / D-EL:为 prefetch 路径也算 query embedding 并采集 references。
+        # 与主 run() 同步,否则用户在 outline 页提前生成的章节进 review 后
+        # 「本章参考资料」Tab 会一直为空。
+        query_embedding: list[float] | None = None
+        embedding_model_name: str | None = None
+        if (
+            settings.hybrid_retrieval_enabled
+            and blackboard_embeddings
+            and bool(blackboard_entities)
+        ):
+            from ..prompts.write_chapter_prompt import _build_chapter_query
+
+            try:
+                embedding_model_name = (await resolve_models(project_id)).embedding_model
+            except Exception:
+                embedding_model_name = None
+            try:
+                chapter_query = _build_chapter_query(chapter)
+                if chapter_query.strip():
+                    query_embedding = await embed_one(
+                        chapter_query,
+                        api_key=api_key,
+                        model=embedding_model_name,
+                        user_id=user_id,
+                        project_id=project_id,
+                    )
+            except Exception:
+                log_local.exception(
+                    "prefetch_query_embed_failed",
+                    run_id=run_id,
+                    index=index,
+                )
+                query_embedding = None
+
+        references_collector: list[dict[str, Any]] = []
+
         messages = build_messages(
             chapter=chapter,
             tech_spec_md=state.get("tech_spec_md", ""),
@@ -309,9 +348,12 @@ async def _prefetch_chapter_body(
             revision_feedback="",
             retry_count=0,
             previous_text="",
-            blackboard_entities=state.get("blackboard_entities"),
+            blackboard_entities=blackboard_entities,
+            blackboard_embeddings=blackboard_embeddings,
+            query_embedding=query_embedding,
             system_override=_SYSTEM_BY_TYPE.get(chapter_type),
             extra_user_directives=_USER_DIRECTIVE_BY_TYPE.get(chapter_type, ""),
+            references_out=references_collector,
         )
         chapter_model = await resolve_chapter_model(project_id, run_id, index, chapter)
         from ..sync import flush_chapter_partial
@@ -357,6 +399,14 @@ async def _prefetch_chapter_body(
             processing_started_at=None,
             last_error=None,
         )
+        # D-EL:把首轮召回去重后落 chapter.references
+        final_refs = _dedupe_references(references_collector)
+        if final_refs:
+            await _safe_sync_chapter(
+                run_id,
+                index,
+                references=final_refs,
+            )
         await publish_event(project_id, "chapter_prefetched", chapter_index=index)
     except asyncio.CancelledError:
         await _safe_sync_chapter(
