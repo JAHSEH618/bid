@@ -49,10 +49,12 @@ _CHAPTER_SYNC_ALLOWED = frozenset(
 
 def _build_update_sql(fields: dict[str, Any]) -> str:
     """根据 fields 生成
-    ``UPDATE chapters SET k=:k, ... WHERE run_id=:r AND index=:i``。
+    ``UPDATE chapters SET "k"=:k, ... WHERE run_id=:r AND index=:i``。
 
     白名单限制 + 字典 key 必须是 Python 标识符(防异常字符)。
     JSONB 列(如 references)用 ``CAST(:k AS JSONB)`` 兜底类型推断。
+    所有列名都用双引号包裹 —— ``references`` 是 PostgreSQL 保留关键字
+    (FK 语法 ``REFERENCES``),不引会被解析成 FK 子句报 syntax error。
     """
     bad = [k for k in fields if k not in _CHAPTER_SYNC_ALLOWED or not k.isidentifier()]
     if bad:
@@ -61,9 +63,9 @@ def _build_update_sql(fields: dict[str, Any]) -> str:
     parts: list[str] = []
     for k in fields:
         if k in jsonb_fields:
-            parts.append(f"{k}=CAST(:{k} AS JSONB)")
+            parts.append(f'"{k}"=CAST(:{k} AS JSONB)')
         else:
-            parts.append(f"{k}=:{k}")
+            parts.append(f'"{k}"=:{k}')
     set_clause = ", ".join(parts)
     return f"UPDATE chapters SET {set_clause} WHERE run_id=:r AND index=:i"
 
