@@ -63,9 +63,9 @@ def test_skeleton_block_rendered_for_prompt() -> None:
     pack = load_pack(DEFAULT_PACK_ID)
     block = outline_prompt._render_skeleton_block(pack["skeleton"])
     assert "评审索引表" in block
-    assert "fixed" in block  # tag 渲染
-    assert "expandable" in block
-    assert "chapter_type=principle" in block
+    assert "[F" in block  # fixed 紧凑标记
+    assert "E " in block  # expandable 紧凑标记
+    assert "/principle" in block  # chapter_type 紧凑标记
 
 
 def test_parse_outline_overlays_chapter_type_from_skeleton() -> None:

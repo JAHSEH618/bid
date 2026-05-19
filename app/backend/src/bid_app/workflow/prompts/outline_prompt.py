@@ -130,12 +130,19 @@ def _excerpt(md: str, max_chars: int) -> str:
 
 
 def _render_skeleton_block(skeleton: list[dict[str, Any]]) -> str:
-    """把骨架 JSON 转成 LLM-1 可读的指令块。
+    """把骨架 JSON 转成 LLM-1 可读的指令块(精简版)。
 
-    ``fixed`` 节点必须原样出现在输出 toc 中,标题、顺序不可改;
-    ``expandable`` 节点要求 LLM 在该位置展开 ``expand_min..expand_max`` 个
-    叶子,继承 ``child_chapter_type``;其它节点(``fixed=False`` 默认)允许
-    LLM 在保持上下文连贯的前提下自由调整。
+    每个节点一行,标记位用紧凑前缀:
+    - ``[F]``:fixed,不可改名 / 删除 / 重排
+    - ``[E N..M]``:expandable,要展开 N-M 个子节点
+    - 类型标识 (``/normal``、``/module``、``/principle``、``/architecture``、
+      ``/meeting``、``/image_only``、``/table_only``)只在显式给出时附加
+
+    旧版冗长格式(`chapter_type=...; template_slot=...; required_anchors=[...]`)
+    会让 LLM 误以为要逐字段填回 JSON,反而陷入 tool 循环;改紧凑后:
+    1) prompt 体积砍 60% 以上
+    2) parse_outline 的 ``_apply_skeleton_overlay`` 反查骨架填字段,LLM 不必
+       逐字段回写
     """
     lines: list[str] = []
 
@@ -145,26 +152,17 @@ def _render_skeleton_block(skeleton: list[dict[str, Any]]) -> str:
             if not isinstance(node, dict):
                 continue
             title = node.get("title", "")
-            ct = node.get("chapter_type")
-            slot = node.get("template_slot")
-            fixed = node.get("fixed")
-            expandable = node.get("expandable")
             tags: list[str] = []
-            if fixed:
-                tags.append("fixed")
-            if expandable:
+            if node.get("fixed"):
+                tags.append("F")
+            if node.get("expandable"):
                 emin = node.get("expand_min", 1)
                 emax = node.get("expand_max", 8)
-                cct = node.get("child_chapter_type", "normal")
-                tags.append(f"expandable[{emin}-{emax}, child_chapter_type={cct}]")
-            if ct:
-                tags.append(f"chapter_type={ct}")
-            if slot:
-                tags.append(f"template_slot={slot}")
-            req = node.get("required_anchors") or []
-            if req:
-                tags.append(f"required_anchors={req}")
-            tag_str = f"  ({'; '.join(tags)})" if tags else ""
+                tags.append(f"E {emin}..{emax}")
+            ct = node.get("chapter_type")
+            if isinstance(ct, str) and ct:
+                tags.append(f"/{ct}")
+            tag_str = f" [{' '.join(tags)}]" if tags else ""
             lines.append(f"{indent}- {title}{tag_str}")
             children = node.get("children") or []
             if isinstance(children, list) and children:
@@ -176,26 +174,21 @@ def _render_skeleton_block(skeleton: list[dict[str, Any]]) -> str:
 
 _SKELETON_INSTRUCTION = """## 模版骨架(必须遵循,D-EF)
 
-下面是本类项目的**标准应答骨架**。你输出的 toc **必须**满足:
+下面是本类项目的**标准应答骨架**。标记说明:
+- ``[F]`` = fixed 节点,标题、顺序、层级**原样保留**
+- ``[E N..M]`` = expandable 节点,你必须在此**展开 N-M 个叶子**
+- ``/normal`` ``/module`` 等是 chapter_type,**已由系统自动注入,你不必在 JSON 里回写**
 
-1. 所有 ``(fixed)`` 节点的标题与顺序原样保留,不可删除、不可改名、不可
-   并入其它节点。
-2. 所有 ``(expandable[min-max, ...])`` 节点不直接生成正文,而是在该
-   位置展开 ``expand_min`` ~ ``expand_max`` 个**叶子节点**,每个叶子继承
-   ``child_chapter_type``;展开的叶子标题须根据招标材料与评分要点拟定,
-   覆盖核心业务能力。
-3. 叶子节点上,**必须**把骨架给的 ``chapter_type / template_slot /
-   required_anchors`` **原样写到 JSON 字段**(下游会据此分流生成器与
-   校验器,缺失会被自动拒收)。
-4. 仅 ``chapter_type=normal`` 的叶子允许自由设计 ``key_points``;
-   ``image_only`` / ``table_only`` 的叶子由模板填充,只需保留标题
-   与 ``chapter_type``,``key_points`` 可填空数组。
-
-骨架定义:
+骨架:
 
 ```
 {skeleton_block}
 ```
+
+输出要求:
+1. fixed 节点必须保留;expandable 节点展开成对应叶子(标题自拟,符合业务)
+2. 只写 ``title`` ``children`` ``key_points`` ``target_pages`` ``summary`` ``matched_scoring_items`` 6 个字段;**不要**写 chapter_type / template_slot / required_anchors(下游自动填充)
+3. 输出严格 JSON,无前后缀文字
 """
 
 
@@ -211,24 +204,11 @@ def build_messages(
 ) -> list[dict[str, Any]]:
     """构造 LLM-1 messages 数组。
 
-    ``revision_feedback`` 非空时表示用户在目录确认页点了"请模型修改",
-    把意见注入 prompt,LLM-1 据此重出目录(状态由 outline_review →
-    generate_outline 的 conditional edge 触发)。
-
-    ⭐ Phase 1B (2026-05-16):``blackboard_entities`` 是 categorize_blackboard
-    节点产出的 10 桶 JSON。给到时优先用它(结构化 + 分类好的关键条款),
-    比原 ``tech_spec_md[:8000]`` 截断信息密度高。Phase 1A 通常会有产出;
-    为空 / None(LLM-0 失败 / 老项目) → 降级回 markdown 截断。
-
-    ⭐ Phase 2B (2026-05-16):``tool_calling_enabled=True`` 时**不**把 10
-    桶 dump 进 user prompt(避免上下文撑爆 + 与 tool 调用结果重复),
-    改为告知 LLM「黑板已分桶,需要时调 search_blackboard 取」。entities
-    本身仍传到 prompt 头部给一份 ``bucket_counts`` 概览,让 LLM 知道有
-    什么可问。要 entities 为空时退到 markdown 截断,不开 tool。
-
-    ⭐ D-EF (2026-05-18):``skeleton`` 是模版骨架包的 ``skeleton`` 子结构,
-    给到时作为强约束注入 prompt;LLM-1 在骨架基础上做裁剪 + 展开,而不是
-    从零设计目录。``None`` 时退到旧自由模式(用于未识别项目类别 / 关闭开关)。
+    ⭐ D-EF (2026-05-19 hotfix):有骨架时**强制走静态注入**,不再启用 tool
+    calling。理由:骨架已给 80% 结构,LLM 只需填 expandable 节点 + 写
+    key_points;tool calling 让 LLM 反复调用 search_blackboard 陷入循环
+    (用户报 LLM-1 在 10 分钟内调了 10 次 tool 仍不输出 JSON,超 600s 总
+    timeout 后失败)。entities 直接 dump 到 prompt,LLM 一次性吃完。
     """
     from .categorize_blackboard import (
         has_any_entries,
@@ -245,6 +225,11 @@ def build_messages(
         skeleton_section = _SKELETON_INSTRUCTION.format(
             skeleton_block=_render_skeleton_block(skeleton)
         )
+
+    # D-EF hotfix:骨架存在时强制 disable tool calling;骨架已经给了大量约束,
+    # 让 LLM 静态一次性产出 JSON 更稳。
+    if skeleton:
+        tool_calling_enabled = False
 
     if tool_calling_enabled and has_any_entries(blackboard_entities):
         # Tool 路径:只给 bucket_counts 概览 + 引导 LLM 主动检索
@@ -271,7 +256,6 @@ def build_messages(
             "- 第 2 次:`entity_types=[\"technical_requirements\"]`,query 按你想覆盖的子主题写,top_k=8\n"
             "- 第 3 次:`entity_types=[\"risk_signals\", \"compliance_constraints\"]`,top_k=6\n"
             "- 视需要再问其它桶\n\n"
-            f"{skeleton_section}\n\n"
             f"{revision_section}\n\n"
             + _OUTLINE_SCHEMA_TAIL
         )
@@ -322,10 +306,7 @@ key_points / target_pages):
               "summary": "本节核心要点摘要(80 字以内)",
               "key_points": ["要点 1", "要点 2", "要点 3"],
               "target_pages": 2,
-              "matched_scoring_items": ["对应的打分项名称"],
-              "chapter_type": "normal",
-              "template_slot": "",
-              "required_anchors": []
+              "matched_scoring_items": ["对应的打分项名称"]
             }
           ]
         }
@@ -338,15 +319,12 @@ key_points / target_pages):
 - 一级 5-8 个,叶子总数 25-50 个为宜
 - **优先把权重大的一级章节展开到 3 级 / 4 级**,体现深度
 - 层级最多 4 级,**只在叶子上**给 ``summary`` / ``key_points`` / ``target_pages``
-  / ``matched_scoring_items`` / ``chapter_type`` / ``template_slot`` /
-  ``required_anchors``;有 ``children`` 的节点只给 ``title``
+  / ``matched_scoring_items``;有 ``children`` 的节点只给 ``title``
 - target_pages 根据打分权重和内容深度分配 1-6 页
-- key_points 每个叶子 3-7 个(``image_only`` / ``table_only`` 叶子可空数组)
+- key_points 每个叶子 3-7 个(``image_only`` / ``table_only`` 类骨架叶子可空数组)
 - matched_scoring_items 列出本节主要覆盖的打分项
-- **D-EF**:若提供了模版骨架,叶子上的 ``chapter_type`` / ``template_slot``
-  / ``required_anchors`` 必须**原样照抄**骨架对应位置;未提供骨架时
-  ``chapter_type`` 默认 ``"normal"``,``template_slot`` 与
-  ``required_anchors`` 留空
+- **D-EF**:**不要**写 ``chapter_type`` / ``template_slot`` /
+  ``required_anchors`` —— 下游会根据骨架(标题路径匹配)自动填充
 
 请只输出 JSON 字符串,不要任何其他文字。
 """
