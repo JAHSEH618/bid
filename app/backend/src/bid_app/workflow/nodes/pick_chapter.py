@@ -32,6 +32,58 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     chapters = state.get("chapters") or []
     selected_ids = state.get("selected_chapter_ids") or None
     use_selection = bool(selected_ids)
+    finalize_early = bool(state.get("_finalize_early"))
+
+    # D-EM:用户点了「完成评审,提前合并」→ 把剩余未生成章节全部标 not_generated,
+    # current_index 一次推到末尾,assemble 节点会插入「（本章未生成）」占位
+    if finalize_early and idx < len(chapters):
+        marked = 0
+        # 在 finalized_chapters 尾部追加占位文字,保留章节标题与编号
+        finalized = list(state.get("finalized_chapters") or [])
+        for i in range(idx, len(chapters)):
+            ch = chapters[i]
+            section = ch.get("section") or str(i + 1)
+            title = ch.get("title", "(未命名章节)")
+            placeholder = (
+                f"## {section} {title}\n\n"
+                f"> **（本章未生成）** 该章节在用户提前合并时尚未生成正文。\n"
+            )
+            finalized.append(placeholder)
+            if isinstance(run_id, int) and run_id > 0:
+                try:
+                    await sync_chapter_to_db(
+                        run_id,
+                        i,
+                        status="not_generated",
+                        processing_started_at=None,
+                        final_text=placeholder,
+                    )
+                except Exception:
+                    log.exception(
+                        "pick_chapter_finalize_early_sync_failed",
+                        run_id=run_id,
+                        idx=i,
+                    )
+            await publish_event(
+                project_id,
+                "chapter_not_generated",
+                chapter_index=i,
+                chapter_title=title,
+            )
+            marked += 1
+        log.info(
+            "pick_chapter_finalize_early",
+            project_id=project_id,
+            marked=marked,
+            new_index=len(chapters),
+        )
+        return {
+            "current_index": len(chapters),
+            "retry_count": 0,
+            "finalized_chapters": finalized,
+            # 清掉 flag,避免下次 resume 误触发
+            "_finalize_early": False,
+        }
 
     advanced = 0
 

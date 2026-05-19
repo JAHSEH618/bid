@@ -12,9 +12,12 @@ DB Chapter 状态由 ``write_chapter`` 节点写成 ``generating``。
 resume payload 形状::
 
     {"decision": "approve" | "revise" | "skip",
-     "feedback": "..."}    # 选 revise 时必填
+     "feedback": "...",       # 选 revise 时必填
+     "finalize_early": bool}  # D-EM:用户在前端点"完成评审,提前合并"时为 true
 
-下游 ``update_state`` 节点接 ``_review_decision`` / ``_review_feedback``。
+下游 ``update_state`` 节点接 ``_review_decision`` / ``_review_feedback`` /
+``_finalize_early``。``_finalize_early=True`` 时 ``pick_chapter`` 把剩余
+未生成章节标 ``not_generated`` 并跳到 assemble,assemble 注入占位文字。
 """
 
 from __future__ import annotations
@@ -94,7 +97,11 @@ async def run(state: WorkflowState) -> dict[str, Any]:
 
     # resume 后:project 回 running;decision/feedback 写进 state 给 update_state
     await sync_project_status(pid, "running")
-    return {
+    out: dict[str, Any] = {
         "_review_decision": (payload or {}).get("decision", "approve"),
         "_review_feedback": (payload or {}).get("feedback", ""),
     }
+    # D-EM:提前合并标记透传到 state,pick_chapter 据此短路到 assemble
+    if (payload or {}).get("finalize_early"):
+        out["_finalize_early"] = True
+    return out

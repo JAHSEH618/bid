@@ -427,6 +427,7 @@ async def review_chapter(
                 "kind": "chapter_review",
                 "decision": body.decision,
                 "feedback": body.feedback or "",
+                "finalize_early": bool(body.finalize_early),
             },
             slot_token=acquired_token,
             reviewer_id=user.id,

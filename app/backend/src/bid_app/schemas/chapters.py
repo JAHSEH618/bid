@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field
 class ReviewRequest(BaseModel):
     decision: Literal["approve", "revise", "skip"]
     feedback: str | None = Field(None, max_length=4000)
+    # D-EM:用户在前端勾「同时完成评审,合并已生成内容」时为 True。
+    # 当前 chapter 仍按 decision 正常处理(approve/skip 都行,revise 在前端禁掉);
+    # 之后 pick_chapter 见标记把剩余未生成章节标 not_generated,跳到 assemble。
+    finalize_early: bool = False
 
 
 class ChapterModelUpdateRequest(BaseModel):
