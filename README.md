@@ -33,7 +33,10 @@
 - **人工审核闭环**：每章生成后停下来，三按钮决策（通过 / 修订 / 跳过）；revise 时把上一轮正文和修改意见一起喂给 LLM，做局部修订而不是整章重写
 - **结构化校验器**（D-EI）：merge 后自动跑 8 条规则；命中可修复错误时机器自动 revise 一次，仍失败才交给人审
 - **文体规范化**（D-EJ）：行首符号 `一、二、` / `①②③` / `◆▶●` 落库前替换为 `1.` / `2.`；中英文混排自动加半角空格
-- **黑板加 BM25 检索**（Phase 1A-2A）：招标材料先分到 10 个实体桶（评分细则、技术要求、资质、风险等），写章时按 BM25 召回 top-K，不再吃字符截断
+- **黑板混合召回**（D-EK）：招标材料先分到 10 个实体桶，写章时 BM25 + DashScope 向量做 RRF 融合，召回率比单 BM25 显著提升；DashScope embedding 故障自动回退纯 BM25，工作流不阻塞
+- **本章参考资料**（D-EL）：LLM-2 看过的实体黑板条目快照落库，前端 `ChapterReviewPage` 加 Tab 展示，让你知道这一章的依据来自哪些上传材料
+- **提前合并**（D-EM）：还没生成完不想等？通过当前章节后点「立即合并」，剩余章节标 `not_generated` 并在文档里以「（本章未生成）」占位
+- **Mermaid 转 PNG**（D-EN）：导出 DOCX 时 mermaid 块用 mmdc 预渲染成 PNG，60% 宽 + 居中,失败回退源码块
 - **状态机持久化**：LangGraph checkpoint 写 PostgreSQL，容器重启不丢进度，从最近成功节点续跑
 - **流式打字加实时进度**：SSE 推 token，前端逐字渲染；全局进度横幅跨页可见
 - **一键导出 .docx**：Pandoc + reference.docx + Mermaid PNG 中文字体，文件名 `项目名_技术方案_YYYYMMDD.docx`
@@ -124,7 +127,7 @@ git pull && ./app/scripts/upgrade-to-template-skeleton.sh
 |---|---|---|
 | 前端 | Vite + React 18 + TypeScript + TanStack Query + shadcn/ui + Tailwind | SSE 流式，Mermaid 客户端自渲，mock 双模式，Vercel Web Interface Guidelines 二轮精修 |
 | 后端 API | FastAPI + Pydantic + SQLAlchemy 2.0 async + Alembic | 单 deps.py 两阶段（M1 dev stub → M2 完整 JWT，D-EC） |
-| 工作流 | LangGraph 0.6 + AsyncPostgresSaver | 16 节点（含 3 个 interrupt 与 D-EI 自动 revise 回路），checkpoint 续跑，state schema v4 |
+| 工作流 | LangGraph 0.6 + AsyncPostgresSaver | 16 节点（含 3 个 interrupt 与 D-EI 自动 revise 回路），checkpoint 续跑，state schema v5 |
 | 任务队列 | arq + Redis 7 | `max_tries=1`（D-AY），失败靠用户手动 retry |
 | LLM | LiteLLM → 阿里百炼 DashScope（OpenAI 兼容） | 四模型分工（LLM-0/1/2/3），流式、重试、token 记账 |
 | 数据库 | PostgreSQL 16 + asyncpg | 10 张表，token_usage CASCADE，DocxJob 状态机 D-CV/D-CU/D-BX 全套 |
@@ -187,6 +190,8 @@ git pull && ./app/scripts/upgrade-to-template-skeleton.sh
 3. LLM 长文本生成偶尔超 60 秒 idle 触发 SSE 重连，已通过 SSE 心跳和 DB persistent flush 兜底
 4. Mermaid 客户端渲染：极少数老语法 LLM 输出可能渲染失败。已加 fallback 显示源码 + mermaid.live 一键调试
 5. 不支持 `.pdf` / `.ppt` 直接抽取（markitdown + libreoffice 不覆盖）。用户需先转 `.docx`
+6. 提前合并占位章节会让文档目录编号断号（章节 2 直接跳到章节 5），业务可接受
+7. DashScope embedding API 故障时混合召回自动退回纯 BM25，召回率下降但不阻塞
 
 ---
 
