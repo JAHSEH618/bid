@@ -84,6 +84,11 @@ ignore = ["E501", "N818"]
 # 大量使用中文标点(全角括号 / 引号 / 顿号),RUF002 在这里也是误报。
 "src/bid_app/services/redaction.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_redaction.py" = ["RUF001", "RUF002", "RUF003"]
+# D-EM (2026-05-19):提前合并占位符里使用「（本章未生成）」(全角括号)是
+# 面向终端读者的中文排版,导出 DOCX 后保留全角风格;同理 finalize_early
+# 测试断言里的占位字符串。
+"src/bid_app/workflow/nodes/pick_chapter.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_finalize_early.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.format]
 quote-style = "double"

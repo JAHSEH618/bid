@@ -468,6 +468,7 @@ export function ChapterReviewPage() {
               <TabsContent value="references">
                 <ChapterReferencesPanel
                   references={chapterDetail.data?.references ?? null}
+                  chapterStatus={activeChapter.status}
                 />
               </TabsContent>
             </Tabs>
@@ -825,16 +826,36 @@ function ChapterExportButton({ chapterId }: { chapterId: number }) {
 // 正文中直接出现。
 function ChapterReferencesPanel({
   references,
+  chapterStatus,
 }: {
   references: ChapterReferenceItem[] | null
+  chapterStatus?: ChapterStatus
 }) {
   if (!references || references.length === 0) {
+    // 区分「未生成」与「已生成但无召回」两种空状态,文案各异
+    const notGeneratedYet =
+      chapterStatus === 'pending' ||
+      chapterStatus === 'generating' ||
+      chapterStatus === 'retrying' ||
+      chapterStatus === 'not_generated'
     return (
       <div className="rounded-lg border border-dashed border-border bg-muted/30 p-6 text-center text-sm text-muted-foreground">
-        本章生成时未记录参考资料。
-        <p className="mt-1 text-xs">
-          老项目 / 未启用混合召回的章节会留空。
-        </p>
+        {notGeneratedYet ? (
+          <>
+            本章尚未生成正文,生成后这里会展示 LLM 看过的资料。
+            <p className="mt-1 text-xs">
+              如果一直为空,可能是混合召回失败回退、或者上传材料里没有跟本章主题相关的条目。
+            </p>
+          </>
+        ) : (
+          <>
+            本章生成时未记录参考资料。
+            <p className="mt-1 text-xs">
+              老项目 / 未启用混合召回的章节会留空,或 embedding 模型调用失败回退了纯 BM25
+              且 BM25 没命中。
+            </p>
+          </>
+        )}
       </div>
     )
   }

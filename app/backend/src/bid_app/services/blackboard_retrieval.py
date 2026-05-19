@@ -28,7 +28,7 @@ from typing import Any
 import jieba
 from rank_bm25 import BM25Okapi
 
-from .embeddings import EMBEDDING_DIM, cosine_similarity
+from .embeddings import cosine_similarity
 from .hybrid_retrieval import rrf_fuse
 
 # 中文 stop words(常见无信息词);英文走小写化 + 简单切。
@@ -82,10 +82,14 @@ class BlackboardIndex:
         ``embeddings`` 形状与 ``entities`` 对齐:同桶下第 i 条 entry 对应
         ``embeddings[bucket][i]``。条目数不匹配时该桶向量忽略,降级纯 BM25。
         D-EK 混合召回时由 categorize_blackboard 节点预先算好传入。
+
+        向量维度按实际传入的为准(不强制 1024)— 用户可能选 tongyi-embedding-vision
+        等非标准维度模型。第一条非空向量决定本索引的维度,后续维度不一致的丢弃。
         """
         self._entries: list[dict[str, Any]] = []
         self._tokens: list[list[str]] = []
         self._embeddings: list[list[float]] = []
+        self._embedding_dim: int = 0  # 0 = 未确定 / 无向量
         self._bm25: BM25Okapi | None = None
         if not entities:
             return
@@ -125,8 +129,15 @@ class BlackboardIndex:
                 self._tokens.append(_tokenize(content))
                 if bucket_embs is not None:
                     emb = bucket_embs[i]
-                    if isinstance(emb, list) and len(emb) == EMBEDDING_DIM:
-                        self._embeddings.append([float(x) for x in emb])
+                    if isinstance(emb, list) and len(emb) > 0:
+                        if self._embedding_dim == 0:
+                            # 第一条非空向量决定本索引的维度
+                            self._embedding_dim = len(emb)
+                        if len(emb) == self._embedding_dim:
+                            self._embeddings.append([float(x) for x in emb])
+                        else:
+                            # 维度不匹配 → 该位用空表示
+                            self._embeddings.append([])
                     else:
                         self._embeddings.append([])
                 else:
@@ -139,8 +150,21 @@ class BlackboardIndex:
         return len(self._entries)
 
     def has_embeddings(self) -> bool:
-        """是否至少有一条 entry 带非空 embedding(用于决定是否走混合召回)。"""
-        return any(len(e) == EMBEDDING_DIM for e in self._embeddings)
+        """是否至少有一条 entry 带非空 embedding(用于决定是否走混合召回)。
+
+        全零向量也算非空(检查是否长度匹配 dim 且至少有一个非零元素)。
+        """
+        if self._embedding_dim == 0:
+            return False
+        return any(
+            len(e) == self._embedding_dim and any(x != 0.0 for x in e)
+            for e in self._embeddings
+        )
+
+    @property
+    def embedding_dim(self) -> int:
+        """本索引向量维度。0 表示无向量。"""
+        return self._embedding_dim
 
     def search(
         self,
@@ -166,7 +190,8 @@ class BlackboardIndex:
 
         use_hybrid = (
             query_embedding is not None
-            and len(query_embedding) == EMBEDDING_DIM
+            and self._embedding_dim > 0
+            and len(query_embedding) == self._embedding_dim
             and any(x != 0.0 for x in query_embedding)
             and self.has_embeddings()
         )

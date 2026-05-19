@@ -170,6 +170,15 @@ def _apply_skeleton_overlay(
                 have_parent_titles.add(p)
 
     injected = 0
+    # D-EP (2026-05-19):缺失的 fixed 叶子按骨架定义位置插入,而不是统统塞末尾用 99.{n}。
+    # 旧行为(章节 6 之后突然冒出 99.1/99.2)目录断号严重,影响用户体验。
+    # 现在:H1 级叶子在 chapters 列表里找最后一个"骨架顺序在它之前"的章节插在其后;
+    # 二级叶子(parent_titles 非空)在 chapters 里找父 H1 的最后一个子节插在其后。
+    # 全部插入完毕后调 _renumber_sections 重新按列表顺序派生 section 编号,
+    # 保证 1, 1.1, 1.2, 2, 2.1, ... 连续。
+    skeleton_h1_titles = [
+        str(node.get("title") or "") for node in skeleton if isinstance(node, dict)
+    ]
     for path, leaf_node in fixed_leaves_with_nodes(skeleton):
         leaf_title = path[-1] if path else ""
         # 已存在(精确路径 / 同标题兜底)→ 跳过
@@ -180,7 +189,7 @@ def _apply_skeleton_overlay(
         if leaf_node.get("expandable") and leaf_title in have_parent_titles:
             continue
 
-        # 真缺失:把骨架定义补一条到末尾,parent_titles 复用骨架的祖先链
+        # 真缺失:按骨架位置插入
         parent_titles_list = list(path[:-1])
         target_pages = leaf_node.get("target_pages", 1)
         if not isinstance(target_pages, (int, float)) or target_pages <= 0:
@@ -199,20 +208,109 @@ def _apply_skeleton_overlay(
             "template_slot": leaf_node.get("template_slot") or "",
             "required_anchors": [str(x) for x in required],
         }
-        next_idx = len(chapters)
-        # section 号给个不太冲突的尾标 ``99.{n}``,避免与 LLM 已用的 1.x/2.x
-        # 冲突;outline_review 用户可以在 textarea 里改成想要的层级
+        # section / idx 占位,后面 _renumber_sections 统一重算
         new_chapter = _normalize_chapter(
             new_chapter,
-            section=f"99.{injected + 1}",
-            idx=next_idx,
+            section="",  # 占位
+            idx=len(chapters),
             parent_titles=parent_titles_list,
         )
-        chapters.append(new_chapter)
+
+        insert_at = _insertion_position(chapters, path, skeleton_h1_titles)
+        chapters.insert(insert_at, new_chapter)
+        # 更新查重集合,避免同一缺失 leaf 在同次循环里被重复插入
+        have_paths.add(path)
+        have_titles.add(leaf_title)
         warnings.append(f"自动补齐 fixed 叶子: {' / '.join(path)}")
         injected += 1
 
+    if injected > 0:
+        _renumber_sections(chapters)
+
     return chapters, warnings
+
+
+def _insertion_position(
+    chapters: list[dict[str, Any]],
+    leaf_path: tuple[str, ...],
+    skeleton_h1_titles: list[str],
+) -> int:
+    """决定缺失 fixed 叶子在 chapters 里的插入下标。
+
+    - H1 级叶子(len(path)==1):在 chapters 里找最后一个 skeleton 顺序 < 它的章节,
+      插在其后(连同其所有子节后)。找不到 → 0(列表开头)。
+    - 子叶子(len(path)>1):在 chapters 里找父 H1 的最后一个子节,插在其后。
+      父 H1 不在 chapters 里 → 退化到把父 H1 当 H1 级处理。
+    """
+    if not leaf_path:
+        return len(chapters)
+
+    def _chapter_h1(ch: dict[str, Any]) -> str:
+        roots = ch.get("parent_titles") or []
+        if roots:
+            return str(roots[0])
+        return str(ch.get("title") or "")
+
+    if len(leaf_path) == 1:
+        leaf_title = leaf_path[0]
+        target_pos = (
+            skeleton_h1_titles.index(leaf_title)
+            if leaf_title in skeleton_h1_titles
+            else len(skeleton_h1_titles)
+        )
+        last_before = -1
+        for i, ch in enumerate(chapters):
+            ch_h1 = _chapter_h1(ch)
+            if (
+                ch_h1 in skeleton_h1_titles
+                and skeleton_h1_titles.index(ch_h1) < target_pos
+            ):
+                last_before = i
+        return last_before + 1
+
+    # 子叶子:沿父 H1 链找最后一个相关章节
+    parent_h1 = leaf_path[0]
+    last_under_parent = -1
+    for i, ch in enumerate(chapters):
+        if _chapter_h1(ch) == parent_h1:
+            last_under_parent = i
+    if last_under_parent >= 0:
+        return last_under_parent + 1
+    # 父 H1 完全不在 chapters → 按 H1 级别处理
+    return _insertion_position(chapters, (parent_h1,), skeleton_h1_titles)
+
+
+def _renumber_sections(chapters: list[dict[str, Any]]) -> None:
+    """按 chapters 列表顺序重新派生 section 编号。
+
+    规则:每个 chapter 的 section 由它的 ``parent_titles + [title]`` 完整路径
+    决定。同一前缀第一次出现就分配下一个序号,后续保持。例:
+      - ("项目建设",) 第一次出现 → section="1"
+      - ("项目建设", "项目概述") 第一次 → "1.1"
+      - ("项目建设", "项目概述", "背景") 第一次 → "1.1.1"
+      - ("服务保障",) 第一次 → "2"
+
+    这样不管 chapters 是怎么插入进来的,只要相对顺序对,目录就连续。
+    D-EP 自动补齐后必须调一次,清掉之前的 "99.{n}" 占位。
+    """
+    counters: dict[tuple[str, ...], int] = {}
+    assignments: dict[tuple[str, ...], int] = {}
+    for ch in chapters:
+        parents = tuple(str(p) for p in (ch.get("parent_titles") or []))
+        title = str(ch.get("title") or "")
+        full_path = (*parents, title)
+        # 沿路径每一层,缺号就分配
+        for depth in range(1, len(full_path) + 1):
+            prefix = full_path[:depth]
+            if prefix not in assignments:
+                parent_prefix = prefix[:-1]
+                next_idx = counters.get(parent_prefix, 0) + 1
+                counters[parent_prefix] = next_idx
+                assignments[prefix] = next_idx
+        ch["section"] = ".".join(
+            str(assignments[full_path[:depth]])
+            for depth in range(1, len(full_path) + 1)
+        )
 
 
 def _flatten_toc(toc: list[Any]) -> list[dict[str, Any]]:

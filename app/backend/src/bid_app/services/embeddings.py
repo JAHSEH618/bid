@@ -27,10 +27,35 @@ log = structlog.get_logger()
 
 
 EMBEDDING_DIM = 1024
-"""text-embedding-v3 标准输出维度。失败回退全零向量时也用这个尺寸。"""
+"""text-embedding-v3 标准输出维度。失败回退全零向量时也用这个尺寸。
+
+注意:DashScope 的多模态 embedding(``tongyi-embedding-vision-*``)实际可能是
+其他维度。回退全零向量时仍按 1024 维生成,后续 BlackboardIndex 检查长度匹配
+不上会自动丢弃向量退化纯 BM25,所以维度对不上时不会污染检索结果。
+"""
 
 _BATCH_SIZE = 25
 """DashScope 单次 embedding 输入上限。"""
+
+_DASHSCOPE_OAI_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+"""DashScope 的 OpenAI 兼容端点,所有 embedding 模型都走这里。LiteLLM 的
+``dashscope/`` provider 没覆盖所有新模型(2026 年的 tongyi-embedding-vision-*
+没在 model_prices 表里),会报 ``Unmapped LLM provider``。改走 ``openai/``
+路由 + 显式 api_base 绕过该限制,DashScope 兼容 OpenAI embedding 协议。
+"""
+
+
+def _route_for_embedding(model: str) -> tuple[str, str | None]:
+    """决定调 LiteLLM 时用什么 model id 与 api_base。
+
+    - ``dashscope/xxx`` → ``openai/xxx`` + DashScope 兼容端点
+      (LiteLLM dashscope embedding provider 不识别新模型时的兜底)
+    - 其他前缀 → 原样传,api_base=None
+    """
+    if model.startswith("dashscope/"):
+        suffix = model[len("dashscope/") :]
+        return f"openai/{suffix}", _DASHSCOPE_OAI_BASE
+    return model, None
 
 
 def _zero_vec() -> list[float]:
@@ -55,6 +80,7 @@ async def embed_texts(
     if not texts:
         return []
     model = model or settings.embedding_model
+    route_model, api_base = _route_for_embedding(model)
     out: list[list[float]] = []
     for start in range(0, len(texts), _BATCH_SIZE):
         batch = texts[start : start + _BATCH_SIZE]
@@ -66,21 +92,35 @@ async def embed_texts(
             out.extend(batch_out)
             continue
         try:
-            kwargs: dict[str, Any] = {"model": model, "input": non_empty_texts, "api_key": api_key}
+            kwargs: dict[str, Any] = {
+                "model": route_model,
+                "input": non_empty_texts,
+                "api_key": api_key,
+            }
+            if api_base is not None:
+                kwargs["api_base"] = api_base
             if user_id is not None:
                 kwargs["user"] = str(user_id)
             resp = await litellm.aembedding(**kwargs)
             data = resp["data"] if isinstance(resp, dict) else resp.data
             # data 按 input 顺序回,每项 {embedding: list[float], index: int}
+            actual_dim: int | None = None
             for local_i, item in enumerate(data):
                 emb = item["embedding"] if isinstance(item, dict) else item.embedding
-                if isinstance(emb, list) and len(emb) == EMBEDDING_DIM:
-                    batch_out[non_empty_idx[local_i]] = [float(x) for x in emb]
+                if not isinstance(emb, list):
+                    continue
+                if actual_dim is None:
+                    actual_dim = len(emb)
+                # 接受任意维度,但同批次内维度必须一致(否则下游 cosine 算不出)
+                if len(emb) != actual_dim:
+                    continue
+                batch_out[non_empty_idx[local_i]] = [float(x) for x in emb]
         except Exception as e:
             log.warning(
                 "embedding_batch_failed_fallback_zero",
                 project_id=project_id,
                 model=model,
+                route_model=route_model,
                 batch_size=len(non_empty_texts),
                 error=repr(e),
             )
