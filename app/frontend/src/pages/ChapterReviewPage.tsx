@@ -34,6 +34,7 @@ import { useProjectStream, type ProjectEvent } from '@/hooks/useSSE'
 import { useToast } from '@/hooks/useToast'
 import { readApiError } from '@/lib/apiFetch'
 import type {
+  ChapterReferenceItem,
   ChapterStatus,
   ChapterVersionDTO,
   ReviewDecision,
@@ -430,6 +431,14 @@ export function ChapterReviewPage() {
                   <History className="mr-1 h-3.5 w-3.5" />
                   历史版本
                 </TabsTrigger>
+                <TabsTrigger value="references">
+                  本章参考资料
+                  {chapterDetail.data?.references && chapterDetail.data.references.length > 0 && (
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      ({chapterDetail.data.references.length})
+                    </span>
+                  )}
+                </TabsTrigger>
               </TabsList>
               <TabsContent value="current">
                 {previewMarkdown ? (
@@ -448,6 +457,11 @@ export function ChapterReviewPage() {
                 <ChapterVersionsPanel
                   versions={chapterVersions.data ?? []}
                   loading={chapterVersions.isLoading}
+                />
+              </TabsContent>
+              <TabsContent value="references">
+                <ChapterReferencesPanel
+                  references={chapterDetail.data?.references ?? null}
                 />
               </TabsContent>
             </Tabs>
@@ -789,5 +803,61 @@ function ChapterExportButton({ chapterId }: { chapterId: number }) {
       )}
       {polling ? stageLabel : '导出本章 .docx'}
     </Button>
+  )
+}
+
+// D-EL:本章参考资料面板。展示 LLM-2 生成正文期间看过的实体黑板条目
+// (BM25 + 向量首轮召回 + LLM 主动 search_blackboard 工具调用)。
+// 文案明确「LLM 看过的资料」而非「引用」,避免误导:有些条目模型看了但未在
+// 正文中直接出现。
+function ChapterReferencesPanel({
+  references,
+}: {
+  references: ChapterReferenceItem[] | null
+}) {
+  if (!references || references.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed border-border bg-muted/30 p-6 text-center text-sm text-muted-foreground">
+        本章生成时未记录参考资料。
+        <p className="mt-1 text-xs">
+          老项目 / 未启用混合召回的章节会留空。
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        LLM 在生成本章正文时看过下列 {references.length} 条来自上传材料的条目。展开
+        的内容是被检索到的原文片段,有些会出现在正文里,有些只是模型用作背景判断。
+      </p>
+      <ul className="space-y-2">
+        {references.map((item, idx) => (
+          <li
+            key={idx}
+            className="rounded-md border border-border bg-background p-3 text-sm"
+          >
+            <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              {item.bucket && (
+                <span className="rounded-sm bg-muted px-1.5 py-0.5 font-mono">
+                  {item.bucket}
+                </span>
+              )}
+              {item.source_doc && <span>{item.source_doc}</span>}
+              {item.section && <span>· {item.section}</span>}
+              {item.retrieval_method && (
+                <span className="ml-auto rounded-sm bg-muted/60 px-1.5 py-0.5 text-[10px] uppercase">
+                  {item.retrieval_method}
+                </span>
+              )}
+            </div>
+            <p className="whitespace-pre-wrap leading-relaxed text-foreground">
+              {item.content}
+            </p>
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }

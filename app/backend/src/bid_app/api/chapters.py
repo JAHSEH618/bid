@@ -124,6 +124,7 @@ async def get_chapter_detail(
         last_error=chapter.last_error,
         current_version_id=current_version_id,
         updated_at=chapter.created_at,  # 没有 onupdate;暂用 created_at
+        references=chapter.references,
     )
 
 

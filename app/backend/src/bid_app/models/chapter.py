@@ -27,6 +27,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, TimestampMixin
@@ -58,3 +59,10 @@ class Chapter(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     last_error: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+    # D-EL (2026-05-19):LLM-2 生成本章正文时看过的实体黑板条目快照。
+    # 形如 ``[{bucket, content, retrieval_method, score, source_doc?, section?}]``。
+    # 由 write_chapter 节点把首轮 BM25/混合召回结果 + tool 调用结果去重落库,
+    # 前端 ChapterReviewPage 展示「本章参考的资料」列表。NULL = 老项目 / 节点未跑。
+    references: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSONB, nullable=True
+    )

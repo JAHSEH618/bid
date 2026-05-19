@@ -11,6 +11,7 @@ const STATUS_LABEL: Record<ChapterStatus, string> = {
   skipped: '已跳过',
   failed: '失败',
   retrying: '重试中',
+  not_generated: '未生成',
 }
 
 const STATUS_VARIANT: Record<
@@ -25,6 +26,7 @@ const STATUS_VARIANT: Record<
   skipped: 'outline',
   failed: 'destructive',
   retrying: 'info',
+  not_generated: 'outline',
 }
 
 const ACTIVE_STATUSES = new Set<ChapterStatus>([

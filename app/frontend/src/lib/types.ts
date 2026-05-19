@@ -64,6 +64,7 @@ export type ChapterStatus =
   | 'skipped'
   | 'failed'
   | 'retrying'
+  | 'not_generated'
 
 // /outline 返回的章节(id 字符串 'ch_01' 形式;index 是数字)。
 // commit 7fbda55 后 backend 也在 outline 端点 chapters dict 里返 final_text,
@@ -91,6 +92,17 @@ export interface OutlineChapterDTO {
 //   status='generating' + final_text != null → partial 快照(允许刷新后立即看到)
 //   status='awaiting_review' + final_text → 完整章节(显示三按钮)
 //   status='failed' + last_error → 显示错误 + retry 按钮
+// D-EL:write_chapter 节点把 LLM-2 看过的实体黑板条目快照落库,
+// ChapterReviewPage「本章参考的资料」面板渲染。
+export interface ChapterReferenceItem {
+  bucket: string | null
+  content: string
+  retrieval_method: string | null
+  score: number | null
+  source_doc: string | null
+  section: string | null
+}
+
 export interface ChapterDetailDTO {
   id: number
   index: number
@@ -102,6 +114,8 @@ export interface ChapterDetailDTO {
   last_error: string | null
   current_version_id: number | null
   updated_at: string
+  // D-EL:可能为 null(老 chapter / 节点未跑)或 [] (无召回结果),前端均隐藏面板
+  references: ChapterReferenceItem[] | null
 }
 
 // /outline 整体响应。

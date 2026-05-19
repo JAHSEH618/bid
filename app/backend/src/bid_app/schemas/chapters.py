@@ -30,6 +30,17 @@ class ChapterVersionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ChapterReferenceItem(BaseModel):
+    """D-EL:本章 LLM-2 看过的实体黑板条目快照(前端「参考资料」面板用)。"""
+
+    bucket: str | None = None
+    content: str
+    retrieval_method: str | None = None
+    score: float | None = None
+    source_doc: str | None = None
+    section: str | None = None
+
+
 class ChapterDetailResponse(BaseModel):
     """⭐ R-14 配套:GET /api/projects/{id}/chapters/{idx} 单章详情。
 
@@ -51,6 +62,7 @@ class ChapterDetailResponse(BaseModel):
         "skipped",
         "failed",
         "retrying",
+        "not_generated",
     ]
     final_text: str | None
     chapter_model: str | None = None
@@ -58,3 +70,5 @@ class ChapterDetailResponse(BaseModel):
     last_error: str | None
     current_version_id: int | None  # latest ChapterVersion.id (for /review path)
     updated_at: datetime  # = created_at(没有 onupdate),供前端 cache key
+    # D-EL:LLM-2 看过的实体黑板条目列表(去重后);None / [] 时前端隐藏面板
+    references: list[ChapterReferenceItem] | None = None
