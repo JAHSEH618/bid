@@ -237,6 +237,7 @@ def _default_model_catalog() -> list[str]:
             settings.llm1_outline_model,
             settings.llm2_chapter_model,
             settings.llm3_visuals_model,
+            settings.embedding_model,  # D-EO
             *KNOWN_MODELS,
         ]
     )
@@ -264,15 +265,17 @@ def _available_models_for(user: User) -> list[str]:
 async def get_model_config(
     user: Annotated[User, Depends(get_current_user)],
 ) -> ModelConfigResponse:
-    """返回模型池。具体 LLM-1/2/3 选择移动到生成流程里完成。"""
+    """返回模型池。具体 LLM-1/2/3/4 选择移动到生成流程里完成。"""
     custom_models = _catalog_models_for(user)
     return ModelConfigResponse(
         llm1_outline_model=user.llm1_outline_model,
         llm2_chapter_model=user.llm2_chapter_model,
         llm3_visuals_model=user.llm3_visuals_model,
+        llm4_embedding_model=user.llm4_embedding_model,
         default_outline_model=settings.llm1_outline_model,
         default_chapter_model=settings.llm2_chapter_model,
         default_visuals_model=settings.llm3_visuals_model,
+        default_embedding_model=settings.embedding_model,
         known_models=KNOWN_MODELS,
         custom_models=custom_models,
         available_models=_available_models_for(user),
@@ -285,11 +288,12 @@ async def set_model_config(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, bool]:
-    """更新当前用户的模型池。旧三类默认字段统一清空,避免设置页承担选择语义。"""
+    """更新当前用户的模型池。旧四类默认字段统一清空,避免设置页承担选择语义。"""
     user.model_catalog = {"version": 2, "models": body.custom_models}
     user.llm1_outline_model = None
     user.llm2_chapter_model = None
     user.llm3_visuals_model = None
+    user.llm4_embedding_model = None
 
     await db.commit()
     return {"ok": True}

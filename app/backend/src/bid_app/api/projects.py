@@ -745,6 +745,8 @@ async def start_workflow(
     project.outline_model_snapshot = _normalize_selected_model(body.outline_model, user)
     project.chapter_model_snapshot = _normalize_selected_model(body.chapter_model, user)
     project.visuals_model_snapshot = _normalize_selected_model(body.visuals_model, user)
+    # D-EO:embedding 模型与三类生成模型同级快照,跑中改用户偏好不影响本项目
+    project.embedding_model_snapshot = _normalize_selected_model(body.embedding_model, user)
 
     thread_id = f"run-{project_id}-{secrets.token_hex(8)}"
     run = Run(

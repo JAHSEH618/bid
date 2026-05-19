@@ -23,7 +23,7 @@ class User(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
 
-    # ⭐ 用户自定义模型配置(§0002):三类任务各自可选模型,NULL 时走 settings 默认值
+    # ⭐ 用户自定义模型配置(§0002):四类任务各自可选模型,NULL 时走 settings 默认值
     # LiteLLM 格式: "dashscope/qwen3.6-max-preview" 等
     llm1_outline_model: Mapped[str | None] = mapped_column(
         String(128), nullable=True
@@ -32,6 +32,11 @@ class User(Base, TimestampMixin):
         String(128), nullable=True
     )
     llm3_visuals_model: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    # D-EO (2026-05-19):混合召回的 embedding 模型,与三类生成模型同级。
+    # NULL → settings.embedding_model 兜底。
+    llm4_embedding_model: Mapped[str | None] = mapped_column(
         String(128), nullable=True
     )
     model_catalog: Mapped[list[str] | dict[str, Any] | None] = mapped_column(

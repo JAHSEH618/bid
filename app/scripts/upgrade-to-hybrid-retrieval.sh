@@ -86,7 +86,7 @@ echo "=== [4/5] 清退 v4 checkpoint 项目 ==="
 
 echo
 echo "=== [5/5] 校验 ==="
-# 0011 + 0012 列都加上,alembic 头版本 0012
+# 0011 + 0012 + 0013 三列都加上,alembic 头版本 0013
 "${COMPOSE[@]}" exec -T app python -c "
 import asyncio, sqlalchemy as sa
 from bid_app.db import session_factory
@@ -103,10 +103,20 @@ async def check():
             \"WHERE table_name='chapters' AND column_name='references'\"
         ))
         assert c2.scalar_one_or_none() == 'references', '0012 列缺失'
+        c3 = await s.execute(sa.text(
+            \"SELECT column_name FROM information_schema.columns \"
+            \"WHERE table_name='users' AND column_name='llm4_embedding_model'\"
+        ))
+        assert c3.scalar_one_or_none() == 'llm4_embedding_model', '0013 user 列缺失'
+        c4 = await s.execute(sa.text(
+            \"SELECT column_name FROM information_schema.columns \"
+            \"WHERE table_name='projects' AND column_name='embedding_model_snapshot'\"
+        ))
+        assert c4.scalar_one_or_none() == 'embedding_model_snapshot', '0013 project 列缺失'
         ver = await s.execute(sa.text('SELECT version_num FROM alembic_version'))
         v = ver.scalar_one()
-        assert v == '0012', f'alembic 版本不是 0012,实际 {v}'
-        print(f'✅ alembic_version={v}, blackboard_embeddings + references 两列存在')
+        assert v == '0013', f'alembic 版本不是 0013,实际 {v}'
+        print(f'✅ alembic_version={v}, blackboard_embeddings + references + llm4_embedding_model + embedding_model_snapshot 四列存在')
 
 asyncio.run(check())
 "
@@ -131,7 +141,8 @@ print(f'  hybrid_rrf_k = {settings.hybrid_rrf_k}')
 echo
 echo "升级完成。"
 echo "  - blackboard_embeddings + references 两列已加,alembic 0012"
+echo "  - users.llm4_embedding_model + projects.embedding_model_snapshot 已加,alembic 0013(D-EO)"
 echo "  - 在跑项目已标 aborted_v1,用户需重建"
-echo "  - 新项目自动获得混合召回 + 参考资料展示 + 提前合并按钮"
+echo "  - 新项目自动获得混合召回 + 参考资料展示 + 提前合并按钮 + embedding 模型可配置"
 echo "  - 失败回退路径:DashScope embedding API 故障 → 全零向量 → 退化纯 BM25"
 echo "  - 想关掉混合召回,设置 BID_APP_HYBRID_RETRIEVAL_ENABLED=false 后重启"

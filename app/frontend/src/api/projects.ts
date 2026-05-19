@@ -168,6 +168,8 @@ export interface StartProjectPayload {
   outline_model?: string | null
   chapter_model?: string | null
   visuals_model?: string | null
+  // D-EO:混合召回的 embedding 模型
+  embedding_model?: string | null
 }
 
 export function useStartProject() {
@@ -188,6 +190,7 @@ export function useStartProject() {
           outline_model: body.outline_model ?? null,
           chapter_model: body.chapter_model ?? null,
           visuals_model: body.visuals_model ?? null,
+          embedding_model: body.embedding_model ?? null,
         }),
       }),
     onSuccess: (_data, vars) => {

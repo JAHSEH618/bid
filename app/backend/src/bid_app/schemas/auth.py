@@ -69,6 +69,9 @@ KNOWN_MODELS: list[str] = [
     "dashscope/qwen-max",
     "dashscope/qwen-plus",
     "dashscope/qwen-turbo",
+    # D-EO:embedding 模型(混合召回 query 向量化)
+    "dashscope/text-embedding-v3",
+    "dashscope/text-embedding-v2",
 ]
 
 
@@ -77,16 +80,21 @@ class ModelConfigResponse(BaseModel):
 
     llm1/2/3 字段保留给旧前端兼容;新前端只用 custom_models /
     available_models,在项目启动与章节确认时再选择具体用途。
+
+    D-EO:加 ``llm4_embedding_model`` + ``default_embedding_model``,
+    用法与三类生成模型完全对称。
     """
 
     llm1_outline_model: str | None  # 提纲生成(LLM-1)
     llm2_chapter_model: str | None  # 正文撰写(LLM-2)
     llm3_visuals_model: str | None  # 配图(LLM-3)
+    llm4_embedding_model: str | None  # 混合召回(D-EO)
 
     # 返回系统默认值,前端可展示"当前生效模型"
     default_outline_model: str
     default_chapter_model: str
     default_visuals_model: str
+    default_embedding_model: str
 
     # 返回已知模型列表供前端下拉选择
     known_models: list[str]
@@ -97,12 +105,13 @@ class ModelConfigResponse(BaseModel):
 class SetModelConfigRequest(BaseModel):
     """更新模型池。
 
-    llm1/2/3 字段保留兼容旧调用;新调用只传 custom_models。
+    llm1/2/3/4 字段保留兼容旧调用;新调用只传 custom_models。
     """
 
     llm1_outline_model: str | None = None
     llm2_chapter_model: str | None = None
     llm3_visuals_model: str | None = None
+    llm4_embedding_model: str | None = None  # D-EO
     custom_models: list[str] = Field(default_factory=list, max_length=30)
 
     @field_validator("custom_models")

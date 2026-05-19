@@ -45,6 +45,8 @@ class Project(Base, TimestampMixin):
     outline_model_snapshot: Mapped[str | None] = mapped_column(String(128), nullable=True)
     chapter_model_snapshot: Mapped[str | None] = mapped_column(String(128), nullable=True)
     visuals_model_snapshot: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # D-EO (2026-05-19):embedding 模型也快照,确保正在跑的项目不会因为用户改向量模型而抖。
+    embedding_model_snapshot: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     # ⭐ PR-M7-3:HTML 黑板的磁盘路径
     blackboard_path: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -266,9 +266,11 @@ export interface ModelConfigDTO {
   llm1_outline_model: string | null
   llm2_chapter_model: string | null
   llm3_visuals_model: string | null
+  llm4_embedding_model: string | null
   default_outline_model: string
   default_chapter_model: string
   default_visuals_model: string
+  default_embedding_model: string
   known_models: string[]
   custom_models: string[]
   available_models: string[]
@@ -279,4 +281,5 @@ export interface SetModelConfigInput {
   llm1_outline_model?: string | null
   llm2_chapter_model?: string | null
   llm3_visuals_model?: string | null
+  llm4_embedding_model?: string | null
 }

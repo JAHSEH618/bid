@@ -35,6 +35,7 @@ const KNOWN_MODELS = [
   'dashscope/qwen3.6-flash',
   'dashscope/qwen-max',
   'dashscope/qwen-plus',
+  'dashscope/text-embedding-v3',
 ]
 let customModels = [
   'dashscope/deepseek-v4-flash',
@@ -403,9 +404,11 @@ function route(ctx: ResolveContext): unknown {
       llm1_outline_model: null,
       llm2_chapter_model: null,
       llm3_visuals_model: null,
+      llm4_embedding_model: null,
       default_outline_model: 'dashscope/deepseek-v4-flash',
       default_chapter_model: 'dashscope/qwen3.6-max-preview',
       default_visuals_model: 'dashscope/qwen3.6-flash',
+      default_embedding_model: 'dashscope/text-embedding-v3',
       known_models: KNOWN_MODELS,
       custom_models: customModels,
       available_models: available,

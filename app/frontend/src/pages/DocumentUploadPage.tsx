@@ -81,6 +81,8 @@ export function DocumentUploadPage() {
   const modelConfig = useModelConfig()
   const [outlineModel, setOutlineModel] = useState('')
   const [visualsModel, setVisualsModel] = useState('')
+  // D-EO:混合召回的 embedding 模型
+  const [embeddingModel, setEmbeddingModel] = useState('')
 
   // PR-M7-2 多文件:每个 kind 保留全部文档(按上传时间从旧到新)。
   // 与后端 extract_for_project 同口径:文档要么 ``kind == bucket``,要么
@@ -122,6 +124,9 @@ export function DocumentUploadPage() {
     setVisualsModel((prev) =>
       pickModel(data.available_models, data.default_visuals_model, prev),
     )
+    setEmbeddingModel((prev) =>
+      pickModel(data.available_models, data.default_embedding_model, prev),
+    )
   }, [modelConfig.data])
 
   const hasTechSpec = documentsByKind.tech_spec.length > 0
@@ -157,6 +162,7 @@ export function DocumentUploadPage() {
             modelConfig.data?.default_chapter_model ?? '',
           ) || null,
           visuals_model: visualsModel || null,
+          embedding_model: embeddingModel || null,
         },
       })
       if (res.queued) {
@@ -275,6 +281,15 @@ export function DocumentUploadPage() {
             onChange={setVisualsModel}
             models={modelConfig.data?.available_models ?? []}
             fallback={modelConfig.data?.default_visuals_model ?? ''}
+            loading={modelConfig.isLoading}
+          />
+          <ModelSelect
+            id="embedding-model"
+            label="向量检索(混合召回)"
+            value={embeddingModel}
+            onChange={setEmbeddingModel}
+            models={modelConfig.data?.available_models ?? []}
+            fallback={modelConfig.data?.default_embedding_model ?? ''}
             loading={modelConfig.isLoading}
           />
         </CardContent>

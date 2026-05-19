@@ -87,6 +87,8 @@ class StartRequest(BaseModel):
     outline_model: str | None = Field(None, max_length=128)
     chapter_model: str | None = Field(None, max_length=128)
     visuals_model: str | None = Field(None, max_length=128)
+    # D-EO:embedding 模型(混合召回 query 向量化)
+    embedding_model: str | None = Field(None, max_length=128)
 
 
 class StartResponse(BaseModel):

@@ -20,11 +20,12 @@ log = structlog.get_logger()
 
 @dataclass
 class ResolvedModels:
-    """三类任务的最终生效模型名(LiteLLM 格式)。"""
+    """四类任务的最终生效模型名(LiteLLM 格式)。"""
 
     outline_model: str
     chapter_model: str
     visuals_model: str
+    embedding_model: str
 
 
 async def resolve_api_key(project_id: int, run_id: int | None = None) -> str:
@@ -93,6 +94,7 @@ async def resolve_models(project_id: int) -> ResolvedModels:
     outline_model = settings.llm1_outline_model
     chapter_model = settings.llm2_chapter_model
     visuals_model = settings.llm3_visuals_model
+    embedding_model = settings.embedding_model
 
     try:
         async with session_factory() as s:
@@ -101,17 +103,20 @@ async def resolve_models(project_id: int) -> ResolvedModels:
                     Project.outline_model_snapshot,
                     Project.chapter_model_snapshot,
                     Project.visuals_model_snapshot,
+                    Project.embedding_model_snapshot,
                 ).where(Project.id == project_id)
             )
             result = row.one_or_none()
             if result is not None:
-                s_outline, s_chapter, s_visuals = result
+                s_outline, s_chapter, s_visuals, s_embedding = result
                 if s_outline:
                     outline_model = s_outline
                 if s_chapter:
                     chapter_model = s_chapter
                 if s_visuals:
                     visuals_model = s_visuals
+                if s_embedding:
+                    embedding_model = s_embedding
     except Exception:
         log.warning(
             "resolve_models_db_failed_fallback_to_defaults",
@@ -122,6 +127,7 @@ async def resolve_models(project_id: int) -> ResolvedModels:
         outline_model=outline_model,
         chapter_model=chapter_model,
         visuals_model=visuals_model,
+        embedding_model=embedding_model,
     )
 
 

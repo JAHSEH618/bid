@@ -150,6 +150,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     )
 
     # D-EK:对所有 entry content 一次性 embed,落 state + projects 列。
+    # D-EO:embedding 模型从 Project 快照读(resolve_models 兜底 settings)。
     embeddings: dict[str, list[list[float]]] | None = None
     if settings.hybrid_retrieval_enabled and total > 0:
         embeddings = await _embed_entities(
@@ -157,6 +158,7 @@ async def run(state: WorkflowState) -> dict[str, Any]:
             api_key=api_key,
             user_id=user_id,
             project_id=project_id,
+            model=models.embedding_model,
         )
 
     await _save_entities_to_project(project_id, entities, embeddings=embeddings)
@@ -178,10 +180,12 @@ async def _embed_entities(
     api_key: str,
     user_id: int | str,
     project_id: int,
+    model: str | None = None,
 ) -> dict[str, list[list[float]]]:
     """对全部桶 entries 的 content 批量 embed,返回与 entities 同形状的向量 dict。
 
     失败回退空 dict,下游 BlackboardIndex 检测到 None / 空向量自动退化纯 BM25。
+    ``model`` 为 None 时使用 ``settings.embedding_model``。
     """
     # 把全部 (bucket, index, content) 拍平,一次 embed 完毕再回填,省 LLM 轮次
     flat_buckets: list[str] = []
@@ -203,6 +207,7 @@ async def _embed_entities(
         vecs = await embed_texts(
             flat_texts,
             api_key=api_key,
+            model=model,
             user_id=user_id,
             project_id=project_id,
         )

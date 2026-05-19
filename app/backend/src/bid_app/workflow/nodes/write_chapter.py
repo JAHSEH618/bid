@@ -46,7 +46,7 @@ from ..prompts import (
 )
 from ..prompts.write_chapter_prompt import build_messages
 from ..renderers import render as render_template_md
-from ..resolve import resolve_chapter_model
+from ..resolve import resolve_chapter_model, resolve_models
 from ..state import WorkflowState
 from ..sync import publish_event, sync_chapter_to_db
 
@@ -547,7 +547,9 @@ async def run(state: WorkflowState) -> dict[str, Any]:
     )
 
     # D-EK:为本章查询算一次 query embedding,与 BM25 一起做 RRF 融合
+    # D-EO:embedding 模型从 Project 快照读;若快照路径取不到走 settings 兜底
     query_embedding: list[float] | None = None
+    embedding_model_name: str | None = None
     if (
         settings.hybrid_retrieval_enabled
         and blackboard_embeddings
@@ -556,11 +558,16 @@ async def run(state: WorkflowState) -> dict[str, Any]:
         from ..prompts.write_chapter_prompt import _build_chapter_query
 
         try:
+            embedding_model_name = (await resolve_models(project_id)).embedding_model
+        except Exception:
+            embedding_model_name = None
+        try:
             chapter_query = _build_chapter_query(chapter)
             if chapter_query.strip():
                 query_embedding = await embed_one(
                     chapter_query,
                     api_key=api_key,
+                    model=embedding_model_name,
                     user_id=user_id,
                     project_id=project_id,
                 )
@@ -633,9 +640,11 @@ async def run(state: WorkflowState) -> dict[str, Any]:
 
             async def _embed_for_tool(text: str) -> list[float]:
                 # D-EK:tool 调用时的 query 同样走混合召回;失败回退 None,handler 内部转纯 BM25
+                # D-EO:复用同一份快照模型名
                 return await embed_one(
                     text,
                     api_key=api_key,
+                    model=embedding_model_name,
                     user_id=user_id,
                     project_id=project_id,
                 )
