@@ -1,16 +1,19 @@
-"""DashScope text-embedding-v3 调用包装(D-EK,2026-05-19)。
+"""DashScope embedding 原生 API 调用(D-EK / D-EQ Phase 2,2026-05-19)。
 
-为 Phase A 混合召回服务:把黑板条目和章节查询文本转成 1024 维向量,与
-BM25 排名做 RRF 融合。
+⚠️ **不走 LiteLLM**。原因:
+- LiteLLM 的 ``dashscope/`` provider 没覆盖 2026 新模型(``tongyi-embedding-vision-*``),
+  报 ``Unmapped LLM provider``
+- 用 ``openai/`` + 兼容模式 ``api_base`` 路由,DashScope 的兼容端点也只支持
+  ``text-embedding-v1/v2/v3``,新多模态模型直接 404 ``Unsupported model``
 
-设计要点:
-- 批量上限 25(DashScope text-embedding-v3 单次最多 25 条),自动分批
-- 失败回退全零向量 + warning,不抛异常 — 工作流降级到纯 BM25,不阻塞
-- 用 litellm.aembedding 复用 settings.llm 路由 / 限流逻辑
-- 返回 list[list[float]],与输入 texts 顺序对齐;失败位用全零占位
+直接对接 DashScope 原生 REST API,按模型名路由:
+- ``text-embedding-*``:``/api/v1/services/embeddings/text-embedding/text-embedding``
+  请求体 ``input.texts``,批量上限 25,响应 ``output.embeddings[].embedding``
+- ``tongyi-embedding-vision-*`` 等多模态:
+  ``/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding``
+  请求体 ``input.contents[].text``,批量上限 ~10,响应 ``output.embeddings[].embedding``
 
-不依赖 numpy(项目当前无 numpy 依赖,纯 Python list 在百级条目规模下
-完全够用)。
+失败回退全零向量 + warning,不抛异常 — 工作流降级到纯 BM25。
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-import litellm
+import httpx
 import structlog
 
 from ..config import settings
@@ -27,39 +30,111 @@ log = structlog.get_logger()
 
 
 EMBEDDING_DIM = 1024
-"""text-embedding-v3 标准输出维度。失败回退全零向量时也用这个尺寸。
+"""text-embedding-v3 标准输出维度。BlackboardIndex 实际按返回维度自适应,
+此常量仅用于失败回退时的占位向量。"""
 
-注意:DashScope 的多模态 embedding(``tongyi-embedding-vision-*``)实际可能是
-其他维度。回退全零向量时仍按 1024 维生成,后续 BlackboardIndex 检查长度匹配
-不上会自动丢弃向量退化纯 BM25,所以维度对不上时不会污染检索结果。
-"""
-
-_BATCH_SIZE = 25
-"""DashScope 单次 embedding 输入上限。"""
-
-_DASHSCOPE_OAI_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-"""DashScope 的 OpenAI 兼容端点,所有 embedding 模型都走这里。LiteLLM 的
-``dashscope/`` provider 没覆盖所有新模型(2026 年的 tongyi-embedding-vision-*
-没在 model_prices 表里),会报 ``Unmapped LLM provider``。改走 ``openai/``
-路由 + 显式 api_base 绕过该限制,DashScope 兼容 OpenAI embedding 协议。
-"""
-
-
-def _route_for_embedding(model: str) -> tuple[str, str | None]:
-    """决定调 LiteLLM 时用什么 model id 与 api_base。
-
-    - ``dashscope/xxx`` → ``openai/xxx`` + DashScope 兼容端点
-      (LiteLLM dashscope embedding provider 不识别新模型时的兜底)
-    - 其他前缀 → 原样传,api_base=None
-    """
-    if model.startswith("dashscope/"):
-        suffix = model[len("dashscope/") :]
-        return f"openai/{suffix}", _DASHSCOPE_OAI_BASE
-    return model, None
+_DASHSCOPE_API_BASE = "https://dashscope.aliyuncs.com/api/v1/services/embeddings"
+_TEXT_BATCH_SIZE = 25
+"""text-embedding-* 单次最多 25 条。"""
+_VISION_BATCH_SIZE = 10
+"""multimodal-embedding 单次最多 10 条(多模态接口更严)。"""
+_HTTP_TIMEOUT = 30.0
 
 
 def _zero_vec() -> list[float]:
     return [0.0] * EMBEDDING_DIM
+
+
+def _is_multimodal(model_short: str) -> bool:
+    """是不是多模态 embedding 模型(走 multimodal-embedding 端点)。
+
+    DashScope 把 ``tongyi-embedding-vision-*`` / ``multimodal-embedding-*``
+    归为多模态接口;``text-embedding-v*`` 走文本接口。
+    """
+    name = model_short.lower()
+    return "multimodal" in name or "vision" in name
+
+
+def _strip_provider(model: str) -> str:
+    """剥掉 ``dashscope/`` 前缀,DashScope 原生接口只认裸模型名。"""
+    if model.startswith("dashscope/"):
+        return model[len("dashscope/") :]
+    return model
+
+
+async def _call_text_embedding(
+    client: httpx.AsyncClient,
+    *,
+    model_short: str,
+    texts: list[str],
+    api_key: str,
+) -> list[list[float]]:
+    """文本 embedding 接口。空文本由 caller 过滤,这里不再判空。"""
+    url = f"{_DASHSCOPE_API_BASE}/text-embedding/text-embedding"
+    payload: dict[str, Any] = {
+        "model": model_short,
+        "input": {"texts": texts},
+    }
+    resp = await client.post(
+        url,
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=_HTTP_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    embeddings = ((data or {}).get("output") or {}).get("embeddings") or []
+    # 按 text_index 排序,确保与 input.texts 对齐
+    out: list[list[float]] = [[] for _ in texts]
+    for item in embeddings:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("text_index", -1)
+        emb = item.get("embedding")
+        if isinstance(idx, int) and 0 <= idx < len(out) and isinstance(emb, list):
+            out[idx] = [float(x) for x in emb]
+    return out
+
+
+async def _call_multimodal_embedding(
+    client: httpx.AsyncClient,
+    *,
+    model_short: str,
+    texts: list[str],
+    api_key: str,
+) -> list[list[float]]:
+    """多模态 embedding 接口。这里只走 text 子项;图像 / 视频暂不支持。"""
+    url = f"{_DASHSCOPE_API_BASE}/multimodal-embedding/multimodal-embedding"
+    contents = [{"text": t} for t in texts]
+    payload: dict[str, Any] = {
+        "model": model_short,
+        "input": {"contents": contents},
+    }
+    resp = await client.post(
+        url,
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=_HTTP_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    embeddings = ((data or {}).get("output") or {}).get("embeddings") or []
+    out: list[list[float]] = [[] for _ in texts]
+    for item in embeddings:
+        if not isinstance(item, dict):
+            continue
+        # 兼容 index / text_index 两种字段名(不同模型返回略不同)
+        idx_raw = item.get("index", item.get("text_index", -1))
+        emb = item.get("embedding")
+        if isinstance(idx_raw, int) and 0 <= idx_raw < len(out) and isinstance(emb, list):
+            out[idx_raw] = [float(x) for x in emb]
+    return out
 
 
 async def embed_texts(
@@ -73,58 +148,66 @@ async def embed_texts(
     """批量把文本转向量。
 
     顺序与输入对齐,失败位置用全零向量占位。空 / None 文本也输出全零。
-    DashScope 一次最多 25 条,内部自动分批串行调用(并发开销 < 模型 RT)。
+    按模型名路由到 ``text-embedding`` 或 ``multimodal-embedding`` 接口。
 
     失败语义:任意一批失败,该批所有位置全零 + log warning,**不抛**。
     """
     if not texts:
         return []
+    _ = user_id  # token_usage 暂不记账 embedding,保留参数兼容
     model = model or settings.embedding_model
-    route_model, api_base = _route_for_embedding(model)
+    model_short = _strip_provider(model)
+    multimodal = _is_multimodal(model_short)
+    batch_size = _VISION_BATCH_SIZE if multimodal else _TEXT_BATCH_SIZE
     out: list[list[float]] = []
-    for start in range(0, len(texts), _BATCH_SIZE):
-        batch = texts[start : start + _BATCH_SIZE]
-        # 过滤空文本:DashScope 对空串报 400;空位用全零占位,后面合并时按索引对齐
-        non_empty_idx = [i for i, t in enumerate(batch) if isinstance(t, str) and t.strip()]
-        non_empty_texts = [batch[i] for i in non_empty_idx]
-        batch_out: list[list[float]] = [_zero_vec()] * len(batch)
-        if not non_empty_texts:
+    async with httpx.AsyncClient() as client:
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            # 过滤空文本,占位全零保持顺序
+            non_empty_idx = [
+                i for i, t in enumerate(batch) if isinstance(t, str) and t.strip()
+            ]
+            non_empty_texts = [batch[i].strip() for i in non_empty_idx]
+            batch_out: list[list[float]] = [_zero_vec()] * len(batch)
+            if not non_empty_texts:
+                out.extend(batch_out)
+                continue
+            try:
+                if multimodal:
+                    vecs = await _call_multimodal_embedding(
+                        client,
+                        model_short=model_short,
+                        texts=non_empty_texts,
+                        api_key=api_key,
+                    )
+                else:
+                    vecs = await _call_text_embedding(
+                        client,
+                        model_short=model_short,
+                        texts=non_empty_texts,
+                        api_key=api_key,
+                    )
+                for local_i, vec in enumerate(vecs):
+                    if vec:
+                        batch_out[non_empty_idx[local_i]] = vec
+            except httpx.HTTPStatusError as e:
+                log.warning(
+                    "embedding_batch_failed_fallback_zero",
+                    project_id=project_id,
+                    model=model,
+                    batch_size=len(non_empty_texts),
+                    status_code=e.response.status_code,
+                    error=e.response.text[:500],
+                )
+            except Exception as e:
+                log.warning(
+                    "embedding_batch_failed_fallback_zero",
+                    project_id=project_id,
+                    model=model,
+                    batch_size=len(non_empty_texts),
+                    error=repr(e),
+                )
             out.extend(batch_out)
-            continue
-        try:
-            kwargs: dict[str, Any] = {
-                "model": route_model,
-                "input": non_empty_texts,
-                "api_key": api_key,
-            }
-            if api_base is not None:
-                kwargs["api_base"] = api_base
-            if user_id is not None:
-                kwargs["user"] = str(user_id)
-            resp = await litellm.aembedding(**kwargs)
-            data = resp["data"] if isinstance(resp, dict) else resp.data
-            # data 按 input 顺序回,每项 {embedding: list[float], index: int}
-            actual_dim: int | None = None
-            for local_i, item in enumerate(data):
-                emb = item["embedding"] if isinstance(item, dict) else item.embedding
-                if not isinstance(emb, list):
-                    continue
-                if actual_dim is None:
-                    actual_dim = len(emb)
-                # 接受任意维度,但同批次内维度必须一致(否则下游 cosine 算不出)
-                if len(emb) != actual_dim:
-                    continue
-                batch_out[non_empty_idx[local_i]] = [float(x) for x in emb]
-        except Exception as e:
-            log.warning(
-                "embedding_batch_failed_fallback_zero",
-                project_id=project_id,
-                model=model,
-                route_model=route_model,
-                batch_size=len(non_empty_texts),
-                error=repr(e),
-            )
-        out.extend(batch_out)
     return out
 
 

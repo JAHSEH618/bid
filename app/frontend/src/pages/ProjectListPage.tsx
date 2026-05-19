@@ -3,6 +3,7 @@ import { Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useDeleteProject, useProjects } from '@/api/projects'
+import { readApiError } from '@/lib/apiFetch'
 import { useCurrentUser } from '@/hooks/useAuth'
 import { useToast } from '@/hooks/useToast'
 import { confirmDialog } from '@/components/ConfirmDialog'
@@ -96,8 +97,14 @@ export function ProjectListPage() {
     try {
       await remove.mutateAsync(project.id)
       toast({ title: '已删除', variant: 'success' })
-    } catch {
-      toast({ title: '删除失败', variant: 'destructive' })
+    } catch (err) {
+      // D-ER:把后端 409(项目处于运行 / 等待用户输入态)的详细原因告诉用户,
+      // 不要只 toast「删除失败」让人以为按钮没反应
+      toast({
+        title: '删除失败',
+        description: readApiError(err, '请稍后重试'),
+        variant: 'destructive',
+      })
     }
   }
 
@@ -208,11 +215,17 @@ export function ProjectListPage() {
                   </div>
                 </Link>
                 {canDelete && (
-                  <div className="absolute bottom-6 right-2">
+                  <div className="absolute bottom-6 right-2 z-10">
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => handleDelete(p)}
+                      onClick={(e) => {
+                        // D-ER:删除按钮叠在整行 Link 上,必须阻止事件冒泡 +
+                        // 默认行为,否则 React Router 会拦下 click 跳到项目页
+                        e.preventDefault()
+                        e.stopPropagation()
+                        void handleDelete(p)
+                      }}
                       disabled={remove.isPending}
                       className="text-mute hover:text-destructive"
                     >
